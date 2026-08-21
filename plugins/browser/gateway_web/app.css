@@ -1,0 +1,28 @@
+/* botainer gateway viewer — minimal chrome around the RFB canvas. External
+ * file (not inline) so `style-src 'self'` holds with no nonces. */
+html, body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    background: #1a1a1a;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+#status {
+    box-sizing: border-box;
+    width: 100%;
+    padding: 4px 10px;
+    font-size: 13px;
+    color: #ddd;
+    background: #333;
+}
+#status.connected { background: #1e4620; }
+#status.failed { background: #5c1a1a; font-weight: bold; }
+#screen {
+    /* Fill everything below the status bar; RFB scales into it. */
+    position: absolute;
+    top: 26px;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    overflow: hidden;
+}

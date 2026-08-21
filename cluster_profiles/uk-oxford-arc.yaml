@@ -1,0 +1,279 @@
+# University of Oxford Advanced Research Computing (ARC).
+# https://arc-user-guide.readthedocs.io/
+#
+# NOT RUN ON HARDWARE. Transcribed from public documentation (fetched
+# 2026-07-29; see verification.source below for exact pages).
+#
+# Oxford ARC is TWO federated Slurm clusters sharing one account/login
+# system, not one homogeneous cluster:
+#   - arc: large-scale parallel (CPU only), login arc-login.arc.ox.ac.uk
+#   - htc: high-throughput / heterogeneous, incl. all the GPUs,
+#          login htc-login.arc.ox.ac.uk
+# Both expose the SAME partition names (short/medium/long/devel/
+# interactive, +legacy on arc only), but the node hardware behind each
+# name differs by cluster. This profile can't represent "short" once
+# with two different resource ceilings, so partitions are keyed
+# `arc-<name>` / `htc-<name>`. THE REAL SLURM PARTITION NAME IS THE
+# SUFFIX — e.g. `#SBATCH --partition=short` plus `#SBATCH --clusters=htc`
+# (or just being logged into htc-login, which is the default if you
+# don't pass --clusters). See agent_hints.preamble.
+
+version: cluster-profile-v1
+
+verification:
+  status: from-public-docs
+  last_checked: "2026-07-29"
+  source: >
+    https://arc-user-guide.readthedocs.io/en/latest/job-scheduling.html ,
+    https://arc-user-guide.readthedocs.io/en/latest/arc-systems.html ,
+    https://arc-user-guide.readthedocs.io/en/latest/arc-storage.html ,
+    https://arc-user-guide.readthedocs.io/en/latest/arc-software.html ,
+    https://arc-user-guide.readthedocs.io/en/latest/connecting-to-arc.html ,
+    https://arc-user-guide.readthedocs.io/en/latest/general-faq.html ,
+    https://arc-user-guide.readthedocs.io/en/latest/slurm-faq.html
+    (cross-checked against the doc source at
+    github.com/oxford-arc/arc-user-guide for exact table transcription).
+    NOT STATED anywhere in these pages: any Lmod-specific bootstrap path
+    (docs only describe a generic `module` command, implementation
+    unnamed); Apptainer/Singularity availability, version, or cache
+    convention (never mentioned); outbound/internet network policy for
+    compute nodes (never mentioned either way).
+
+cluster:
+  name: oxford-arc
+  aliases: ["arc"]   # what $SLURM_CLUSTER_NAME / $LMOD_SYSHOST report
+  hostname_patterns:
+    - "arc-login*"
+    - "htc-login*"
+    - "arc-c*"      # arc compute nodes, e.g. arc-c046 (matches from inside a job)
+    - "htc-c*"      # htc CPU compute nodes, e.g. htc-c005
+    - "htc-g*"      # htc GPU compute nodes, e.g. htc-g010
+  description: >
+    University of Oxford ARC: two federated Slurm clusters, "arc"
+    (large-scale parallel, CPU-only) and "htc" (high-throughput,
+    heterogeneous, all GPU nodes). AlmaLinux 9.
+
+lmod:
+  # Docs confirm a `module` command (spider/load/list/unload, EasyBuild-
+  # built software) but never name Lmod specifically or give an init/
+  # bootstrap script path — so this is left blank rather than guessed.
+  # `command -v module` on a login node will show the real init script.
+  bootstrap: ""
+
+slurm:
+  # "short" is the one partition name that behaves identically enough on
+  # both clusters (1h default / 12h max on both) to be a safe universal
+  # default; it's also what you land in by default on either login node.
+  default_partition: arc-short
+  default_account: ""
+  default_time_minutes: 60
+  partitions:
+    # ── arc cluster (CPU only; login arc-login.arc.ox.ac.uk) ──
+    # Docs confirm the fleet is 262x 48-core/384GB nodes (Cascade Lake)
+    # PLUS 10x 288-core/2.3TB nodes (Zen5c/Turin), and node-count math in
+    # the short/medium/long partition table (e.g. 267 nodes / 15,216
+    # cores for "short") only works if all 10 big nodes are included in
+    # every one of those partitions. max_cpus/max_memory_gb below are
+    # therefore the TRUE ceiling, but it's a rare ceiling: ~97% of arc
+    # nodes are the 48-core/384GB type, so budget for that as the
+    # realistic case and treat 288/2300 as "possible, not typical."
+    arc-short:
+      max_time_minutes: 720          # 12h, documented max
+      max_cpus: 288
+      max_memory_gb: 2300
+    arc-medium:
+      max_time_minutes: 2880         # 2 days, documented max
+      max_cpus: 288
+      max_memory_gb: 2300
+    arc-long:
+      # Docs literally say "unlimited" max run time — no finite cap to
+      # record, so max_time_minutes is omitted rather than inventing a
+      # large number. Default run time (if you don't set --time) is 1 day.
+      max_cpus: 288
+      max_memory_gb: 2300
+    arc-devel:
+      max_time_minutes: 10           # batch-job testing only
+      max_cpus: 48
+      max_memory_gb: 384
+    arc-interactive:
+      # Docs DISAGREE with themselves here: job-scheduling.rst's general
+      # partition summary says interactive's max run time is 24h, but the
+      # detailed per-cluster resource table (arc-systems.html) says
+      # 1h default / 4h max for both arc-interactive and htc-interactive.
+      # Using the more specific (and more recently detailed) table's
+      # figure; verify with `sinfo -p interactive` if this matters to you.
+      max_time_minutes: 240
+      max_cpus: 48
+      max_memory_gb: 384
+    arc-legacy:
+      # CentOS 8.1 nodes kept for legacy-app compatibility; access is
+      # restricted to users who need it. The resource table gives this
+      # partition the same "10 minutes" max run time as devel, which
+      # looks like it may be a copy/paste artifact in the source docs
+      # (a legacy-compat partition capped at 10 minutes is an odd
+      # design) — transcribed as documented since this can't be verified
+      # without hardware access. max_memory_gb is not stated for this
+      # partition anywhere, so it is omitted rather than assumed.
+      max_time_minutes: 10
+      max_cpus: 48
+    # ── htc cluster (heterogeneous CPU + all GPU nodes;
+    #    login htc-login.arc.ox.ac.uk) ──
+    # max_cpus/max_memory_gb reflect the true ceiling within each
+    # partition's documented node range: the range includes both a
+    # 168-core/2.3TB node group (htc-c048-055) and the two dedicated
+    # 96-core/3TB high-memory nodes (htc-c005-006, explicitly called out
+    # in job-scheduling.rst as "the 3TB limit on the HTC nodes" /
+    # "--mem=3000G to use one of these"). Most htc nodes are far smaller
+    # (down to 8 cores / 128GB) — see arc-systems.html's per-node table
+    # for the full breakdown.
+    htc-short:
+      max_time_minutes: 720
+      max_cpus: 168
+      max_memory_gb: 3000
+      # GPU types per the partition's own documented breakdown. NOTE:
+      # the node ranges listed for this partition (e.g. htc-g050-060)
+      # also cover nodes the separate hardware table identifies as
+      # RTXA6000/H100-bearing, which this partition's own GPU-count
+      # bullet list does NOT mention alongside the others — an
+      # inconsistency in Oxford's own docs, not resolved here. Verify
+      # with `sinfo -p short -o '%n %G'` (on htc-login) before assuming
+      # --gres=gpu:h100 works in this partition.
+      gpu_types: [v100, a100, rtx8000, rtxa6000, p100, rtx, l40s]
+    htc-medium:
+      max_time_minutes: 2880
+      max_cpus: 168
+      max_memory_gb: 3000
+      gpu_types: [v100, a100, rtx8000, l40s]
+    htc-long:
+      # Also documented as "unlimited" max run time; omitted, see arc-long.
+      max_cpus: 168
+      max_memory_gb: 3000
+      gpu_types: [v100, a100, rtx8000, l40s]
+    htc-devel:
+      max_time_minutes: 10
+      max_cpus: 40
+      max_memory_gb: 512
+      gpu_types: [v100]
+    htc-interactive:
+      # Same 24h-vs-4h documentation conflict noted under arc-interactive.
+      max_time_minutes: 240
+      max_cpus: 40
+      max_memory_gb: 512
+      gpu_types: [v100]
+
+scratch:
+  # Docs are explicit and unambiguous: $SCRATCH (shared, per-job) and
+  # $TMPDIR (node-local, per-job) are BOTH deleted at job exit, not on a
+  # time-based schedule — "Both $SCRATCH and $TMPDIR are not persistent;
+  # they will be automatically removed on job exit" (arc-storage.html),
+  # with an explicit warning that ARC "will not be able to recover your
+  # data" left there after a job finishes. That's a job-lifecycle purge,
+  # not a days-based one, so per this project's no-guessing rule there is no
+  # safe path template or day count to record here — inventing either
+  # would misrepresent a "gone the moment your job ends" filesystem as a
+  # "you have N days" one. Durable storage is $DATA (see agent_hints).
+  template: ""
+  auto_cleanup_days: 0
+
+apptainer:
+  # Apptainer/Singularity is never mentioned in the public ARC User
+  # Guide — presence, version, and module name are all UNVERIFIED. Most
+  # modern Slurm HPC sites do ship it, so this is a plausible default,
+  # not a confirmed one; check `module spider apptainer` (or singularity)
+  # from an interactive node before relying on it.
+  # Cache dir points at $DATA (5 TiB, per-project quota) rather than
+  # $HOME (only 15 GiB quota, confirmed in arc-storage.html) — container
+  # image/layer caches are exactly the kind of thing that silently blows
+  # a 15 GiB home quota.
+  cachedir: "${DATA}/.apptainer/cache"
+  prebuilt_url: ""
+
+modules:
+  denylist: []
+  always_load: []
+
+policy:
+  # NOT documented either way: the public docs never state whether htc/
+  # arc compute nodes have outbound internet access. Left false (i.e.
+  # "don't refuse network capability requests") because there's no
+  # documented restriction to enforce — but this is an absence of
+  # evidence, not evidence of unrestricted access. See agent_hints:
+  # the agent should treat outbound internet from a compute job as
+  # unconfirmed and test it early rather than assume `pip install` works.
+  refuse_network: false
+
+agent_hints:
+  preamble: |
+    You are on University of Oxford ARC. This is TWO Slurm clusters
+    sharing one account system, not one cluster:
+      - arc:  large-scale parallel, CPU only, login arc-login.arc.ox.ac.uk
+      - htc:  high-throughput, heterogeneous, ALL the GPUs, login
+              htc-login.arc.ox.ac.uk
+    Which cluster your job lands on defaults to which login node you're
+    on; override explicitly with `#SBATCH --clusters=arc` or `=htc`
+    (or `--clusters=all` to run on whichever is free first). GPUs only
+    exist on htc — if you need one, target htc regardless of which
+    login node you started from.
+
+    Partitions (same names on both clusters, different hardware behind
+    them — see the partitions table above for exact per-cluster caps):
+      - short (1h default / 12h max), medium (12h / 2 days),
+        long (1 day default / documented as UNLIMITED max — no cap to
+        plan around, but don't assume that means no queue-time cost).
+      - devel: 10 MINUTES max, batch-job testing only — do not use this
+        for real work.
+      - interactive: use this (never the login node) for building
+        software or pre/post-processing. Docs disagree with themselves
+        on its max time (one page says 24h, the detailed resource table
+        says 4h) — plan for the shorter number.
+      - legacy (arc only): CentOS 8.1 compatibility nodes, access
+        restricted to users who need legacy software; documented at a
+        suspiciously short 10-minute cap — verify before relying on it.
+
+    LOGIN NODE TRAP: user processes on login nodes are capped at 1 hour
+    of CPU time by explicit policy. Login nodes are for editing and
+    submitting jobs only — anything computational (including software
+    builds) goes on an interactive-partition node via `srun -p
+    interactive --pty /bin/bash`, or it will get killed.
+
+    Storage and the real data-loss trap:
+      - $HOME (/home/<user>): 15 GiB quota. Code and configs only —
+        this is small enough that a conda/pip cache alone can blow it.
+      - $DATA (/data/<project>/<user>): 5 TiB quota, SHARED across your
+        whole project group. This is where anything you need to keep
+        goes, and it is the only place with any quota headroom.
+      - $SCRATCH (shared) and $TMPDIR (node-local): created per job,
+        and BOTH ARE WIPED THE MOMENT THE JOB EXITS — not after N days,
+        immediately at job end. There is no grace period. Copy anything
+        you want to keep back to $DATA before the job finishes, and for
+        long-running jobs, copy intermediate results back periodically
+        (trap SIGINT/an impending-timeout signal to force a final copy).
+      - ARC keeps NO backups of any of this. Home/project dirs have
+        hourly/daily/weekly snapshots for accidental-deletion recovery
+        only (weekly snapshots kept ~2 weeks) — that is not a backup
+        and won't survive real data loss.
+
+    Budget: usage is metered as "credit" (`mybalance` to check). A job
+    held with reason JobHeldUser means the project is out of credit, not
+    that anything is wrong with the job itself.
+
+    GPUs (htc cluster only): request with `--gres=gpu:<type>:<n>` (e.g.
+    `--gres=gpu:v100:1`) or `--gres=gpu:<n>` for any type. Documented
+    type strings: p100, v100, rtx (Titan RTX), rtx8000, a100. H100/L40S/
+    RTXA6000/GH200/MI210 nodes physically exist per the hardware tables
+    but their exact --gres type strings are NOT confirmed in the docs
+    text — verify with `sinfo -p <partition> -o '%n %G'` before
+    depending on one.
+
+    Network: the public docs say NOTHING about whether compute nodes
+    have outbound internet access, in either direction. Don't assume
+    `pip install` / `git clone` / downloading a model checkpoint works
+    from inside a job — test it with a small job early, before relying
+    on it in something long-running.
+
+    Software: modules via `module load <name>`, `module spider <name>`
+    to search (EasyBuild-based naming, so search is case-insensitive but
+    load is case-sensitive). Run `module spider` from an interactive
+    node, not a login node — login nodes don't have the full module list.
+    Apptainer/Singularity availability is NOT documented publicly;
+    check for it yourself rather than assuming.

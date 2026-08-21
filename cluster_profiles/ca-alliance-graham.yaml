@@ -1,0 +1,129 @@
+# Digital Research Alliance of Canada — "Graham" (University of Waterloo).
+#
+# IMPORTANT — NAME CHANGE: the Graham cluster was retired and replaced by
+# Nibi, a new system at the University of Waterloo, operated by SHARCNET.
+# Per Mila's technical reference (docs.mila.quebec/technical_reference/
+# clusters/drac/), Nibi is "the successor to the legacy Graham cluster.
+# Retains its filesystem." This file is named canada-graham.yaml because
+# that is what was requested, but it documents NIBI — the cluster that is
+# actually live today. There is no separate running system called "Graham"
+# anymore. If you are looking for the old GPU line-up (P100/V100/T4), those
+# numbers described hardware that no longer exists.
+#
+# docs.alliancecan.ca itself could not be fetched directly for this file —
+# every page returned a bot-protection ("Anubis/BotStopper") interstitial to
+# automated fetching, not real content. Everything below is transcribed from
+# secondary public sources that were fetchable: uwaterloo.ca (Waterloo's own
+# announcement), docs.mila.quebec (Mila's technical reference for DRAC
+# clusters, itself sourced from Alliance docs), and web search of Alliance
+# Canada / SHARCNET public pages. See `verification.source` for the list.
+# Numbers NOT explicitly stated by a source (rather than computed by
+# dividing two unrelated totals) are omitted per this task's no-guessing rule.
+
+version: cluster-profile-v1
+
+verification:
+  status: from-public-docs
+  last_checked: "2026-07-29"
+  source: >
+    https://uwaterloo.ca/research/meet-nibi (node/core/GPU/storage totals);
+    https://docs.mila.quebec/technical_reference/clusters/drac/ (Graham->Nibi
+    rename, "retains its filesystem", national $SCRATCH purge policy);
+    web search of alliancecan.ca / SHARCNET pages for the $HOME/$SCRATCH/
+    $PROJECT quota figures and the 60-day scratch purge wording.
+    NOT independently confirmed: docs.alliancecan.ca and status.alliancecan.ca
+    refused automated fetch (bot-protection interstitial); per-node CPU core
+    count for Nibi's CPU-only nodes is NOT stated by any source found (only
+    system-wide totals across mixed node types, which cannot be reliably
+    divided into a per-node number) so max_cpus is omitted below.
+
+cluster:
+  name: ca-alliance-graham
+  aliases: ["graham"]   # what $SLURM_CLUSTER_NAME / $LMOD_SYSHOST report
+  hostname_patterns:
+    - "nibi*"                # current cluster name/login nodes
+    - "graham*"               # legacy name; unverified whether still a live alias
+  description: >
+    Digital Research Alliance of Canada — this profile is requested under the
+    name "Graham" but Graham was retired; it documents NIBI, its successor at
+    the University of Waterloo (700+ nodes, ~134,000-140,000 CPU cores, GPU
+    nodes with 8x NVIDIA H100 each, 25+ PB flash storage). Operated by
+    SHARCNET.
+
+lmod:
+  # Alliance Canada clusters use Lmod, but no documented bootstrap path was
+  # found for Nibi specifically in the sources reachable here.
+  bootstrap: ""
+
+slurm:
+  # No named-partition table for Nibi was found in any reachable source (the
+  # authoritative page would be docs.alliancecan.ca/wiki/Running_jobs, which
+  # is bot-walled to automated fetch). The Alliance's general model schedules
+  # by resource request (--cpus-per-task, --mem, --gres=gpu:...), not a rich
+  # partition menu, so default_partition is deliberately left blank.
+  default_partition: ""
+  default_account: ""
+  default_time_minutes: 180
+  partitions:
+    gpu:
+      # 8x H100 per GPU node is a directly-stated fact (uwaterloo.ca: "GPU-
+      # equipped nodes each with eight H100 Nvidia GPUs"). Per-node CPU core
+      # count and memory are NOT stated anywhere found, so both are omitted
+      # rather than guessed.
+      gpu_types: [h100]
+
+scratch:
+  # National $SCRATCH quota/purge policy applies (per docs.mila.quebec and
+  # corroborating SHARCNET/Alliance secondary sources); Nibi "retains
+  # [Graham's] filesystem" so the path convention should be unchanged.
+  template: "/scratch/${USER}"
+  auto_cleanup_days: 60   # secondary sources: "60 days" / "2 months" (SHARCNET FAQ,
+                           # Alliance-docs summaries); one source said "3 months" —
+                           # noted as a discrepancy, not resolved against a primary page.
+
+apptainer:
+  cachedir: "${SCRATCH}/.apptainer/cache"
+  prebuilt_url: ""
+
+modules:
+  denylist: []
+  always_load: []
+
+policy:
+  # NOT a uniform Alliance-wide policy — the sibling canada-cedar.yaml
+  # (Fir) found docs.mila.quebec's DRAC reference table lists Fir's compute
+  # allocation as "Internet Access: Yes" while the same table marks
+  # Trillium "No" (Narval separately confirms "No" via a direct policy
+  # quote). So this genuinely varies per cluster. Nibi's own setting was NOT
+  # found in any source reachable here — left at the schema default (false)
+  # rather than assumed from the other clusters' majority pattern.
+  refuse_network: false
+
+agent_hints:
+  preamble: |
+    You are on what was called "Graham" — the Digital Research Alliance of
+    Canada cluster at the University of Waterloo. Graham itself was RETIRED;
+    what you are actually running on is its successor, NIBI (SHARCNET-
+    operated), which inherited Graham's filesystem. If tooling or scripts
+    still reference "graham", that is a legacy name — treat this as Nibi.
+
+    Nibi is a large heterogeneous cluster: 700+ nodes, on the order of
+    134,000-140,000 CPU cores total, plus GPU-equipped nodes each carrying
+    8x NVIDIA H100. Exact per-node CPU/memory limits were not available from
+    a reachable public source at write time — request only what your task
+    actually needs and expect the scheduler to enforce real limits beyond
+    what's recorded here.
+
+    Filesystems (national Alliance convention; verify locally if in doubt):
+    - $HOME — small (~50 GB), backed up. Code and configs only.
+    - $SCRATCH (/scratch/<user>) — the large working area. PURGED: files not
+      accessed/modified in roughly 2 months (60 days) are deleted. Do not
+      treat scratch as durable.
+    - $PROJECT — durable, quota-managed group space (order of 1 TB,
+      expandable by request). Put anything you cannot regenerate here.
+
+    Submission is via Slurm (sbatch/salloc), using resource requests
+    (--cpus-per-task, --mem, --gres=gpu:h100:N) rather than a rich named-
+    partition menu — check `sinfo`/`sbatch --help` on the actual login node
+    for what's currently offered, since this profile could not confirm a
+    partition table against a live source.

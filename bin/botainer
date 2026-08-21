@@ -1,0 +1,23 @@
+#!/usr/bin/env python3
+"""Entry shim for the botainer launcher.
+
+This shim exists so the project can be run from a checkout without a pip install.
+After `pip install`, the `botainer` console script (defined in pyproject.toml)
+becomes the canonical entry point and this shim is unnecessary.
+"""
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
+
+# When run from a checkout, ensure the package on disk is importable.
+_HERE = Path(__file__).resolve().parent
+_REPO_ROOT = _HERE.parent
+if (_REPO_ROOT / "botainer" / "__init__.py").exists():
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from botainer.cli.main import main  # noqa: E402
+
+if __name__ == "__main__":
+    sys.exit(main())

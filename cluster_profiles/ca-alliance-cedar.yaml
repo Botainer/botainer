@@ -1,0 +1,185 @@
+# Digital Research Alliance of Canada — "Cedar" (Simon Fraser University).
+#
+# IMPORTANT — RETIREMENT: Cedar's own wiki page carries the banner
+# "Availability: SERVICE ENDS 2025 SEPTEMBER 12" (quoted verbatim, fetched
+# directly from docs.alliancecan.ca/wiki/Cedar). Cedar has been replaced by
+# FIR, a new cluster at the same site (SFU's "Cedar Supercomputing Centre"),
+# available since 2025-08-11. Fir's own wiki page states its InfiniBand
+# network "delivers more than twice the performance of the previous-
+# generation Cedar cluster" — i.e. Fir is Cedar's acknowledged successor.
+# Public reporting (SFU News, Sept 2025) states Fir "replaces the Cedar
+# supercomputer" and that "files stored on Cedar are already available on
+# Fir because the two clusters share the same file systems."
+#
+# This file is named canada-cedar.yaml because that is what was requested,
+# but — following this repo's existing precedent for retired Alliance
+# clusters (see canada-graham.yaml -> Nibi, canada-niagara.yaml -> Trillium)
+# — it documents FIR, the system actually live today. There is no running
+# "Cedar" to point botainer at anymore.
+#
+# ACCESS NOTE: docs.alliancecan.ca returns an Anubis/BotStopper bot-
+# protection interstitial to ordinary automated fetches (this defeated the
+# canada-graham.yaml / canada-niagara.yaml sessions entirely). This file's
+# content WAS fetched directly from the live wiki pages themselves —
+# docs.alliancecan.ca/wiki/Cedar, /wiki/Fir, /wiki/Storage_and_file_management,
+# /wiki/Running_jobs, /wiki/Apptainer — by requesting them through Google
+# Translate's page-proxy (translate.goog), which fetches and renders the
+# same live page server-side. Numbers are unaffected by translation. This is
+# a materially stronger provenance than the sibling canada-graham.yaml /
+# canada-niagara.yaml files, which had to fall back to secondary sources.
+
+version: cluster-profile-v1
+
+verification:
+  status: from-public-docs
+  last_checked: "2026-07-29"
+  source: >
+    docs.alliancecan.ca/wiki/Cedar (retrieved via translate.goog proxy —
+    direct fetch is bot-walled): "SERVICE ENDS 2025 SEPTEMBER 12" banner,
+    full CPU/GPU node characteristics table, login node cedar.alliancecan.ca,
+    job restriction that jobs cannot be submitted from $HOME;
+    docs.alliancecan.ca/wiki/Fir (same access method): login node
+    fir.alliancecan.ca, available 2025-08-11, 864 CPU nodes (192-core AMD
+    EPYC 9655 Zen 5, 750/768 GB RAM), 160 GPU nodes (48-core AMD EPYC 9454
+    Zen 4, 1125/1152 GB RAM, 4x NVIDIA H100 SXM5 80GB w/ NVLink, ~half MIG-
+    capable), 51 PB DDN Lustre storage, InfiniBand NDR, min job duration 1h
+    (5 min for test jobs), max walltime 7 days, no crontab support, "delivers
+    more than twice the performance of the previous-generation Cedar
+    cluster"; docs.alliancecan.ca/wiki/Storage_and_file_management (same
+    access method): "Files older than 60 days are purged" (verbatim), $HOME
+    50 GB + 500,000 files, $PROJECT 1 TB + 500,000 files/group (expandable to
+    40 TB/group by RAC request, sum across the 4 general-purpose clusters
+    capped at 43 TB); docs.alliancecan.ca/wiki/Running_jobs (same access
+    method): scheduler assigns resources by request rather than named
+    partition ("--partition=default" is treated as equivalent to omitting
+    it), account format def-<sponsor> (rrg-<sponsor> for RAC allocations,
+    corroborated by secondary sources), --time is mandatory;
+    docs.alliancecan.ca/wiki/Apptainer (same access method): APPTAINER_CACHEDIR
+    env var, module load apptainer; docs.mila.quebec/technical_reference/
+    clusters/drac/ (Mila's own DRAC reference, secondary corroboration only):
+    lists Fir's compute allocation with Internet Access = Yes; SFU News
+    (2025-09, sfu.ca) and Alliance status-page search results (status.
+    alliancecan.ca/view_incident, not independently fetchable) corroborating
+    the Cedar->Fir retirement/succession and shared-filesystem claim.
+    NOT independently confirmed: an explicit Lmod bootstrap script path for
+    Fir (Standard_software_environments page describes StdEnv/module load
+    commands but no bootstrap path); whether Cedar's documented "jobs cannot
+    run from $HOME" restriction is restated verbatim on Fir's own page
+    (assumed to still hold as a long-standing Alliance-wide convention, not
+    re-quoted from a Fir-specific source).
+
+cluster:
+  name: ca-alliance-cedar
+  aliases: ["cedar"]   # what $SLURM_CLUSTER_NAME / $LMOD_SYSHOST report
+  hostname_patterns:
+    - "fir*"                  # current cluster name/login node (fir.alliancecan.ca)
+    - "cedar*"                # legacy name; Cedar service ended 2025-09-12
+  description: >
+    Digital Research Alliance of Canada — requested as "Cedar" but Cedar's
+    service ended 2025-09-12; this documents its successor FIR at Simon
+    Fraser University (864 CPU nodes: 2x AMD EPYC 9655 Zen 5, 192 cores each;
+    160 GPU nodes: 4x NVIDIA H100 80GB SXM5 each). Shares Cedar's filesystems.
+
+lmod:
+  # Alliance clusters use Lmod (module load / module spider), but no
+  # documented bootstrap/sourcing script path was found on the pages
+  # reachable here — Fir's own docs describe module commands, not an
+  # initialization path, and Lmod appears to be auto-initialized in the
+  # login shell rather than sourced by the user.
+  bootstrap: ""
+
+slurm:
+  # The Alliance schedules by RESOURCE REQUEST, not a named-partition menu.
+  # Running_jobs (docs.alliancecan.ca, fetched directly): "you should allow
+  # the scheduler to assign a partition to your job based on the resources
+  # it requests"; software that insists on a --partition value should pass
+  # "default", which the docs state is treated identically to omitting it.
+  default_partition: ""
+  default_account: ""
+  # Fir/Running_jobs: "Minimum duration: 1 hour (5 minutes for tests)" — used
+  # as the interactive default rather than an arbitrarily chosen number.
+  default_time_minutes: 60
+  partitions:
+    cpu:
+      max_time_minutes: 10080     # 7 days — Fir wiki: "Maximum walltime: 7 days (168 hours)"
+      max_cpus: 192                # Fir CPU node: 2x AMD EPYC 9655 Zen 5, 192 cores/node
+      max_memory_gb: 768           # Fir CPU node: documented as 750 GB or 768 GB/node; using the higher figure
+    gpu:
+      max_time_minutes: 10080     # same 7-day ceiling; Fir docs state one max walltime, not per-partition
+      max_cpus: 48                 # Fir GPU node: 1x AMD EPYC 9454 Zen 4, 48 cores/node
+      max_memory_gb: 1152          # Fir GPU node: documented as 1125 GB or 1152 GB/node; using the higher figure
+      gpu_types: [h100]            # Fir: 4x NVIDIA H100 SXM5 80GB per GPU node, NVLink-connected
+
+scratch:
+  # National $SCRATCH convention (docs.alliancecan.ca/wiki/Storage_and_file_
+  # management, fetched directly): large per-user quota, not backed up,
+  # shared Lustre. The page itself writes the path as the env var "$SCRATCH"
+  # rather than a literal mount; "/scratch/${USER}" is the resolved form used
+  # consistently by this repo's other Alliance profiles (canada-graham.yaml,
+  # canada-niagara.yaml) and corroborating secondary sources.
+  template: "/scratch/${USER}"
+  auto_cleanup_days: 60   # exact quote: "Files older than 60 days are purged."
+
+apptainer:
+  # docs.alliancecan.ca/wiki/Apptainer (fetched directly): sets
+  # APPTAINER_CACHEDIR to a scratch-based path in its own worked example
+  # ("mkdir -p /scratch/$USER/apptainer/{cache,tmp}"). Following that example
+  # with this profile's ${SCRATCH} template.
+  cachedir: "${SCRATCH}/.apptainer/cache"
+  prebuilt_url: ""
+
+modules:
+  denylist: []
+  always_load: []
+
+policy:
+  # docs.mila.quebec/technical_reference/clusters/drac/ (secondary source)
+  # lists Fir's compute allocation with "Internet Access: Yes" — unlike
+  # Rorqual/Trillium, which the same table marks "No". Not re-confirmed on a
+  # docs.alliancecan.ca page directly, and may describe an allocation-level
+  # setting rather than a hard cluster-wide guarantee either way.
+  refuse_network: false
+
+agent_hints:
+  preamble: |
+    This profile was requested as "Cedar", a Digital Research Alliance of
+    Canada cluster at Simon Fraser University. Cedar's own documentation
+    banner reads "SERVICE ENDS 2025 SEPTEMBER 12" — it has been retired.
+    You are actually running on its successor, FIR (live since 2025-08-11,
+    same site, same shared filesystems). Scripts or humans that still say
+    "cedar" mean this system.
+
+    Hardware: 864 CPU-only nodes (2x AMD EPYC 9655 Zen 5, 192 cores, 750 or
+    768 GB RAM each) and 160 GPU nodes (1x AMD EPYC 9454 Zen 4, 48 cores,
+    1125 or 1152 GB RAM, 4x NVIDIA H100 80GB SXM5 with NVLink each; roughly
+    half of the GPU nodes additionally support MIG partitioning). Storage
+    backend is 51 PB of DDN Lustre. Network is InfiniBand NDR.
+
+    Scheduling: Slurm, via sbatch/salloc, using RESOURCE REQUESTS
+    (--cpus-per-task, --mem, --gres=gpu:h100:N) — there is no rich named-
+    partition menu to pick from; let the scheduler place the job. Jobs need
+    an --account matching your allocation (def-<sponsor> normally,
+    rrg-<sponsor> for competitively-awarded RAC allocations — never hardcode
+    a specific account name here). Minimum job duration is 1 hour (5 minutes
+    is allowed for test jobs); maximum walltime is 7 days (168 hours) — plan
+    checkpointing for anything that might run longer. Historically on Cedar,
+    jobs could not be submitted from within $HOME (only from $PROJECT or
+    $SCRATCH) — treat that as still true unless proven otherwise.
+
+    Filesystems — put things in the RIGHT one, this matters:
+    - $HOME — 50 GB / 500,000-file quota, backed up. Code and configuration
+      only, nothing large or transient.
+    - $SCRATCH (/scratch/<user>) — large quota, NOT backed up. Exact quoted
+      policy: "Files older than 60 days are purged." Use it only for
+      checkpoints, job output, and anything you can regenerate. Anything you
+      cannot afford to lose does not belong here, even briefly past 60 days.
+    - $PROJECT — durable, backed up, group-shared quota (1 TB + 500,000
+      files by default, expandable to 40 TB/group by request, capped at
+      43 TB total across the Alliance's general-purpose clusters). Put
+      datasets and results you need to keep here, not on scratch.
+
+    No Docker on Alliance clusters — use Apptainer instead (`module load
+    apptainer`; build with `apptainer build out.sif docker://...`). Set
+    APPTAINER_CACHEDIR to scratch, not $HOME, before pulling/building large
+    images. Crontab is not supported — do not rely on cron-style scheduling
+    from a login or compute node.

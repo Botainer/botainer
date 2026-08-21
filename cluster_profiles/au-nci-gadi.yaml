@@ -1,0 +1,190 @@
+# NCI Gadi (Australia's National Computational Infrastructure, hosted at ANU).
+# https://opus.nci.org.au/spaces/Help/pages/236880325/Gadi+User+Guide
+#
+# NOT RUN ON HARDWARE. Transcribed from public documentation.
+#
+# *** SCHEDULER: Gadi uses PBS Pro, NOT Slurm. *** Job submission is via
+# `qsub`/`qstat`/`qdel` with PBS directives (`#PBS -l ...`), not
+# sbatch/srun/squeue. The `slurm:` key below is botainer's schema name (the
+# field botainer's launcher reads), but the `partitions` map holds PBS QUEUE
+# names, not Slurm partitions — the same reuse pattern this repo already
+# uses for nersc-perlmutter.yaml (which repurposes the same map for QOS
+# names). `default_partition` here means "default PBS queue".
+
+version: cluster-profile-v1
+
+verification:
+  status: from-public-docs
+  last_checked: "2026-07-29"
+  source: >
+    https://opus.nci.org.au/spaces/Help/pages/236880325/Gadi+User+Guide (index);
+    https://opus.nci.org.au/spaces/Help/pages/236880996/Queue+Structure+on+Gadi
+    (per-queue hardware: CPU model, cores/node, RAM/node, GPU model/count/node,
+    node counts, max total core request per queue);
+    https://opus.nci.org.au/spaces/Help/pages/236881198/Queue+Limits
+    (per-queue schedulable memory ceiling and walltime bands);
+    https://opus.nci.org.au/spaces/Help/pages/477823298/Filesystems
+    (/home 10 GiB quota, /scratch 1 TiB default quota + 3-stage purge,
+    /g/data persistent/not-purged, $PBS_JOBFS and /iointensive node-local).
+    NOT confirmed: whether the module system is Lmod-based (left blank rather
+    than guessed); exact login-node hostname pattern (used the cluster's
+    published name as a glob, not confirmed against a hostname list);
+    `megamembw` queue's max core count — the Queue Structure page states a
+    32-core MINIMUM while the Queue Limits page states a 64-core MAXIMUM for
+    the same queue (possibly physical-cores vs. hyperthreads), so max_cpus is
+    omitted for that queue rather than guessing which figure is the real cap.
+
+cluster:
+  name: gadi
+  hostname_patterns:
+    - "gadi*"                # matches the cluster's published name; not confirmed against a specific login-node hostname list
+  description: >
+    NCI Gadi (Australia's National Computational Infrastructure, ANU).
+    Heterogeneous Cascade Lake / Sapphire Rapids / Broadwell / Skylake CPU
+    queues plus NVIDIA V100 (gpuvolta), A100 (dgxa100), and H200 (gpuhopper)
+    GPU queues. SCHEDULER IS PBS PRO, NOT SLURM.
+
+lmod:
+  # Module system in use is not confirmed as Lmod specifically from the
+  # pages fetched; left blank rather than guessed.
+  bootstrap: ""
+
+slurm:
+  # NOT Slurm — this site runs PBS. The `slurm:` key is this
+  # schema's generic scheduler-map slot (see the header). Declaring it here
+  # is what makes botainer REFUSE to submit rather than emit sbatch at a
+  # PBS cluster; the field defaults to "slurm" if omitted.
+  scheduler: pbs
+  # SCHEDULER NOTE: these are PBS Pro QUEUES, not Slurm partitions (see file
+  # header). default_partition means "default PBS queue".
+  default_partition: normal
+  default_account: ""
+  default_time_minutes: 60
+  partitions:
+    normal:
+      max_time_minutes: 2880        # 48h (smallest job-size tier; shrinks to 5h at max core count)
+      max_cpus: 48                  # per node: 2x 24-core Xeon Platinum 8274
+      max_memory_gb: 190
+    express:
+      max_time_minutes: 1440        # 24h top tier
+      max_cpus: 48
+      max_memory_gb: 190
+    copyq:
+      max_time_minutes: 600         # 10h flat max — data transfer/archive queue; the only queue with real network access
+      max_cpus: 1
+      max_memory_gb: 190
+    hugemem:
+      max_time_minutes: 2880
+      max_cpus: 48
+      max_memory_gb: 1470           # 1.5 TiB Optane DC PMEM + 384 GiB DRAM cache; 1470 is the scheduler-published usable ceiling
+    megamem:
+      max_time_minutes: 2880
+      max_cpus: 48
+      max_memory_gb: 2990           # 3.0 TB Optane DC PMEM + 384 GiB DRAM cache
+    gpuvolta:
+      max_time_minutes: 2880
+      max_cpus: 48                  # per node: 2x 24-core Xeon Platinum 8268; allocated in 12-core (1-GPU) increments
+      max_memory_gb: 382
+      gpu_types: [v100]             # 4x NVIDIA Tesla V100-SXM2-32GB per node, 160 nodes
+    normalsr:
+      max_time_minutes: 2880
+      max_cpus: 104                 # per node: 2x 52-core Xeon Platinum 8470Q
+      max_memory_gb: 500
+    expresssr:
+      max_time_minutes: 1440
+      max_cpus: 104
+      max_memory_gb: 500
+    normalbw:
+      max_time_minutes: 2880
+      max_cpus: 28                  # per node: 2x 14-core Xeon E5-2690v4
+      max_memory_gb: 256            # nodes are 128 OR 256 GiB; used the higher figure, actual ceiling depends which node you land on
+    expressbw:
+      max_time_minutes: 1440
+      max_cpus: 28
+      max_memory_gb: 256
+    hugemembw:
+      max_time_minutes: 2880
+      max_cpus: 28
+      max_memory_gb: 1020           # 1 TiB Broadwell hugemem nodes, 10 total
+    megamembw:
+      max_time_minutes: 2880
+      # max_cpus omitted — Structure page says 32-core MINIMUM, Limits page
+      # says 64-core MAXIMUM for this same queue; contradictory, not resolved.
+      max_memory_gb: 3000           # 3 TiB, 3 nodes total
+    normalsl:
+      max_time_minutes: 2880
+      max_cpus: 32                  # per node: 2x 16-core Xeon Gold 6130, 192 nodes
+      max_memory_gb: 192
+    dgxa100:
+      max_time_minutes: 2880
+      max_cpus: 128                 # per node: 2x 64-core AMD EPYC 7742, only 2 nodes total
+      max_memory_gb: 2000
+      gpu_types: [a100]             # 8x NVIDIA A100-SXM4-80GB per node
+    gpuhopper:
+      max_time_minutes: 2880
+      max_cpus: 48                  # per node: 2x 24-core Xeon Gold 6542Y, 30 nodes
+      max_memory_gb: 1024
+      # gpu_types omitted — hardware is 4x NVIDIA H200-SXM5-141GB per node,
+      # and "h200" is not in this schema's recognised gpu_types vocabulary
+      # (a100, v100, h100, mi250x). Not renamed to a nearby value — that
+      # would misreport the actual card.
+
+scratch:
+  # /scratch is documented as "production data; maintained beyond a job's
+  # lifetime" (i.e. a real working area, not per-job temp space) — this is
+  # the shared+purged scratch this field wants. Purge is a 3-stage process:
+  # files inactive >100 days are moved to a 14-day quarantine, then deleted
+  # if not restored — ~114 days to permanent loss, but production access
+  # effectively ends at 100. Using 100 (the point data becomes at-risk).
+  # /g/data (NOT used here) is explicitly persistent/not-purged — durable
+  # project storage, quota "determined by stakeholder" for contract duration.
+  template: "/scratch/${PROJECT}/${USER}"
+  auto_cleanup_days: 100
+
+apptainer:
+  cachedir: "/scratch/${PROJECT}/${USER}/.apptainer/cache"
+  prebuilt_url: ""
+
+modules:
+  denylist: []
+  always_load: []
+
+policy:
+  refuse_network: false   # not documented as a blanket policy; `copyq` is explicitly carved out for jobs "that need network access", implying other queues restrict it, but no explicit statement was found either way for e.g. `normal`
+
+agent_hints:
+  preamble: |
+    You are on NCI Gadi (Australia's National Computational Infrastructure).
+
+    *** THIS IS PBS PRO, NOT SLURM. *** Submit with `qsub`, monitor with
+    `qstat`, cancel with `qdel`, and use `#PBS -l ...` directives — sbatch/
+    srun/squeue do not exist here. If your task or any tooling assumes
+    Slurm, translate before running anything.
+
+    Queue choice matters and the wrong one wastes allocation: `express`/
+    `expresssr`/`expressbw` cost more per core-hour for faster turnaround
+    and cap out at 24h; `normal`/`normalsr`/`normalbw`/`normalsl` are the
+    default workhorses at up to 48h; `hugemem`/`megamem`(+`bw` variants) are
+    for jobs that genuinely need terabytes of RAM, not a shortcut for more
+    memory per core; `gpuvolta` (V100), `dgxa100` (A100, only 2 nodes
+    system-wide), and `gpuhopper` (H200) are the GPU queues — `dgxa100` in
+    particular is scarce (2 nodes total), don't request it casually.
+    `copyq` is the ONLY queue meant for data transfer / archive / network
+    access, capped at 10 hours and 1 CPU core.
+
+    Walltime tops out at 48 hours on most queues (24h on the express
+    variants, 10h on copyq), and the maximum walltime SHRINKS as you request
+    more cores within the same queue — a big job may be capped well below
+    48h.
+
+    Filesystems:
+    - /home — 10 GiB quota, backed up, no purge. Source code and configs.
+    - /scratch/<project>/<user> — the large working area (1 TiB default
+      project quota, extendable). NOT immediately deleted, but files
+      inactive for more than 100 days are moved into a 14-day quarantine and
+      then permanently deleted if not restored — do not assume it's durable
+      just because it survives longer than a job.
+    - /g/data/<project> — persistent, contract-duration project storage,
+      NOT purged. Put anything you cannot regenerate here.
+    - $PBS_JOBFS and /iointensive — node-local, job-lifetime only; good for
+      hot I/O, gone when the job ends.

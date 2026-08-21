@@ -1,0 +1,207 @@
+# UC Berkeley Savio (Berkeley Research Computing / BRC High Performance
+# Computing).
+# Public docs consulted (2026-07-29), all fetched directly:
+#   https://docs-research-it.berkeley.edu/services/high-performance-computing/user-guide/running-your-jobs/scheduler-config/
+#   https://docs-research-it.berkeley.edu/services/high-performance-computing/user-guide/hardware-config
+#   https://docs-research-it.berkeley.edu/services/high-performance-computing/user-guide/data/storing-data/
+#   https://docs-research-it.berkeley.edu/services/high-performance-computing/user-guide/software/accessing-software/
+#   https://docs-research-it.berkeley.edu/services/high-performance-computing/user-guide/logging-brc-clusters/
+#   https://docs-research-it.berkeley.edu/services/high-performance-computing/user-guide/running-your-jobs/what-resources/
+#
+# NOT RUN ON HARDWARE. Transcribed from public documentation (see above).
+
+version: cluster-profile-v1
+
+verification:
+  status: from-public-docs
+  last_checked: "2026-07-29"
+  source: >-
+    docs-research-it.berkeley.edu/services/high-performance-computing/user-guide/
+    {running-your-jobs/scheduler-config, hardware-config, data/storing-data,
+    software/accessing-software, logging-brc-clusters, running-your-jobs/what-resources}/.
+    Did NOT find: an explicit statement that savio_lowprio jobs are
+    preemptible (the docs describe it only as "low priority" access to
+    hardware you don't otherwise have priority on — preemption is the
+    standard meaning of a "low priority" QoS in Slurm, but that inference is
+    mine, not a quoted vendor claim); an age-based auto-purge policy for
+    /global/scratch (the docs ask users to self-police usage and mention a
+    PLANNED purge policy, not a shipped one with a day count); a documented
+    Apptainer cache-directory recommendation; or a single "the" default
+    partition (which partitions/QoS you can use depends entirely on your
+    FCA/Condo/ICA account — see agent_hints).
+
+cluster:
+  name: us-berkeley-savio
+  aliases: ["savio"]   # what $SLURM_CLUSTER_NAME / $LMOD_SYSHOST report
+  hostname_patterns:
+    - "hpc.brc.berkeley.edu"    # login / front-end
+    - "dtn.brc.berkeley.edu"    # data transfer node
+    - "n0*.savio2"              # compute nodes, confirmed format from the
+    - "n0*.savio3"              # hardware-config table (e.g. n0004.savio3,
+    - "n0*.savio4"              # n0120.savio4)
+  description: "UC Berkeley Savio / BRC HPC (heterogeneous Skylake/Cascade Lake/EPYC nodes; V100/A40/A5000/L40/2080Ti/TITAN-RTX GPUs)"
+
+lmod:
+  # docs-research-it's software page documents `module avail`, `module load`,
+  # `module unload` (Lmod-style commands) but does not name Lmod explicitly
+  # or give a bootstrap script path — it's available by default at login.
+  bootstrap: ""
+
+slurm:
+  # Savio has no single cluster-wide default partition: which partitions and
+  # QoS you can submit to is entirely a function of your account (fc_* =
+  # Faculty Computing Allowance, co_* = Condo, ic_* = Instructional). `savio3`
+  # is used here as a representative current-generation general CPU partition
+  # (the docs use its SU rate, 1.00/core-hour, as the reference point for all
+  # others) — override `default_partition` for your own account in
+  # ~/.botainer/cluster.yaml.
+  default_partition: savio3
+  default_account: ""    # account prefix (fc_/co_/ic_) is per-user; no cluster default
+  # Not vendor-specified as a single number. 60 min is botainer's own
+  # conservative default: well under savio_debug's 3-hour cap and far under
+  # savio_normal's 72-hour cap (see partitions below).
+  default_time_minutes: 60
+  partitions:
+    # EXCLUSIVE vs SHARED (docs are explicit about this): most Savio
+    # partitions assign a node for your job's EXCLUSIVE use — you're billed
+    # for (and should use) all of its cores/memory. The documented
+    # EXCEPTIONS, scheduled per-core/shared, are savio2_htc, savio3_htc,
+    # savio4_htc, savio3_gpu, and savio4_gpu.
+    #
+    # WALLTIME: all partitions below use the `savio_normal` QoS ceiling — 72
+    # hours (4320 min), the common case for FCA/ICA accounts across ALL
+    # partitions. A separate `savio_debug` QoS caps at 3 hours (all
+    # partitions); `savio_long` allows 10 days but ONLY on savio2_htc, capped
+    # at 4 cores/job. Condo accounts get their own per-condo QoS limits (not
+    # modeled here — see `sacctmgr show qos` on the cluster itself).
+    savio3:
+      max_time_minutes: 4320
+      max_cpus: 40           # node range has 32c or 40c variants; 40 is the max
+      max_memory_gb: 96      # consistent 96 GB across both variants
+    savio3_bigmem:
+      max_time_minutes: 4320
+      max_cpus: 40
+      max_memory_gb: 384
+    savio3_htc:
+      # SHARED/per-core partition (see note above), not exclusive-node.
+      max_time_minutes: 4320
+      max_cpus: 40
+      max_memory_gb: 384
+    savio3_xlmem:
+      max_time_minutes: 4320
+      max_cpus: 52           # node range has 32c or 52c variants; 52 is the max
+      max_memory_gb: 1536    # 1.5 TB
+    savio3_gpu:
+      # SHARED/per-core partition. Extremely heterogeneous hardware (node
+      # ranges from 8 to 64 cores and 64 GB to 512 GB RAM depending on which
+      # GPU generation a given node carries) — no single max_cpus/
+      # max_memory_gb figure would be accurate, so both are OMITTED. See the
+      # vendor's hardware-config page for the full per-node-range table.
+      max_time_minutes: 4320
+      gpu_types: [v100, gtx2080ti, titanrtx, a40]
+    savio4_htc:
+      # SHARED/per-core partition.
+      max_time_minutes: 4320
+      max_cpus: 56
+      max_memory_gb: 512     # some nodes in this partition have only 256 GB;
+                              # 512 is the max, not a guaranteed figure
+    savio4_gpu:
+      # SHARED/per-core partition. Heterogeneous: 26 nodes are 32c/512 GB
+      # with 8x RTX A5000, 3 nodes are 64c/792 GB with 8x L40 — max_cpus/
+      # max_memory_gb OMITTED rather than picking one node type's numbers.
+      max_time_minutes: 4320
+      gpu_types: [a5000, l40]
+    savio2:
+      max_time_minutes: 4320
+      max_cpus: 28           # node range has 24c or 28c variants; 28 is the max
+      max_memory_gb: 64
+    savio2_bigmem:
+      max_time_minutes: 4320
+      max_cpus: 24
+      max_memory_gb: 128
+    savio2_htc:
+      # SHARED/per-core partition. Also the ONLY partition eligible for the
+      # savio_long QoS (10 days / 24-00:00:00, but capped at 4 cores/job,
+      # 24 cores total) — not modeled as a separate entry here; see
+      # agent_hints.
+      max_time_minutes: 4320
+      max_cpus: 12
+      max_memory_gb: 128
+    savio2_knl:
+      max_time_minutes: 4320
+      max_cpus: 64
+      max_memory_gb: 188
+
+scratch:
+  # /global/scratch/users/${USER} is real and shared (8.7 PB, Lustre), but the
+  # docs do NOT document an age-based auto-purge with a day count — only
+  # guidance to self-police usage (informally: stay under ~12 TB/user) and a
+  # note that Research IT was, as of the pages checked, still PREPARING to
+  # implement a purge policy, not already running one. Per this profile's
+  # no-guessing rule, an undocumented purge is not claimed: template is left
+  # empty so botainer makes no false "auto-deleted in N days" promise.
+  template: ""
+  auto_cleanup_days: 0
+
+apptainer:
+  # Not vendor-prescribed. Recommended here only to keep large image/cache
+  # layers off the 50 GB home quota; follows the same scratch-relative
+  # convention used by other profiles in this repo.
+  cachedir: "/global/scratch/users/${USER}/.apptainer/cache"
+  prebuilt_url: ""
+
+modules:
+  denylist: []
+  always_load: []
+
+policy:
+  refuse_network: false
+
+agent_hints:
+  preamble: |
+    You are on UC Berkeley Savio (BRC HPC).
+
+    Which partitions and QoS you can use depends on your ACCOUNT, not a
+    cluster-wide default: `fc_*` = Faculty Computing Allowance (a free,
+    exhaustible Service-Unit budget), `co_*` = Condo (a group's purchased
+    hardware share, no SU limit), `ic_*` = Instructional. Run
+    `sacctmgr -p show associations user=$USER format=account,user,partition,qos`
+    to see exactly what you have access to before picking a partition.
+
+    EXCLUSIVE vs SHARED matters for cost: on most partitions (savio2,
+    savio2_bigmem, savio2_knl, savio3, savio3_bigmem, savio3_xlmem, savio4)
+    a job gets a WHOLE NODE and is billed for all of it even if it only uses
+    one core. The exceptions — savio2_htc, savio3_htc, savio4_htc,
+    savio3_gpu, savio4_gpu — schedule per-core/per-GPU, so request only what
+    you need there.
+
+    LOW PRIORITY / PREEMPTIBLE: `savio_lowprio` is a QoS (not a separate
+    partition) that grants access to hardware you don't otherwise have
+    priority on — e.g. an FCA account can reach savio3_gpu/savio4_gpu this
+    way, and a Condo owner can reach any partition this way. Jobs run at LOW
+    priority: normal-priority jobs on that hardware queue ahead of them, and
+    a "low priority" QoS is the standard Slurm shape for a preemptible queue
+    — treat capacity reached via savio_lowprio as revocable, not guaranteed
+    runtime, even though the docs checked for this profile don't spell out
+    preemption in those words.
+
+    Walltime: 72 hours (`savio_normal`) is the common ceiling across every
+    partition for FCA/ICA accounts. `savio_debug` caps at 3 hours. A 10-day
+    QoS (`savio_long`) exists but ONLY on savio2_htc, capped at 4 cores/job.
+
+    Filesystems:
+    - /global/home/users/<user> — 50 GB, backed up. Code, small data.
+    - /global/scratch/users/<user> — the large working area for active
+      compute. NOT auto-purged on any documented schedule (as of the docs
+      checked here) — nothing deletes it for you, so clean up after
+      yourself; Research IT asks users to stay well under multi-TB usage.
+    - /global/home/groups/<group> — FCA groups get 50 GB, Condo groups get
+      200 GB, but it must be explicitly REQUESTED (not provisioned by
+      default) — don't assume it exists for a given group.
+
+    Charging: FCA usage is tracked in Service Units per core-hour, at a
+    partition-specific rate (savio3 = 1.00x is the reference; bigmem/xlmem
+    partitions cost more per core-hour; HTC/GPU partitions bill per-core, not
+    per-node). Condo accounts (`co_*`) have no SU-based limit. Exhausting an
+    FCA blocks further jobs under that account until it's renewed or
+    supplemented.

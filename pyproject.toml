@@ -1,0 +1,271 @@
+[build-system]
+# >=1.27 for PEP 639 (`license` as an SPDX expression + `license-files`),
+# which is how the bundled MPL-2.0 noVNC tree gets declared accurately.
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "botainer"
+version = "0.1.0a4"
+# The one-line subtitle on the PyPI project page, in `pip show`, and in any
+# index listing — the first sentence a stranger reads. Keep it a description of
+# what the tool DOES; per CLAUDE.md a short surface states facts and never
+# renders a safety verdict ("secure", "safe", "sandboxed"). The two named
+# targets are the point of difference and belong here.
+description = "Run AI coding agents (Claude Code, Codex) in containers — Docker on a laptop, Apptainer + Slurm on HPC"
+readme = "README.md"
+requires-python = ">=3.10"
+# botainer's OWN source is Apache-2.0 (LICENSE, verbatim and unmodified — sha256
+# cfc7749b…, so anyone can confirm it was not tampered with; the project
+# copyright lives in NOTICE rather than in the licence text, which is why that
+# hash still checks out). The DISTRIBUTION is not purely Apache-2.0:
+# the sdist, the wheel (via force-include of plugins/) and the build-distrib.sh
+# tarball all carry the vendored noVNC client under MPL-2.0. SPDX `AND` is the
+# PEP 639 idiom for "this distribution contains code under both", which is the
+# accurate statement — it is NOT a dual-license offer.
+# Verified in the built wheel for the MIT era: `License-Expression: MIT AND
+# MPL-2.0` plus all License-File entries in dist-info/licenses/. RE-VERIFY the
+# same way after this change — the expression moved, the mechanism did not.
+# Details: THIRD-PARTY-LICENSES.md; full MPL text: licenses/MPL-2.0.txt.
+license = "Apache-2.0 AND MPL-2.0"
+license-files = ["LICENSE", "NOTICE", "THIRD-PARTY-LICENSES.md", "licenses/*"]
+authors = [{ name = "botainer maintainers" }]
+keywords = [
+  "containers", "ai", "claude", "codex", "docker",
+  "apptainer", "singularity", "slurm", "hpc",
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Science/Research",
+  "Environment :: Console",
+  "Operating System :: MacOS :: MacOS X",
+  "Operating System :: POSIX :: Linux",
+  "Topic :: Software Development",
+  "Topic :: System :: Distributed Computing",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+]
+dependencies = [
+  "pydantic>=2.0",
+  "pyyaml>=6.0",
+  "jsonschema>=4.0",
+  "click>=8.0",
+]
+
+[project.optional-dependencies]
+# The trusted laptop-side browser viewer gateway (Track B,
+# `plugins.browser.viewer_mode: gateway` + `botainer plugin browser gateway`).
+# ONLY gateway users need this — a headless or HPC-only install stays lean.
+# websockify is noVNC's own WS<->TCP proxy. The gateway runs it as a SEPARATE
+# PROCESS: `shutil.which("websockify")` first, falling back to
+# `sys.executable -m websockify` (which is what this extra installs), so it
+# works whether or not the console script landed on PATH. NB it pulls
+# numpy/requests/jwcrypto/redis (websockify's deps; botainer uses none of those
+# features) — which is exactly why it's an opt-in extra, not a core dep.
+# LGPL-3.0: a pip dependency spawned as its own process, never vendored and
+# never linked or imported, so botainer's own license is unaffected. See
+# THIRD-PARTY-LICENSES.md. The command fails loud with this install hint if
+# websockify is absent.
+gateway = [
+  "websockify>=0.12",
+]
+dev = [
+  "pytest>=8.0",
+  "hypothesis>=6.0",
+  "mypy>=1.0",
+  "ruff>=0.5",
+  "types-pyyaml",
+  "types-jsonschema",
+]
+
+[project.scripts]
+botainer = "botainer.cli.main:main"
+
+# These become the sidebar links on the PyPI project page. Changelog and Issues
+# are worth listing separately: for an alpha, "what is broken" and "where do I
+# say so" are the two things a visitor most needs and would otherwise have to
+# find by browsing the repo.
+[project.urls]
+Homepage = "https://github.com/botainer/botainer"
+Repository = "https://github.com/botainer/botainer"
+Changelog = "https://github.com/botainer/botainer/blob/main/CHANGELOG.md"
+Issues = "https://github.com/botainer/botainer/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["botainer"]
+
+# AUDIT (H8): a bare `include = ["plugins/**/*", ...]` list was
+# SILENTLY IGNORED by hatchling because those paths live OUTSIDE the selected
+# `botainer` package — the built wheel shipped only botainer/*, so a normal
+# (non-editable) `pip install` (the default of both shipped installers) yielded
+# find_builtin_plugins_root()==None and list_bundled()==[], and `botainer setup`
+# aborted with "Reinstall botainer". force-include copies the bundled trees to
+# the exact install-time locations the discovery code prefers
+# (botainer/plugins/builtin.py find_builtin_plugins_root → <pkg>/_builtin_plugins;
+# botainer/state/cluster_profile.py _bundled_profiles_root → <pkg>/cluster_profiles).
+[tool.hatch.build.targets.wheel.force-include]
+"plugins" = "botainer/_builtin_plugins"
+"cluster_profiles" = "botainer/cluster_profiles"
+# The wheel carries plugins/ — which means it carries the MPL-2.0 noVNC tree.
+# The attribution has to travel with it, not just with the sdist.
+"THIRD-PARTY-LICENSES.md" = "botainer/THIRD-PARTY-LICENSES.md"
+"licenses" = "botainer/licenses"
+
+[tool.hatch.build.targets.sdist]
+# Source distribution explicitly includes [dist] paths and EXCLUDES
+# personal/internal directories (handoff/, design/, strategy/, private/,
+# external/, tools/dev/, codex-review remnants).
+include = [
+  "botainer/**/*",
+  "plugins/**/*",
+  "cluster_profiles/*.yaml",
+  "examples/*.yaml",
+  # HPC parity: the sdist shipped every example EXCEPT the one
+  # apptainer artefact. mpi-compute.def is the only worked example of the
+  # container format the HPC half of the product actually runs, and
+  # examples/README.md is what explains the directory. Found by the
+  # export-vs-sdist drift check, which is the first thing to compare the two
+  # lists since they were written.
+  "examples/*.def",
+  "examples/README.md",
+  "docs/**/*",
+  "tests/unit/**/*",
+  "tests/integration/**/*",
+  "tests/hostile/**/*",
+  "tests/conftest.py",
+  "tests/__init__.py",
+  "tools/pkg/**/*",
+  "bin/*",
+  "pyproject.toml",
+  "README.md",
+  "LICENSE",
+  "NOTICE",
+  "THIRD-PARTY-LICENSES.md",
+  "licenses/*",
+  "DEPLOY.md",
+  "GETTING_STARTED.md",
+  "GETTING_STARTED-HPC.md",
+  "TROUBLESHOOTING.md",
+  "SECURITY.md",
+  "CHANGELOG.md",
+  "CONTRIBUTING.md",
+  "CLA.md",
+]
+exclude = [
+  "handoff/",
+  "design/",
+  "strategy/",
+  "private/",
+  "external/",
+  "tools/dev/",
+  "tests/manual/",
+  # tests/private/ exercises tools/dev/ — the release machinery, the gates, the
+  # baselines. It cannot ship, because the code it tests does not: an exported
+  # tree containing it would fail its own suite on import. Already unreachable
+  # (the include list above is an allowlist); named here so the intent is
+  # written down rather than inferred.
+  "tests/private/",
+  "v0_0_ref",
+  "CLAUDE.md",
+  "HANDOFF-*.md",
+  "**/__pycache__/",
+  # AUDIT (LOW): internal Claude-session process docs — addressed to
+  # "every future Claude session", with dangling refs into the excluded
+  # private/, handoff/, tools/dev/ dirs. Not user-facing; keep them out of the
+  # distributed sdist. (AGENTS.md also removed from the include list above.)
+  "docs/PROTOCOLS/",
+  "docs/REVIEW-PROTOCOL.md",
+  "AGENTS.md",
+  # Dist audit: two more maintainer-only docs under docs/.
+  # TESTING-0.1.0.md is a development runbook — it assumes the parallel `bot1`
+  # install, drives tools/dev/setup-bot1-parallel.sh, and cites the internal
+  # red-team audit dir. HPC-IMPLEMENTATION-PLAN.md is a work plan ("what's
+  # broken, where, in what order", with file:line). Neither is something a user
+  # follows, and shipping a broken-items plan as release documentation misleads.
+  "docs/TESTING-0.1.0.md",
+  "docs/HPC-IMPLEMENTATION-PLAN.md",
+]
+
+[tool.pytest.ini_options]
+# tests/manual/ is collected only when explicitly named. Routine
+# `pytest tests/` skips it via --ignore. The manual suite contains
+# tests that spawn heavyweight subprocesses (real tmux servers, etc.)
+# whose accumulation across many runs in one container can exhaust
+# the host's process table — see tests/manual/README.md.
+testpaths = ["tests"]
+addopts = "--ignore=tests/manual"
+markers = [
+  "docker: requires real Docker daemon (skipped in container)",
+  "apptainer: requires real Apptainer (skipped in container)",
+  "slurm: requires real Slurm cluster (skipped in container)",
+  "oauth: requires real OAuth network access (skipped in container)",
+  "manual: heavyweight tests that spawn external processes; run explicitly",
+]
+filterwarnings = [
+  "ignore::DeprecationWarning:jsonschema.*",
+  "ignore::DeprecationWarning:click.*",
+]
+
+[tool.mypy]
+python_version = "3.10"
+# Strict-by-default-but-pragmatic. Prototype phase: types are useful where they
+# catch real bugs, not as a religion. Per-module overrides relax checks for
+# closure-heavy modules (policy intersection) without weakening the data-model
+# types (spec.py, capabilities/registry.py).
+strict = true
+warn_return_any = true
+warn_unused_ignores = false
+disallow_untyped_defs = true
+disallow_any_unimported = false
+no_implicit_optional = true
+check_untyped_defs = true
+exclude = [
+  "tests/fixtures/.*",
+  "plugins/.*",     # plugin scripts run as stand-alone; their own typing pass later
+  "tests/.*",       # tests are exempt at v0.1.0 prototype
+]
+
+[[tool.mypy.overrides]]
+module = ["yaml", "jsonschema.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = [
+  "botainer.core.policy",       # closure-heavy intersection helpers
+  "botainer.core.identity",     # prompt_fn callable type
+  "botainer.core.composition",  # mixed dict types from yaml load
+]
+disallow_untyped_defs = false
+disallow_untyped_calls = false
+warn_return_any = false
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = [
+  "E",   # pycodestyle errors
+  "W",   # pycodestyle warnings
+  "F",   # pyflakes
+  "I",   # isort
+  "B",   # bugbear
+  "UP",  # pyupgrade
+  "C4",  # comprehensions
+  "SIM", # simplify
+  "RUF", # ruff-specific
+]
+ignore = [
+  "E501",   # line-too-long (we set 100 but allow longer where readable)
+  "SIM105", # contextlib.suppress is stylistic; raw try/except/pass is fine for chmod best-effort
+  "B904",   # raise X from exc — wrapped Refused exceptions already include the cause in the message
+  "RUF034", # useless if-else — sometimes used for readability
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["B011", "SIM"]

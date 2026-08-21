@@ -1,0 +1,294 @@
+# ARCHER2 (UK National Supercomputing Service; EPCC / HPE Cray EX).
+# https://docs.archer2.ac.uk/
+#
+# NOT RUN ON HARDWARE. Transcribed from public documentation, 2026-07-29.
+#
+# IMPORTANT — ARCHER2 is a TWO-TIER Slurm system: every job submission
+# requires BOTH `--partition=<X>` AND `--qos=<Y>`, and it is the QoS (not
+# the partition) that sets max walltime / max nodes / charging behaviour.
+# The `slurm.partitions` map below is keyed by QoS NAME (because that's
+# where the actual limits live), with the REQUIRED `--partition=` value
+# noted in a comment on each entry. Submitting with a QoS/partition
+# combination other than the ones documented here fails at submit time.
+# This is NOT the same shape as a normal single-axis Slurm cluster
+# (compare cluster_profiles/generic-slurm.yaml) — do not assume
+# `--partition=<qos-name>` works; it does not for most entries below.
+
+version: cluster-profile-v1
+
+verification:
+  status: from-public-docs
+  last_checked: "2026-07-29"
+  source: >-
+    https://docs.archer2.ac.uk/user-guide/scheduler/ (Slurm confirmed;
+    QoS/partition pairing table, node/walltime limits),
+    https://docs.archer2.ac.uk/user-guide/hardware/ (node counts, CPU,
+    memory-per-node; confirms no general-purpose GPU nodes outside the
+    separate GPU Development Platform),
+    https://docs.archer2.ac.uk/user-guide/data/ (home/work/NVMe-scratch
+    paths, backup policy, 28-day NVMe purge, explicit "compute nodes in
+    the standard partition are not connected to the internet" statement;
+    does NOT document a purge policy for the main Lustre /work
+    filesystem — treated as unpurged, no-backup, not auto-cleaned),
+    https://docs.archer2.ac.uk/user-guide/sw-environment/ (Lmod
+    confirmed; does NOT document a bootstrap/init script path — module
+    command is simply available by default),
+    https://docs.archer2.ac.uk/user-guide/containers/ (Singularity is
+    the documented tool name, not Apptainer; does NOT document a cache
+    directory env var convention),
+    https://docs.archer2.ac.uk/user-guide/gpu/ (GPU Development Platform:
+    4 nodes, AMD Instinct MI210, gpu-shd/gpu-exc QoS, explicit "no
+    internet access ... on the GPU nodes" statement),
+    https://docs.archer2.ac.uk/user-guide/analysis/ (serial/data-analysis
+    QoS details, confirms internet-connected transfer tools available
+    there unlike standard/gpu),
+    https://docs.archer2.ac.uk/quick-start/quickstart-users/ (login
+    hostname). Note: https://docs.archer2.ac.uk/user-guide/software/
+    404s; sw-environment/ is the current equivalent page.
+
+cluster:
+  name: uk-epcc-archer2
+  aliases: ["archer2"]   # what $SLURM_CLUSTER_NAME / $LMOD_SYSHOST report
+  hostname_patterns:
+    - "login.archer2.ac.uk"
+    - "*.archer2.ac.uk"
+  description: "ARCHER2 (UK national HPC service, EPCC; HPE Cray EX, AMD EPYC 7742)"
+
+lmod:
+  # Docs confirm Lmod is the module system but do not document a specific
+  # bootstrap/init script path — `module`/`ml` are simply available in the
+  # default login and job environment already. Left blank rather than
+  # guessing a path (e.g. /etc/profile.d/lmod.sh) that isn't documented.
+  bootstrap: ""
+
+slurm:
+  # "standard" is both a valid --partition and the default --qos, so it's
+  # unambiguous as a default even though the schema only has one field.
+  default_partition: standard
+  default_account: ""   # ARCHER2 requires a project/budget code on every
+                         # submission (`--account=<code>`); this is a
+                         # per-user allocation, never a profile default.
+  default_time_minutes: 60   # well within `standard` QoS's 24h cap; short
+                              # enough not to collide with `short` QoS's
+                              # 20-minute cap if the agent picks that instead.
+  partitions:
+    # ── standard partition (AMD EPYC 7742, 128 cores / 256 GB per node) ──
+    # All of the QoS entries below except highmem/serial/gpu-* require
+    # `--partition=standard`.
+    standard:
+      # --partition=standard --qos=standard. Default QoS; max 1024 nodes
+      # per job, max 16 running jobs per user.
+      max_time_minutes: 1440   # 24h
+      max_cpus: 128
+      max_memory_gb: 256
+    short:
+      # --partition=standard --qos=short. Quick testing/debug; max 32 nodes.
+      max_time_minutes: 20
+      max_cpus: 128
+      max_memory_gb: 256
+    long:
+      # --partition=standard --qos=long. Extended runs; max 64 nodes.
+      max_time_minutes: 5760   # 96h
+      max_cpus: 128
+      max_memory_gb: 256
+    taskfarm:
+      # --partition=standard --qos=taskfarm. For many small/independent
+      # jobs bundled together; max 16 nodes.
+      max_time_minutes: 1440   # 24h
+      max_cpus: 128
+      max_memory_gb: 256
+    lowpriority:
+      # --partition=standard --qos=lowpriority. Not charged against CU
+      # budget, but still requires a project with a positive balance to
+      # submit; can be pre-empted. Max 2048 nodes.
+      max_time_minutes: 1440   # 24h
+      max_cpus: 128
+      max_memory_gb: 256
+    largescale:
+      # --partition=standard --qos=largescale. Whole-machine-scale QoS —
+      # docs state a MINIMUM job size of 1025 nodes. Not usable for a
+      # typical single/few-node agent task; included for completeness,
+      # not as something to default to.
+      max_time_minutes: 720    # 12h
+      max_cpus: 128
+      max_memory_gb: 256
+    capabilityday:
+      # --partition=standard --qos=capabilityday. Occasional whole-machine
+      # capability event — docs state a MINIMUM job size of 512 nodes and
+      # a cap of only 2 running jobs system-wide. Not for routine use.
+      max_time_minutes: 180     # 3h
+      max_cpus: 128
+      max_memory_gb: 256
+    # ── highmem partition (same CPU, 512 GB per node; 584 nodes) ──
+    highmem:
+      # --partition=highmem --qos=highmem. Max 256 nodes.
+      max_time_minutes: 1440   # 24h
+      max_cpus: 128
+      max_memory_gb: 512
+    # ── serial partition (data-analysis nodes; the ONE place with ──
+    # ── outbound internet access — see policy.refuse_network below) ──
+    serial:
+      # --partition=serial --qos=serial. Not charged (still needs a
+      # project with positive balance). Docs give the combined cap as
+      # "32 cores and/or 128 GB" per job (shared node, not a full
+      # 128-core/256GB standard node).
+      max_time_minutes: 1440   # 24h
+      max_cpus: 32
+      max_memory_gb: 128
+    # ── gpu partition (GPU Development Platform: 4 nodes, AMD Instinct ──
+    # ── MI210; NO internet access, same as standard — see policy below) ──
+    gpu-shd:
+      # --partition=gpu --qos=gpu-shd. Shared: up to 1 node (fractional
+      # GPU allocation supported, e.g. 1 of 4 GPUs + 8 of 32 cores).
+      max_time_minutes: 720    # 12h
+      max_cpus: 32
+      max_memory_gb: 512
+      gpu_types: [mi210]
+    gpu-exc:
+      # --partition=gpu --qos=gpu-exc. Exclusive: up to 2 whole nodes.
+      # Figures below are PER NODE, not summed across the 2-node cap.
+      max_time_minutes: 720    # 12h
+      max_cpus: 32
+      max_memory_gb: 512
+      gpu_types: [mi210]
+    # NOT included: `reservation` QoS (also --partition=standard). Its
+    # node/time limits are set per pre-arranged reservation, not a fixed
+    # general value, so there is nothing defensible to put in max_time_minutes
+    # / max_cpus / max_memory_gb for it.
+
+scratch:
+  # ARCHER2 has THREE relevant filesystems and the naming is a known trap:
+  #   - /home/<project>/<project>/<user>   — NOT visible on compute nodes
+  #     at all (docs: "the home file systems are not available on the
+  #     compute nodes"). Fully backed up.
+  #   - /work/<project>/<project>/<user>   — main Lustre, 3.4 PB, NO
+  #     backups, and the docs do NOT state any automatic purge policy for
+  #     it. Per this file's no-guessing rule, that means scratch.template
+  #     must NOT point here (no stated purge policy to report).
+  #   - /mnt/lustre/a2fs-nvme/work/<project>/<project>/<user> — a
+  #     SEPARATE solid-state (NVMe) filesystem that also happens to have
+  #     "work" in its path (do not confuse the two). THIS one has an
+  #     explicit, documented, shared purge policy, so it's what
+  #     scratch.template points at below.
+  template: "/mnt/lustre/a2fs-nvme/work/[project-code]/[project-code]/${USER}"
+  # [project-code] is a literal placeholder (ARCHER2 project codes are
+  # assigned per grant, e.g. "e123"; there's no environment variable to
+  # derive it from) — fill it in before use. `botainer hpc info`'s
+  # existence check will report this path as "does not exist" until you
+  # do; that's expected, not a bug in the check.
+  auto_cleanup_days: 28
+  # Docs: "All files that have not been accessed in the last 28 days
+  # being automatically deleted. The script which performs this purge is
+  # run daily." This is ACCESS-time based (atime), not creation-time —
+  # unlike some other sites' scratch purges, merely reading/touching a
+  # file resets its clock.
+
+apptainer:
+  # ARCHER2's own docs only ever say "Singularity", never "Apptainer" —
+  # the binary on ARCHER2 is `singularity`, not `apptainer`. Same
+  # container-runtime family (Apptainer is the post-fork continuation of
+  # Singularity) but don't assume the `apptainer` command name resolves;
+  # check `command -v singularity` first. See agent_hints below too.
+  #
+  # No SINGULARITY_CACHEDIR/APPTAINER_CACHEDIR convention is documented,
+  # so this is left blank rather than guessed.
+  cachedir: ""
+  prebuilt_url: ""   # no ARCHER2-provided prebuilt image documented; the
+                      # docs describe pulling from Docker Hub/Singularity
+                      # Hub directly, or building elsewhere and `scp`-ing
+                      # the .sif in.
+
+modules:
+  denylist: []
+  always_load: []
+
+policy:
+  # Docs (data page): "compute nodes in the standard partition are not
+  # connected to the internet". Docs (gpu page): "There is no internet
+  # access available from the GPU nodes so commands to install python
+  # packages from the internet (e.g. pip3, conda) cannot be used with the
+  # ARCHER2 GPU nodes." The `serial` partition/QoS (data-analysis nodes)
+  # and the login nodes DO have internet access (rclone, scp, Globus,
+  # etc.) — but that is not where agent compute jobs normally run.
+  # LEFT FALSE DELIBERATELY (corrected 2026-07-29).
+  #
+  # `policy.refuse_network` is a botainer POLICY — "do not give this container
+  # network" — i.e. a control WE claim to enforce. It is NOT a description of
+  # the cluster. This profile had it set to true to record a different fact:
+  # that this SITE's compute nodes have no internet egress.
+  #
+  # Two reasons that was wrong:
+  #   1. Category error. The site's egress is an ENVIRONMENT PROPERTY we should
+  #      report and plan around; refuse_network is an ENFORCEMENT CLAIM. A
+  #      profile cannot enforce anything.
+  #   2. The policy is not wired on HPC at all. `apptainer exec` inherits the
+  #      host network namespace, so network.mode=none cannot be honoured —
+  #      adapters/apptainer.py:74 refuses it explicitly rather than pretend.
+  #      Nothing anywhere reads this field. Setting it true asserted a control
+  #      that does not exist, which is the worst kind of security claim.
+  #
+  # The FACT is preserved where it is actually consumed: agent_hints.preamble
+  # below, which reaches the agent and tells it to pre-stage dependencies.
+  # Per-node-type egress deserves a real field; tracked as gap 9 in
+  # DN-021.
+  refuse_network: false
+
+agent_hints:
+  preamble: |
+    You are on ARCHER2 (UK national HPC service, EPCC; HPE Cray EX).
+
+    TWO-TIER SCHEDULING — read this first: every job needs BOTH
+    `--partition=<X>` AND `--qos=<Y>`, and it's the QoS that actually sets
+    your walltime/node limits, not the partition. Valid pairs are:
+      --partition=standard + --qos={standard,short,long,taskfarm,
+                                    lowpriority,largescale,capabilityday}
+      --partition=highmem  + --qos=highmem
+      --partition=serial   + --qos=serial
+      --partition=gpu      + --qos={gpu-shd,gpu-exc}
+    Any other pairing fails at submit time. For routine work, use
+    `--partition=standard --qos=standard` (24h cap, 1024-node cap) or
+    `--qos=short` (20 min cap) for quick tests. `largescale` and
+    `capabilityday` have MINIMUM job sizes of 1025 and 512 nodes
+    respectively — do not use them for small/typical jobs.
+
+    NETWORK — compute nodes in the standard partition and the GPU nodes
+    have NO internet access. `pip install`, `conda install`, `git clone`
+    over https, or anything else that reaches the open internet WILL
+    FAIL (hang or connection-refused) if run from a batch job on those
+    partitions. Install packages ahead of time (build the environment/
+    container image where you DO have internet — e.g. a login node, or
+    hand it off to the host to build) rather than inside the job. The
+    `serial` partition/QoS (data-analysis nodes) and the login nodes are
+    the only places on ARCHER2 with outbound internet access.
+
+    FILESYSTEMS — three, and the naming is a trap:
+    - `/home/<project>/<project>/<user>` — is NOT visible from compute
+      nodes at all. Don't put anything a running job needs to read here.
+    - `/work/<project>/<project>/<user>` — the main Lustre filesystem
+      (3.4 PB). This is where jobs should actually run from. No backups,
+      and no documented automatic purge — but "no backup" does not mean
+      "safe to treat as permanent"; it just isn't auto-deleted on a timer.
+    - `/mnt/lustre/a2fs-nvme/work/<project>/<project>/<user>` — a
+      SEPARATE solid-state (NVMe) scratch filesystem that also has "work"
+      in its path. This one IS auto-purged: any file not ACCESSED
+      (not just "created") in the last 28 days is deleted by a daily
+      sweep. Good for genuinely disposable/fast-I/O intermediate data;
+      don't rely on merely writing a file once to keep it — it must keep
+      being read/touched, or copy final results out to `/work` or `/home`.
+
+    ACCOUNTING — every submission needs a project/budget code
+    (`--account=<code>`); there's no cluster-wide default. `lowpriority`
+    doesn't consume the CU budget but still requires the project to have
+    a positive balance to submit at all.
+
+    MODULES — Lmod is available by default (no bootstrap script needed).
+    Do NOT run `module purge` — ARCHER2's docs explicitly warn this
+    breaks the HPE Cray programming environment; use `module restore` to
+    reset instead.
+
+    CONTAINERS — the tool is called `singularity` here, not `apptainer`
+    (check which command name actually resolves before assuming). Images
+    can be pulled from Docker Hub / Singularity Hub, but remember the
+    network restriction above: that only works from a node with internet
+    access (login node, or the serial partition), not from a standard
+    or gpu batch job.

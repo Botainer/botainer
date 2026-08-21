@@ -1,0 +1,224 @@
+# First-party plugin: browser
+#
+# Gives the agent a HEADLESS web browser (open pages, click, type, read) via the
+# Playwright MCP server. OPT-IN. Requires network (it browses the web). Chromium,
+# its system libraries, and the MCP server are BAKED INTO the agent image (the
+# cage can't apt/npx-install them at runtime — esp. on apptainer). So enabling
+# this plugin also requires the agent image to have been (re)built with browser
+# support: `botainer image build agent-claude`.
+#
+# Enable in .botainer/config.yaml:
+#
+#   network:
+#     mode: internet          # a browser needs internet
+#   plugins_enabled:
+#     - agent-claude
+#     - browser
+#
+# Then just ask the agent to open a page. There is NO visible window (headless).
+# To WATCH the browser live is a separate on-demand viewer — a later phase.
+#
+# SECURITY: the browser runs inside the §4 cage (same isolation as the agent).
+# Chrome's own sandbox can't start under the cage, so it runs `--no-sandbox` — a
+# malicious page exploiting a Chrome bug then gets code-exec INSIDE the cage (same
+# blast radius as an already-compromised agent, a lower bar). That's why this is
+# opt-in and requires internet. See DN-019.
+#
+# ⚠ SECURITY — the LEGACY watchable VIEWER (`viewer: true`, `viewer_mode:
+# legacy`) is a TRUST INVERSION: it has YOUR browser connect to a server INSIDE
+# this untrusted container and load a page it serves. Nothing set server-side
+# (clipboard rules, etc.) is a real boundary — a compromised agent/page could
+# serve hostile code to your browser (clipboard both ways, 127.0.0.1 probing,
+# file/permission dialogs, browser exploits). It is acceptable WITH EYES OPEN:
+# `botainer plugin browser watch` prints a big red warning; open the viewer in a
+# throwaway/private browser window and decline its permission prompts.
+# The fix is `viewer_mode: gateway` (Track B): the container exposes ONLY an
+# authenticated RFB byte-stream; YOUR laptop serves a vendored, pinned noVNC
+# page under a strict CSP with a per-run token and a throwaway browser profile
+# (`botainer plugin browser gateway`). The container serves no code to your
+# browser in that mode. Watching the agent's browser still shows
+# container-controlled PIXELS (phishing risk) — but that's content risk, not
+# code execution. See docs/BROWSER.md + docs/CAPABILITY-SURFACE.md §4av.
+
+apiVersion: botainer-plugin-v1
+name: browser
+version: 0.1.0
+description: |
+  A headless web browser for the agent (Playwright MCP): open pages, click,
+  type, read page text, screenshot. Opt-in; needs network; Chromium is baked
+  into the agent image. Optional `viewer: true` adds a watch-and-log-in window —
+  read the SECURITY note (it is a trust inversion; warned at connect time).
+license: Apache-2.0
+maintainer: botainer
+botainer_min_version: 0.1.0a0
+tier: first-party
+# host_helper because the OPT-IN viewer runs host-side pre/post_session hooks
+# (mint the token, rewrite the mcp_server to headed, unlink the token on teardown).
+# The viewer stack itself runs INSIDE the agent container now — there is NO separate
+# helper container (re-arch 2026-07-13). Headless mode (the default) uses no hook —
+# the mcp server is a plain declarative contribution. trust_required: hooked because
+# the hooks run host-side (first-party, so no extra consent gate).
+kind: host_helper
+trust_required: hooked
+
+runtimes:
+  - docker
+  - apptainer
+
+capabilities:
+  - net.outbound_proxy     # the in-container viewer carries a web (noVNC) endpoint
+
+# The watchable viewer runs as a HOST HELPER — started pre_session, torn down
+# post_session. It only fires when `plugins.browser.viewer: true` (below); the
+# default (headless) uses no hook.
+hooks:
+  - when: pre_session
+    script: hooks/start_viewer.py
+    timeout_seconds: 60
+  - when: post_session
+    script: hooks/stop_viewer.py
+    timeout_seconds: 30
+
+commands:
+  # `botainer plugin browser watch` — print how to open the live viewer (the see-it +
+  # log-in window) for the running session. Rendering only; the viewer helper is
+  # started by the host hook. See commands/watch.py + plan §5b.
+  - name: watch
+    script: commands/watch.py
+    help: "Print how to open the live browser viewer (watch + log in)."
+  # `botainer plugin browser login <url>` — print how to capture a site login on
+  # your OWN machine and hand the session to the agent's browser (credential
+  # handoff — no viewer, no in-container password entry). See commands/login.py.
+  - name: login
+    script: commands/login.py
+    help: "Log a site in for the agent by handing over a saved session (no viewer)."
+  # `botainer plugin browser gateway` — Track B: open the viewer through the
+  # TRUSTED laptop-side gateway (vendored noVNC + strict CSP + per-run token +
+  # throwaway browser profile). Needs `viewer: true` + `viewer_mode: gateway`
+  # (the container then exposes only authenticated RFB). See commands/gateway.py.
+  - name: gateway
+    script: commands/gateway.py
+    help: "Open the live browser viewer via the trusted laptop-side gateway."
+
+contributes:
+  # Envelope for the binds the viewer pre_session hook contributes when
+  # `viewer: true` (see hooks/start_viewer.py). The viewer runs INSIDE the agent
+  # container now (no helper container), so the binds are: the per-session token
+  # (0600, RO) the viewer stack reads, and (apptainer/HPC only) the 0700
+  # node-local dir where the unix sockets live. Without these declared, the strict
+  # envelope check in run_pre_session_hooks refuses the bind.
+  mount_target_prefixes:
+    - /run/viewer-token
+    - /run/viewer
+    - /run/viewer-rfb-pass     # gateway mode: per-session x11vnc RFB password (RO)
+    - /run/browser-auth.json   # credential handoff: the RO storage-state file
+
+  # The governed MCP tool (see plugins/manifest.py::McpServerDecl + CAPABILITY-SURFACE
+  # §4at). The launcher writes this into the agent's --mcp-config at session start.
+  # In headless mode (default) these args stand as-is; when `viewer: true` the
+  # hook DROPS `--headless` (keeping --no-sandbox + --executable-path) so
+  # playwright-mcp launches Chromium HEADED into the viewer's display, which the
+  # human watches over VNC (see hooks/start_viewer.py::rewrite_mcp_for_headed).
+  mcp_servers:
+    - name: browser
+      # Pre-installed binary in the agent image (npm i -g @playwright/mcp) — NOT
+      # `npx` at runtime. The cage has no writable HOME/npm-cache under apptainer,
+      # so a runtime npx download fails; baking it in is what makes this work.
+      # Bin name verified against @playwright/mcp (npm view bin → playwright-mcp).
+      command: playwright-mcp
+      args:
+        - "--headless"        # no visible window (viewer:true → hook DROPS this → headed)
+        - "--no-sandbox"      # Chrome's sandbox can't start under the cage
+        - "--isolated"        # ephemeral profile (no persisted disk profile)
+        # @playwright/mcp DEFAULTS to the Google-Chrome channel (looks for
+        # /opt/google/chrome/chrome), which isn't in the image — and Chrome for
+        # Linux isn't published for arm64 at all. Point it at the image's system
+        # Chromium instead. VERIFIED (empirical MCP-stdio test 2026-07-13): passing
+        # --executable-path OVERRIDES the channel — no "cannot specify both
+        # channel and executablePath" conflict. `--browser` does NOT accept
+        # "chromium", so --executable-path is the lever.
+        - "--executable-path"
+        - "/usr/bin/chromium"
+      # No env needed: the agent image bakes Chromium at
+      # PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers + its system libs, so nothing is
+      # fetched at runtime (that was the old, broken "install at first use" path).
+
+  # HUMAN-facing CLI tips (shown one-at-a-time after commands; full list: `botainer
+  # tips`). Lead with the CAPABILITY + how to turn it on; point to docs for the
+  # security surface rather than cramming a partial warning into a one-liner.
+  # NOTE (2026-07-14): tips state FACTS and POINT to docs — they never render a
+  # safety verdict ("safe"/"safer"). A one-liner can't carry the caveats a security
+  # claim needs; the nuance lives in docs/BROWSER.md + the `browser watch` warning.
+  user_tips:
+    - "Capability: the `browser` plugin gives the agent a real web browser (open
+      pages, click, type, read). Opt-in — add `browser` to `plugins_enabled` and
+      rebuild the agent image. What it can see/do + tradeoffs: docs/BROWSER.md."
+    - "Capability: `plugins.browser.viewer: true` adds a live window to watch and
+      log into the agent's browser; you can also ask the agent for a screenshot to
+      see a page. Both involve container-produced content with real tradeoffs —
+      see docs/BROWSER.md before relying on either."
+
+  agent_hints_section: |
+    ## Web browser — the `browser` tool
+
+    IF a `browser` MCP tool is in your available tools, use it: open a URL, click,
+    type, read the page's text / accessibility snapshot, screenshot. Chromium and
+    the server are already installed in this image — you do NOT need to install
+    anything.
+
+    - DO NOT run `npx playwright install`, `pip install playwright`, or apt-install
+      a browser. This cage has no root/apt, and under apptainer HOME is unwritable,
+      so those WILL fail and waste time. Everything is pre-baked.
+    - If there is NO `browser` tool in your toolset, a driveable browser isn't
+      wired into THIS session (the plugin isn't enabled, or the image wasn't built
+      with browser support). To READ a page, use your web-fetch capability and tell
+      the human. Do not try to hand-install a browser.
+    - Browsing needs network. If this session has no internet, it fails.
+    - Prefer reading the page as text/snapshot over screenshots — cheaper.
+    - You do NOT know whether anyone can SEE this browser — it may be headless
+      (no window, nobody watching) or the human may have a live viewer open. So
+      behave the SAME either way: on any login page or human-only step, NEVER
+      guess or invent credentials and never silently wait. Instead, tell the user
+      in chat that the page needs them, mention they can watch and log in live
+      with `botainer plugin browser watch` (that works when the viewer is on),
+      then STOP and wait for their reply. Don't assume a human is — or isn't —
+      watching.
+
+config_schema:
+  type: object
+  properties:
+    # Opt IN to the watchable viewer: the agent's own Chromium runs HEADED into a
+    # virtual screen inside its container, shared over VNC/noVNC so you can WATCH +
+    # CLICK (e.g. log in). Default false = headless-only (cheaper; no window). See
+    # `botainer plugin browser watch` and hooks/start_viewer.py.
+    viewer:
+      type: boolean
+      default: false
+    # HOW the human reaches the viewer (only meaningful with `viewer: true`):
+    #   legacy  — the in-container noVNC/websockify stack (interim posture; the
+    #             trust inversion above applies, loudly warned at connect time).
+    #   gateway — DEFAULT. The container exposes ONLY an authenticated RFB
+    #             endpoint; your laptop serves a vendored, pinned noVNC page
+    #             under a strict CSP (`botainer plugin browser gateway`). The
+    #             container serves NO code to your browser.
+    #   legacy  — DEPRECATED, removal planned. noVNC is served BY the
+    #             container, so your browser runs code the untrusted container
+    #             supplied. Kept only as an escape hatch while gateway mode
+    #             gets cluster mileage.
+    #
+    # THIS `default:` IS THE AUTHORITY. Two Python readers duplicate it
+    # (hooks/start_viewer.py, botainer/core/composition.py) because plugin hooks
+    # run standalone and cannot import the package;
+    # tests/unit/test_browser_viewer_mode_default.py fails if the three disagree.
+    viewer_mode:
+      type: string
+      enum: [legacy, gateway]
+      default: gateway
+    # Credential HANDOFF (no viewer): a path (absolute, or relative to the project)
+    # to a Playwright storage-state file you captured on YOUR OWN machine — the
+    # agent's browser starts logged in from it. The human's password never enters
+    # the container. Capture it with `botainer plugin browser login <url>`. Keep the
+    # file secret (it's a live session) and out of git. See hooks/start_viewer.py.
+    storage_state:
+      type: string
+  additionalProperties: false

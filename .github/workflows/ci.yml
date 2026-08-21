@@ -1,0 +1,67 @@
+# CI for the PUBLIC repository.
+#
+# Deliberately small. The private repository has a much larger workflow
+# (v0.1.yml) that runs thirteen `tools/dev/` gates — none of which ship, so
+# exporting that file would fail on every push against scripts that do not
+# exist. This one runs only what a clone actually contains.
+#
+# What it proves: the exported tree installs from scratch and its own test suite
+# passes on a machine that is not the maintainer's. That is the claim the README
+# makes, so it is the claim worth checking automatically.
+#
+# What it does NOT prove, and should not pretend to: the suite computes what
+# botainer DECIDES — binds, environment, argv, refusals — without launching a
+# container. GitHub runners have Docker but no Slurm and no Apptainer, and the
+# HPC paths are the ones with the least real-world mileage. A green tick here
+# says the logic is consistent; it does not say the cage holds.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The floor is what pyproject declares (requires-python), and the
+        # ceiling is current. A version that only the maintainer runs is a
+        # version nobody else's failure would be caught on.
+        python-version: ['3.10', '3.13']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # Install the package the way a user would, from this checkout, rather
+      # than adding the source directory to sys.path. An import that only works
+      # because the repo happens to be the working directory is not an install.
+      - name: Install
+        run: python -m pip install --upgrade pip && pip install -e '.[dev]'
+
+      # NO separate version check here. `botainer --version` did print a number
+      # two releases stale once, but the guard for that is
+      # tests/unit/test_version_is_single_sourced.py, which runs in the step
+      # below and compares against pyproject portably. A second copy of the
+      # check in this file would be a second thing to keep in step — the same
+      # shape as the defect it guards against.
+      - name: Tests
+        run: python -m pytest -q --tb=short
+
+# NO LINT JOB, deliberately. `ruff check` against this repo's own
+# [tool.ruff.lint] select-list reports 274 violations today — unsorted imports,
+# unused imports, bugbear findings. A job that is red from the first push is
+# worse than no job: it trains everyone to ignore the tick, so the first REAL
+# failure is invisible too. Clear the backlog, then add the job.

@@ -1,0 +1,171 @@
+# NSCC ASPIRE2A (National Supercomputing Centre, Singapore).
+# https://help.nscc.sg/aspire2a/user-guide/
+# Primary source actually used: "ASPIRE2A General QuickStart Guide" PDF,
+# v1.3, 6 March 2024 — https://help.nscc.sg/wp-content/uploads/2024/05/ASPIRE2A-General-Quickstart-Guide.pdf
+#
+# NOT RUN ON HARDWARE. Transcribed from public documentation.
+#
+# *** SCHEDULER: PBS. *** The QuickStart Guide's own job examples use PBS
+# directives (`#PBS -l select=...`, `#PBS -q normal`) and `qsub`. The guide
+# does not spell out "PBS Pro" by name for THIS system the way NSCC's
+# separate ASPIRE2A+ guide does, but the directive syntax is identical PBS
+# Pro syntax, so it's treated as confirmed. Submission is qsub/qstat, not
+# sbatch/squeue. As with au-nci-gadi.yaml / nersc-perlmutter.yaml, the
+# `slurm:` key below is botainer's schema name; its `partitions` map holds
+# the two real PBS QUEUES ASPIRE2A exposes to users: `normal` and `ai`.
+#
+# NOTE ON A SEPARATE "+" SYSTEM: NSCC also documents a distinct, newer
+# "ASPIRE2A+" system (a 40-node NVIDIA DGX H100 SuperPOD, its own login
+# host aspire2p.nscc.sg, its own QuickStart PDF, using NVIDIA Enroot rather
+# than Apptainer for containers). That is NOT what this file documents —
+# this file is the base ASPIRE2A (AMD EPYC Cray EX system, login host
+# aspire2a.nscc.sg), matching the cluster name requested.
+
+version: cluster-profile-v1
+
+verification:
+  status: from-public-docs
+  last_checked: "2026-07-29"
+  source: >
+    https://help.nscc.sg/wp-content/uploads/2024/05/ASPIRE2A-General-Quickstart-Guide.pdf
+    (fetched and extracted in full, 12 pages, v1.3/6-March-2024): AMD EPYC
+    Cray EX + Slingshot + 10 PB Lustre overview; full compute-node table (7
+    node classes: 768x standard no-GPU, 64x GPU w/ 4x A100-40GB, 12x "AI"
+    w/ 4x A100-40GB + 11 TB NVMe, 6x "AI" w/ 8x A100-40GB + 14 TB NVMe, 12x
+    2 TB large-memory no-GPU, 4x 4 TB large-memory no-GPU, 16x high-frequency
+    EPYC 75F3 no-GPU); login hosts aspire2a.nscc.sg / login.asp2a.nscc.sg
+    (plus stakeholder-specific FQDNs under nus.edu.sg / a-star.edu.sg /
+    sutd.edu.sg / the NTU jumphost, not used as hostname_patterns here since
+    they're on other institutions' domains); only 2 user-facing queues,
+    `normal` (CPU + GPU jobs) and `ai` (request-only access, local NVMe
+    mounted at /raid, fixed 16-CPU + 110 GB-per-GPU ratio); RHEL 8 + Cray
+    PrgEnv modules (`module swap PrgEnv-cray PrgEnv-gnu/8.3.3` etc.); exact
+    quote for quotas: "/home HomeDirectory - 50GB (Total inodes- 400000000)
+    /scratch ScratchDirectory- 100TB (Total inodes- 200000000)"; max memory
+    per chunk explicitly stated as "4TB (4000GB)".
+    NOT FOUND ANYWHERE IN THIS DOCUMENT: any stated maximum walltime for
+    ASPIRE2A jobs (the sibling ASPIRE2A+ guide states 120 h for its own,
+    separate system — NOT reused here since it's a different system);
+    any scratch purge/expiry/auto-deletion policy — the word "purge" does
+    not appear in the guide at all, and a separately-referenced "NSCC Data
+    Management and Retention Policy" document could not be located via the
+    reachable help.nscc.sg pages (404s on guessed URLs, and WebSearch was
+    unavailable — budget exhausted by concurrent session work). Per this
+    task's rule, undocumented purge behavior means scratch.template is left
+    empty rather than asserting a path with unknown purge risk.
+    Confirmation that Apptainer/Singularity (vs. NSCC's other systems using
+    Enroot) is the container runtime on base ASPIRE2A was NOT found in this
+    guide either — left as an unconfirmed default.
+
+cluster:
+  name: aspire2a
+  hostname_patterns:
+    - "aspire2a.nscc.sg"
+    - "login.asp2a.nscc.sg"
+    - "aspire2a*"
+  description: >
+    NSCC ASPIRE2A (Singapore) — AMD EPYC-based HPE/Cray EX supercomputer,
+    Slingshot interconnect, 10 PB Lustre. PBS-scheduled (qsub/qstat), only
+    two user-facing queues (normal, ai). NOT the separate newer "ASPIRE2A+"
+    DGX H100 SuperPOD system, which is a distinct cluster with its own login
+    host and QuickStart guide.
+
+lmod:
+  # Cray Programming Environment modules (`module swap PrgEnv-cray
+  # PrgEnv-gnu/8.3.3` / `PrgEnv-intel/8.3.3`) are confirmed, and Cray systems
+  # are conventionally Lmod-based under the hood, but no explicit bootstrap
+  # script path was stated in the reachable guide — left blank rather than
+  # guessed.
+  bootstrap: ""
+
+slurm:
+  # NOT Slurm — this site runs PBS. The `slurm:` key is this
+  # schema's generic scheduler-map slot (see the header). Declaring it here
+  # is what makes botainer REFUSE to submit rather than emit sbatch at a
+  # PBS cluster; the field defaults to "slurm" if omitted.
+  scheduler: pbs
+  # SCHEDULER NOTE: PBS, not Slurm (see file header). `partitions` below
+  # holds the two real, user-facing PBS QUEUES.
+  default_partition: normal
+  default_account: ""
+  default_time_minutes: 60
+  partitions:
+    normal:
+      # No maximum walltime is stated anywhere in the reachable guide for
+      # this queue — omitted rather than guessed (contrast: the separate
+      # ASPIRE2A+ system's own guide states 120h, but that's a different
+      # cluster and not reused here).
+      max_cpus: 128                # largest node class: dual-socket AMD EPYC 7713, 128 physical cores
+      max_memory_gb: 4000           # explicitly stated: "maximum of 4TB (4000GB) per chunk"
+      gpu_types: [a100]             # `normal` handles both CPU and GPU node jobs; GPU nodes carry 4x NVIDIA A100-40GB
+    ai:
+      # Request-only queue (not granted by default; must be requested at
+      # project submission). Backed by 12x nodes (4x A100-40GB, 11 TB NVMe)
+      # and 6x nodes (8x A100-40GB, 14 TB NVMe, dual-socket 128-core).
+      # Fixed ratio: 16 CPU + 110 GB memory allocated per GPU requested,
+      # regardless of what's asked for.
+      max_cpus: 128
+      max_memory_gb: 1000            # the 6-node AI class has 1 TB RAM (dual-socket); the 12-node class has 512 GB
+      gpu_types: [a100]
+
+scratch:
+  # UNDOCUMENTED PURGE POLICY (see verification.source) — per this task's
+  # rule this means no path is recorded here, even though a real /scratch
+  # quota (100 TB / 200,000,000 inodes per the guide) clearly exists. A
+  # wrong purge assumption here would make botainer emit either a false
+  # warning or wrongly suppress a real one.
+  template: ""
+  auto_cleanup_days: 0
+
+apptainer:
+  cachedir: "${HOME}/.apptainer/cache"   # generic default; container runtime on base ASPIRE2A not confirmed (the sibling ASPIRE2A+ system documents Enroot, not Apptainer)
+  prebuilt_url: ""
+
+modules:
+  denylist: []
+  always_load: []
+
+policy:
+  refuse_network: false   # not documented either way in the reachable guide
+
+agent_hints:
+  preamble: |
+    You are on NSCC ASPIRE2A (Singapore) — an AMD EPYC-based Cray EX
+    supercomputer. This is a DIFFERENT, older/base system from NSCC's newer
+    "ASPIRE2A+" (a separate DGX H100 SuperPOD) — if any tooling or docs say
+    "2A+", that is not this cluster.
+
+    Scheduler is PBS (qsub/qstat/qdel with `#PBS -l select=...` directives),
+    not Slurm. Only two queues are user-facing: `normal` (both CPU-only and
+    GPU jobs; auto-selected if you don't specify -q) and `ai` (dedicated
+    AI/ML nodes with local NVMe mounted at /raid — access must be requested
+    separately at the project level, it is NOT granted by default). Any GPU
+    job gets a fixed resource ratio regardless of what you ask for: 16 CPU
+    cores + 110 GB memory allocated per GPU requested.
+
+    Node hardware varies a lot — check what you're asking for: most compute
+    nodes are dual-socket AMD EPYC 7713 (128 cores, 512 GB RAM, no GPU);
+    GPU nodes carry 4x NVIDIA A100 (40 GB); a small number of AI-dedicated
+    nodes carry 4x or 8x A100 with large local NVMe; a few large-memory
+    nodes go up to 2 TB or 4 TB RAM (no GPU); a small high-frequency pool
+    uses AMD EPYC 75F3 instead. Maximum requestable memory is 4 TB
+    (4000 GB) per chunk. No maximum walltime is documented anywhere
+    reachable for this system — do not assume a specific cap; request only
+    what you actually need and expect the scheduler to enforce a real limit
+    that isn't recorded here.
+
+    Filesystems:
+    - /home — 50 GB quota (400,000,000 inode limit). Code and small
+      configs. Project-shared data goes under /home/project/<ProjectID>/,
+      not personal $HOME.
+    - /scratch — 100 TB quota (200,000,000 inode limit) per the docs, but
+      NO purge/expiry policy could be confirmed from any reachable NSCC
+      page. Do not assume it is either permanent or temporary — check
+      current policy or ask help@nscc.sg before relying on it for anything
+      irreplaceable.
+
+    Software: RHEL 8 with the Cray Programming Environment. Default is
+    PrgEnv-cray; swap to GNU or Intel toolchains with `module swap
+    PrgEnv-cray PrgEnv-gnu/8.3.3` or `.../PrgEnv-intel/8.3.3`. Container
+    runtime support (Apptainer/Singularity vs. something else) was not
+    confirmed from a reachable source for this specific system.

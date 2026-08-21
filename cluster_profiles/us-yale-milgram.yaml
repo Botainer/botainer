@@ -1,0 +1,155 @@
+# Yale Milgram cluster profile.
+# https://docs.ycrc.yale.edu/clusters/milgram/
+#
+# Milgram is YCRC's HIPAA-restricted cluster — for research with
+# sensitive data (clinical, identified human subjects, etc.).
+# Application + approval required; access is gated.
+#
+# ⚠ Sensitive-data note: this profile sets the same network and
+# capability defaults as the other YCRC profiles. Milgram itself has
+# additional cluster-wide network restrictions (no outbound network on
+# compute nodes; controlled inbound). Verify against your specific
+# IRB/HIPAA agreement; the launcher CANNOT enforce HIPAA — that's a
+# data-handling discipline that lives outside botainer.
+#
+# Edit `~/.botainer/cluster.yaml` to override anything here for your
+# personal preferences (e.g. default account).
+#
+# last verified: 2026-06-17 against https://docs.ycrc.yale.edu/clusters/milgram/.
+# Two values could NOT be confirmed offline and warrant a real-user
+# check before you trust them:
+#   - lmod.bootstrap        : the YCRC convention path; confirm with
+#                             `echo $LMOD_PKG/init/bash` on a login node.
+#   - apptainer availability: whether apptainer lives on the LOGIN node or
+#                             only on COMPUTE nodes. The install-hpc.sh
+#                             login flow auto-defers the image build.
+
+version: cluster-profile-v1
+
+
+# How much should you trust this profile? Surfaced by `botainer hpc setup`
+# and `hpc info` — absence of a claim is reported as UNVERIFIED, never as
+# tested. Re-stamp it once someone has run botainer here and checked the
+# numbers against `sinfo` / `scontrol show partition`.
+verification:
+  status: from-public-docs
+  last_checked: "2026-06-17"
+  source: "https://docs.ycrc.yale.edu/clusters/milgram/"
+cluster:
+  name: us-yale-milgram
+  aliases: ["milgram"]   # what $SLURM_CLUSTER_NAME / $LMOD_SYSHOST report
+  hostname_patterns:
+    - "milgram*.ycrc.yale.edu"
+    - "milgram-login*"
+    - "*.milgram.cluster.yale.edu"
+  description: "Yale Milgram HPC cluster (YCRC HIPAA-restricted)"
+
+lmod:
+  # YCRC convention; mirrors Grace + McCleary.
+  bootstrap: /vast/palmer/apps/avx2/lmod/lmod/init/bash
+
+slurm:
+  default_partition: scavenge
+  default_account: ""
+  default_time_minutes: 240
+  partitions:
+    scavenge:
+      max_time_minutes: 1440        # 1d, preemptible, no charge
+    day:
+      max_time_minutes: 1440        # 1d, charged
+    week:
+      max_time_minutes: 10080       # 7d, long jobs
+    interactive:
+      max_time_minutes: 360         # 6h, interactive
+    gpu:
+      max_time_minutes: 1440
+      gpu_types: [a100]
+    bigmem:
+      max_time_minutes: 1440
+      max_memory_gb: 1500
+
+scratch:
+  # Milgram-specific scratch root.
+  # Was ".../${USER}/${SLURM_JOBID}" until 2026-08-03. Two faults:
+  # SLURM_JOBID is unset on a login node (where hpc setup, init and
+  # inspect run) so it never resolved and scratch silently fell back to
+  # the state root; and it is wrong in kind — botainer's /scratch is
+  # per-PROJECT and persists, so a job-scoped path would be empty every
+  # run. botainer appends the project uuid, so the final path is
+  # <this>/<uuid>; the "botainer" component keeps those uuid dirs in one
+  # place the user can identify and delete.
+  template: "/gpfs/milgram/scratch/${USER}/botainer"
+  auto_cleanup_days: 60
+
+apptainer:
+  cachedir: "${HOME}/.apptainer/cache"
+  prebuilt_url: ""
+
+modules:
+  denylist: []
+  always_load: []
+
+policy:
+  # Milgram's cluster-wide policy restricts outbound network on compute
+  # nodes; we still ship `false` here (it's the docker/laptop-default
+  # CAP_NETWORK_OWNERSHIP setting; the cluster's own iptables/firewall is
+  # the authoritative trust anchor for HIPAA). If your IRB/HIPAA agreement
+  # requires `network.mode: none` per session, set it explicitly in your
+  # project config.
+  refuse_network: false
+
+agent_hints:
+  preamble: |
+    You're running on Yale Milgram HPC (YCRC HIPAA-restricted). This
+    cluster is for research with SENSITIVE DATA (clinical, identified
+    human subjects, etc.). Behave accordingly:
+      - NEVER copy data from /gpfs/milgram off the cluster.
+      - NEVER make calls to external APIs that send Milgram data
+        outbound. The cluster restricts outbound network on compute
+        nodes; if your code attempts an upload, it should fail loudly,
+        but you should not have written it that way in the first place.
+      - Do NOT push code containing Milgram data, patient identifiers,
+        or even VARIABLE NAMES that disclose study identity to github
+        or other public repos.
+
+    Filesystems and quotas:
+    - /home — small, shared, QUOTA-LIMITED. Code + small configs only.
+      Don't put data, conda envs, or model weights here.
+    - /gpfs/milgram/project/<group> — long-lived per-group project space.
+      Shared datasets and code repos under HIPAA controls.
+    - /gpfs/milgram/scratch/${USER}/ — fast scratch, AUTO-PURGED after
+      ~60 days of no access. Outputs, intermediate files, working copies.
+    - $SLURM_TMPDIR (compute-node-local) — fastest but DISAPPEARS at job
+      end. Stage hot data there at the start of a job, copy results back
+      before exit.
+
+    Slurm / job submission:
+    - The account is `pi_<your-PI-netid>` (find yours:
+      `sacctmgr -nP show assoc user=$USER format=account`). Set the submit
+      account with `botainer config set plugins.hpc-launcher.account pi_<group>`.
+    - Partitions worth knowing:
+        scavenge — preemptible, no charge, 1-day max.
+        interactive — interactive shells; use `salloc -p interactive`.
+        day, week — charged, by time bucket.
+        gpu — A100s for sensitive-data ML.
+        bigmem — for memory >1 TB.
+
+    Network and credentials:
+    - Outbound network is RESTRICTED on Milgram compute nodes (HIPAA
+      requirement). `pip install` against the public index works via
+      YCRC's proxy / mirror (see docs); `git clone` works for YCRC's
+      internal Gitea but is restricted for public github. Verify what's
+      reachable for your specific allocation.
+    - DO NOT call OpenAI, Anthropic, or any external API from compute
+      nodes with Milgram data in the request — even with an explicit
+      `--api-only` allowlist, the AI provider's data-handling does NOT
+      satisfy HIPAA without a BAA, and Milgram's network policy will
+      likely block the call.
+    - For interactive/GUI work (Jupyter, RStudio), YCRC provides Open
+      OnDemand at https://ood-milgram.ycrc.yale.edu — the cluster's
+      blessed path for browser-based work.
+
+    Misc:
+    - Use `module avail` to discover software; `module spider <name>` to
+      find load lines.
+    - Documentation: https://docs.ycrc.yale.edu/clusters/milgram/

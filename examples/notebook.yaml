@@ -1,0 +1,36 @@
+# Notebook-style data-science config.
+# - Jupyter at localhost:8888, Streamlit at 8501, Gradio at 7860
+# - Internet on (so the agent can `pip install` data libs)
+# - Generous memory + CPU
+
+version: config-v1
+
+agent: claude
+runtime: auto
+
+network:
+  mode: internet
+
+resources:
+  cpu: 8
+  memory_mb: 32768
+
+caps:
+  kernel:
+    keep: []
+
+env: {}
+
+plugins_enabled:
+  - agent-claude
+  - git
+  - web-ports
+
+plugins:
+  git:
+    mode: guarded
+  web-ports:
+    ports:
+      - 8888                # Jupyter Lab
+      - {container: 8501, host: 8501, label: "streamlit"}
+      - {container: 7860, host: 7860, label: "gradio"}

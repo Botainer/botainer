@@ -1,0 +1,262 @@
+# LUMI (EuroHPC Joint Undertaking; hosted and operated by CSC, Finland).
+# https://docs.lumi-supercomputer.eu/
+#
+# NOT RUN ON HARDWARE. Transcribed from public documentation.
+
+version: cluster-profile-v1
+
+verification:
+  status: from-public-docs
+  last_checked: "2026-07-29"
+  source: >
+    https://docs.lumi-supercomputer.eu/runjobs/scheduled-jobs/partitions/
+    (partition table, walltimes, node-sharing rules);
+    https://docs.lumi-supercomputer.eu/hardware/lumic/,
+    https://docs.lumi-supercomputer.eu/hardware/lumig/,
+    https://docs.lumi-supercomputer.eu/hardware/lumid/
+    (per-node CPU/memory/GPU specs);
+    https://docs.lumi-supercomputer.eu/storage/ (storage tiers, quotas,
+    "no backups" statement, project-end/contingent-cleanup purge language);
+    https://docs.lumi-supercomputer.eu/software/containers/singularity/
+    (Apptainer/Singularity guidance, cotainr, cache-dir advice);
+    https://docs.lumi-supercomputer.eu/firststeps/loggingin/ (login
+    hostnames, NAT-gateway IP block for compute-node outbound traffic);
+    https://docs.lumi-supercomputer.eu/runjobs/lumi_env/Lmod_modules/
+    (Lmod init path); https://docs.lumi-supercomputer.eu/runjobs/lumi_env/billing/
+    (billing formulas). NOT stated by any of the above: a routine,
+    fixed-day-count purge of /scratch or /flash (see scratch: below); an
+    explicit blanket statement that compute nodes have unrestricted
+    internet access (only the NAT-gateway IP block is documented);
+    max_cpus/max_memory_gb for the "bench" and "lumid" partitions (mixed
+    or fractional-GPU hardware — see comments below). No 404s hit; all
+    URLs above resolved.
+
+cluster:
+  name: fi-csc-lumi
+  aliases: ["lumi"]   # what $SLURM_CLUSTER_NAME / $LMOD_SYSHOST report
+  hostname_patterns:
+    - "lumi-uan*.csc.fi"
+    - "uan*"
+    - "lumi*"
+  description: "LUMI (EuroHPC/CSC, Finland; HPE Cray EX; AMD EPYC CPUs + AMD MI250X GPUs)"
+
+lmod:
+  # Docs give exactly one Lmod init line: `source /usr/share/lmod/lmod/init/bash`
+  # — but only in the "Advanced users: resetting MODULEPATH" section, for
+  # rebuilding a private module environment from scratch. Nothing states
+  # that a normal (or job-script) shell needs this to get `module` — the
+  # login shell already provides it. Left empty rather than repurposing a
+  # narrow advanced-use command as a general bootstrap.
+  bootstrap: ""
+
+slurm:
+  # `small` is the sensible default: unlike `standard`/`standard-g`, which
+  # dedicate a WHOLE node to your job whether you use it or not, `small`
+  # allows a sub-node request and the node may be shared with other jobs.
+  # Billing follows: standard/bench charge 128 core-hours per node per
+  # hour regardless of use; small charges only for cores/memory actually
+  # allocated (max(cores, ceil(mem_GB/2)) x runtime).
+  default_partition: small
+  default_account: ""
+  default_time_minutes: 240
+  partitions:
+    standard:
+      # LUMI-C, exclusive whole node. "your jobs use all resources
+      # available on the node and won't share the node with other jobs."
+      max_time_minutes: 2880        # 2 days; max 512 nodes/job
+      max_cpus: 128                 # 2x AMD EPYC 7763, 64 cores each
+      max_memory_gb: 256            # standard-memory LUMI-C node
+    small:
+      # LUMI-C, sub-node allocation allowed (job may share the node).
+      # "small or memory-intensive jobs" per the docs' own partition
+      # description; NOT confirmed whether this partition can schedule
+      # you onto the large-memory (512 GiB) or xlarge-memory (1024 GiB)
+      # LUMI-C node tiers described on the hardware page — so the figure
+      # below is the confirmed standard-node ceiling, not a guaranteed
+      # cap on what "small" can reach.
+      max_time_minutes: 4320        # 3 days; max 4 nodes/job
+      max_cpus: 128
+      max_memory_gb: 256
+    standard-g:
+      # LUMI-G, exclusive whole node.
+      max_time_minutes: 2880        # 2 days; max 1024 nodes/job
+      max_cpus: 64                  # 1x AMD EPYC 7A53, 64 cores
+      max_memory_gb: 512
+      gpu_types: [mi250x]          # 4x MI250x modules = 8 GCDs/node
+    small-g:
+      # LUMI-G, sub-node allocation allowed.
+      max_time_minutes: 4320        # 3 days; max 4 nodes/job
+      max_cpus: 64
+      max_memory_gb: 512
+      gpu_types: [mi250x]
+    dev-g:
+      # LUMI-G, for interactive debugging. Docs: 8-32 nodes/job, 30 min to
+      # 3 hours depending on node count, AND a total cap of "16 node
+      # hours" per job — so a 32-node job cannot actually run 3 hours.
+      # max_time_minutes below is the outer ceiling, not a guarantee at
+      # every node count.
+      max_time_minutes: 180          # 3 h ceiling; effectively capped by
+                                      # the 16-node-hour budget at higher
+                                      # node counts (docs do not give a
+                                      # closed-form formula)
+      max_cpus: 64
+      max_memory_gb: 512
+      gpu_types: [mi250x]
+    debug:
+      # LUMI-C.
+      max_time_minutes: 30           # max 4 nodes/job
+      max_cpus: 128
+      max_memory_gb: 256
+    bench:
+      # Spans BOTH LUMI-C and LUMI-G node types ("All nodes" of both), so
+      # a single max_cpus/max_memory_gb/gpu_types would misrepresent
+      # whichever hardware type you didn't land on. Left unset rather
+      # than picking one arbitrarily; only for short benchmarking runs.
+      max_time_minutes: 360           # 6 h
+    largemem:
+      # Despite the name, docs place this on LUMI-D, not a LUMI-C memory
+      # tier: "The nodes in the largemem partition are part of LUMI-D and
+      # have 4TB of memory per node." (2x AMD EPYC 7742, 64 cores each.)
+      max_time_minutes: 1440          # 1 day; max 1 node/job
+      max_cpus: 128
+      max_memory_gb: 4096
+    lumid:
+      # LUMI-D visualization nodes — NVIDIA A40, NOT for general GPU
+      # compute ("only intended for graphical hardware acceleration...
+      # for visualisation purposes"). Allocation unit is "1 GPU" (a
+      # fractional share of an 8-GPU node); docs do not state the
+      # cores/memory that come with that fractional share, so both are
+      # left unset rather than guessed.
+      max_time_minutes: 240           # 4 h; max 1 GPU/job
+      gpu_types: [a40]
+
+scratch:
+  # LUMI has multiple named tiers (see storage docs); the one that best
+  # matches "large shared working area" is /scratch/<project> (LUMI-P /
+  # Lustre backend, 50 TB expandable to 500 TB). /flash/<project>
+  # (LUMI-F) is a separate, smaller, higher-IOPS tier meant for
+  # I/O-intensive job data, not general-purpose working storage, so it
+  # was NOT picked here.
+  #
+  # auto_cleanup_days is deliberately 0 — NOT because scratch is safe,
+  # but because LUMI's purge model does not fit a routine "N days since
+  # last touch" number the way e.g. NERSC's or SDSC's does. Docs state
+  # two different mechanisms instead: (1) project-end deletion — "After
+  # the 90 days [post-deactivation grace period], the data will be
+  # deleted"; (2) a discretionary, capacity-triggered sweep — "If the
+  # storage space on LUMI gets too full at some point, automatic
+  # cleaning of project scratch and flash might be enabled... information
+  # would be sent to LUMI users at least three months in advance." Both
+  # are real deletion risks; neither is a fixed day-count, so a number
+  # here would misrepresent the actual policy. Also documented, and worth
+  # repeating loudly: "there are no backups for any storage systems of
+  # LUMI" — this applies to every tier, not just scratch.
+  template: "/scratch/${SLURM_JOB_ACCOUNT}"
+  auto_cleanup_days: 0
+
+apptainer:
+  # Docs explicitly warn that the default Singularity cache location is
+  # $HOME (only 20 GB quota) and recommend redirecting it: "Note that
+  # singularity by default caches pulled files in your home directory. We
+  # recommend setting it to another location..." and separately recommend
+  # /tmp specifically for the local-disk, non-Lustre conversion workspace:
+  # "Speed up the conversion and avoid leaving behind temporary files by
+  # using the in-memory filesystem on /tmp as the Singularity cache
+  # directory" with `export SINGULARITY_CACHEDIR=/tmp/$USER`. Apptainer
+  # reads the same env var name for back-compat; using it here.
+  cachedir: "/tmp/${USER}"
+  prebuilt_url: ""
+
+modules:
+  denylist: []
+  always_load: []
+
+policy:
+  # Docs do not state a blanket "no internet on compute nodes" policy —
+  # to the contrary, the login docs state that the NAT gateways used for
+  # compute-node outbound connections sit in the SAME IP block as the
+  # login nodes (193.167.209.128/26): "It contains the login nodes and
+  # also the NAT gateways for the compute nodes." That is evidence FOR
+  # outbound connectivity via NAT, not proof of unrestricted access —
+  # docs say nothing about ports, protocols, or any firewall in front of
+  # that gateway. refuse_network is left false on that basis, but see the
+  # preamble: this is "docs found no stated blanket block", not a
+  # verified "internet works" claim.
+  refuse_network: false
+
+agent_hints:
+  preamble: |
+    You are on LUMI (EuroHPC Joint Undertaking; hosted by CSC, Finland).
+
+    Partition choice, shortest useful summary:
+    - `small` (3 d, sub-node/shareable, LUMI-C) — the default here, and
+      usually the right one: you are billed only for the cores/memory you
+      actually request, not a whole node.
+    - `standard` (2 d, whole-node-exclusive, LUMI-C, 128 cores/256 GB) —
+      use only when you genuinely need a full node; you are billed for
+      all 128 core-hours every hour regardless of use.
+    - `small-g` / `standard-g` — GPU equivalents of the above, on LUMI-G
+      nodes (1x 64-core EPYC + 4x AMD MI250x = 8 GCDs, 512 GB RAM).
+      GPU billing is by GCD (half-module), not whole MI250x, on `small-g`.
+    - `dev-g` — GPU debugging, 8-32 nodes, 30 min to 3 h, but capped at 16
+      total node-hours per job, so large node counts get much less time
+      than the nominal ceiling.
+    - `debug` — LUMI-C, 30 min, for quick correctness checks only.
+    - `bench` — 6 h, spans both LUMI-C and LUMI-G; for short benchmarking,
+      not general work.
+    - `largemem` — LUMI-D, 4 TB RAM per node, 1 day, 1 node max. Only if
+      you actually need that much memory.
+    - `lumid` — NVIDIA A40 visualization nodes, 4 h, 1 GPU max. This is
+      for graphical/visualization acceleration, NOT general GPU compute;
+      do not route ordinary GPU jobs here.
+
+    Billing: CPU work is metered in CPU-core-hours; GPU work in GPU-hours
+    (1 GPU-hour = 1 MI250x module-hour on `standard-g`; on `small-g`/
+    `dev-g` it is max(cores/8, mem/64GB, GCDs-allocated) x runtime x 0.5).
+    Whole-node partitions (`standard`, `standard-g`, `bench`) charge for
+    the full node regardless of what you use — request `small`/`small-g`
+    if your job does not need one.
+
+    Storage — read this before writing anything large:
+    - $HOME (/users/<user>) — 20 GB quota. Code and configs only.
+    - /project/<project> — 50-500 GB, persists for the project's lifetime.
+      Durable-ish, but see the no-backups note below.
+    - /scratch/<project> — the large working area (50-500 TB, Lustre).
+      NOT purged on a fixed schedule like some sites' "N days untouched"
+      rule; instead it is deleted ~90 days after the PROJECT is
+      deactivated, and may ALSO be swept early if LUMI-wide capacity runs
+      low (docs promise 3 months' notice for that case, sent to users —
+      an autonomous agent will not see that notice). Do not treat "not
+      purged yet" as "safe".
+    - /flash/<project> — smaller, faster (LUMI-F) tier for I/O-heavy job
+      data; same non-fixed-schedule caveat as /scratch above.
+    - THERE ARE NO BACKUPS ON ANY LUMI STORAGE TIER, including project
+      space. Anything irreplaceable needs to leave LUMI (e.g. to LUMI-O
+      object storage or an external system) — nothing here is a backup
+      target itself.
+
+    Network: docs do not state a blanket "no internet on compute nodes"
+    policy. They do state that compute-node outbound traffic NATs through
+    the same IP block as the login nodes (193.167.209.128/26) — if an
+    external service needs an IP allow-listed, that is the range to give
+    them. This is not a guarantee that any given host/port is reachable;
+    treat unexplained network failures as plausibly a firewall, not
+    necessarily your code.
+
+    Containers: Apptainer/Singularity is the supported container runtime.
+    Home and project filesystems are Lustre-backed and perform poorly
+    with "many small files" workloads — the docs explicitly warn against
+    installing a pip/conda Python environment directly onto them. Use
+    `cotainr` instead (`module load CrayEnv` then `module load cotainr`)
+    to build a Singularity .sif image from a conda/pip environment file
+    against a LUMI-provided base image (e.g. `--system=lumi-g` for
+    ROCm/GPU); it is explicitly "not a general purpose container building
+    tool" but is the documented path for this specific job. Also redirect
+    the Singularity cache off $HOME (20 GB quota) — see `apptainer:
+    cachedir` above.
+
+    Modules: Lmod, hierarchical. Typical load looks like `module load
+    LUMI/25.03 partition/C buildtools/25.03` (swap `partition/C` for
+    `partition/G` on GPU nodes, `partition/D` on LUMI-D, `partition/L` on
+    login nodes); use `module spider <name>` to find the right load line
+    for a given package.

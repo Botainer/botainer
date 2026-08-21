@@ -1,0 +1,65 @@
+# HPC config — a worked example for a Slurm cluster.
+# - Apptainer runtime + Slurm submission via the hpc-launcher plugin
+# - Loads cluster modules into the agent's environment
+# - Nudge works via srun --overlap on the compute node
+#
+# Customize for your cluster: account, partition, modules, GPU type.
+
+version: config-v1
+
+agent: claude
+profile: default
+runtime: apptainer
+
+# Top-level `image` is the apptainer .sif the launcher will exec.
+# `botainer image build agent-claude --runtime apptainer` writes to
+# <state_root>/images/botainer-agent-claude.sif by default; replace
+# the path below with the actual output of that command.
+image: /home/USER/.botainer/images/botainer-agent-claude.sif
+
+network:
+  mode: internet                       # most clusters allow outbound egress
+
+# Top-level `resources` map to BOTH runtimes (docker --cpus / --memory,
+# apptainer → sbatch directives). For HPC-specific request fields
+# (partition, account, GPUs, walltime), use plugins.hpc-launcher below.
+resources:
+  cpu: 8
+  memory_mb: 32768
+
+caps:
+  kernel:
+    keep: []
+
+env: {}
+
+plugins_enabled:
+  - agent-claude-shared                # host-wide credentials (recommended on HPC)
+  - git                                # guarded mode by default
+  - hpc-launcher                       # Slurm submission
+  - hpc-modules                        # `module load` env capture
+  - nudge                              # screen-via-srun for input injection
+
+plugins:
+  git:
+    mode: guarded                      # was 'protected' in earlier dev; renamed
+  hpc-modules:
+    modules:
+      - python/3.11
+      - gcc/13
+      - cuda/12.3
+    purge_first: true
+    fail_on_missing: true
+  hpc-launcher:
+    # Slurm submission fields. The launcher reads THESE; top-level
+    # `resources` covers per-container cpu/mem but Slurm needs its own
+    # request fields below.
+    partition: gpu                     # cluster-specific; `sinfo` to list
+    account: YOUR_GROUP                # required on most clusters
+    time_minutes: 240                  # 4 hours
+    cpus: 8
+    memory_gb: 32
+    gpus: 1
+    gpu_type: a100                     # cluster-specific
+    submission_mode: submit            # submit | attach | here
+    # max_concurrent_jobs: 3           # uncomment to cap parallel submissions

@@ -1,0 +1,152 @@
+# First-party plugin: wolfram-sidecar
+#
+# Host-side wolframscript proxy with three layers of sandbox protection:
+#
+#   Layer 1 (string filter): the proxy refuses incoming requests that
+#     contain known-dangerous Wolfram patterns (`Run[`, `Get[`, etc.).
+#     Best-effort; defeated by Wolfram metaprogramming.
+#
+#   Layer 2 (kernel sandbox): a Wolfram init script (.wl) is prepended
+#     to user code; it Protect[]s Run, RunProcess, URLFetch, etc. and
+#     locks the symbols. Defeats ToExpression["..."] -based bypasses.
+#
+#   Layer 3 (macOS sandbox-exec): wolframscript runs inside a sandbox
+#     profile that denies reads to ~/.ssh, ~/.aws, ~/.claude, browser
+#     data, Keychain, Documents, Downloads, etc.; allows writes only
+#     to /tmp and Wolfram's own cache dirs.
+#
+# Architecture differs from v0.0.x: v0.0.x used TCP 127.0.0.1:51839
+# and required `host.docker.internal` access from the container plus
+# a `host_ports: [51839]` config carve-out. v0.1.x uses a UNIX
+# DOMAIN SOCKET bind-mounted into the container (same pattern as
+# agent-claude-proxy), so:
+#   - no TCP port to collide with anything
+#   - no host_ports carve-out needed
+#   - works on both docker (host.docker.internal still gone — we
+#     bind a socket) and apptainer (where host.docker.internal
+#     doesn't exist anyway)
+#
+# v0.1.0 ship caveats (see README.md):
+#   - macOS-only sandbox; on Linux you must opt in via
+#     `require_sandbox: false` in the project config and accept
+#     reduced isolation.
+#   - Wolfram metaprogramming can defeat the string filter; the
+#     kernel-init sandbox + sandbox-exec are the real defense.
+#   - Each session spawns its own proxy (no shared daemon). When
+#     the session ends post_session kills it.
+
+apiVersion: botainer-plugin-v1
+name: wolfram-sidecar
+version: 0.1.0
+description: |
+  Host-side wolframscript proxy for the agent. Lets in-container
+  agents run Wolfram language code via a unix-domain-socket-bridged
+  daemon on the host, with kernel-init + sandbox-exec defense
+  layers. Mac-only by default (sandbox-exec); set `require_sandbox:
+  false` in plugins.wolfram-sidecar to run on Linux with reduced
+  isolation.
+license: Apache-2.0
+maintainer: botainer
+botainer_min_version: 0.1.0a0
+tier: first-party
+kind: host_helper        # spawns a host-side daemon as the user
+trust_required: hooked
+
+runtimes:
+  - docker
+  - apptainer
+
+capabilities:
+  - host.subprocess        # spawns wolframscript on host
+  - mounts.extra           # contributes unix-socket + token + client binds
+
+hooks:
+  - when: pre_session
+    script: hooks/pre_session.py
+    timeout_seconds: 15
+  - when: post_session
+    script: hooks/post_session.py
+    timeout_seconds: 10
+
+contributes:
+  # The pre_session hook emits binds at these exact targets.
+  # composition.run_pre_session_hooks enforces the envelope.
+  mount_target_prefixes:
+    - /run/wolfram-proxy.sock
+    - /run/wolfram-token
+    - /usr/local/bin/wolframscript
+
+  agent_hints_section: |
+    ## wolframscript available (host-side proxy)
+
+    The `wolframscript` command in this container talks to a host-side
+    sandboxed proxy. Use it normally:
+
+        wolframscript -code "Integrate[x^2, x]"
+        wolframscript --proxy-timeout 10 -code "Factor[x^4-1]"
+        wolframscript -code "NIntegrate[Sin[x^2], {x, 0, 100}]"
+
+    `--proxy-timeout N` sets a per-request timeout (seconds), capped
+    at the proxy's global limit. Default global timeout: 300s.
+
+    Sandbox restrictions (Wolfram-language level):
+      - No shell commands: Run[], RunProcess[], StartProcess[],
+        SystemOpen[], SystemShell[].
+      - No file writes outside Wolfram's own cache: Export[], Put[],
+        OpenWrite[], DeleteFile[], etc. are blocked.
+      - No file reads outside permitted paths: Get[], ReadString[],
+        FilePrint[] are blocked. `-file <path>` is refused at the
+        proxy layer.
+      - No network from Wolfram: URLFetch[], URLRead[], SendMail[],
+        CloudDeploy[].
+
+    On macOS an additional kernel-level sandbox (sandbox-exec) bars
+    reads of ~/.ssh, ~/.aws, ~/.claude, Keychain, Documents,
+    Downloads, browser data, etc., and bars writes outside /tmp and
+    Wolfram's cache.
+
+    Math computation works normally: Integrate, Solve, NDSolve,
+    FindRoot, Series, FactorInteger, Factor, Simplify, NIntegrate,
+    Plot (saved to /tmp), DSolve, etc.
+
+  capability_summary_block: |
+    Wolfram proxy: host-side daemon at <session>/wolfram-proxy.sock
+      • Per-launch auth token at /run/wolfram-token (HMAC-compared)
+      • Sandbox layers: string filter + kernel-init + sandbox-exec
+      • Mac-only by default; Linux requires opt-in (reduced isolation)
+
+config_schema:
+  type: object
+  properties:
+    wolframscript_path:
+      type: string
+      default: "wolframscript"
+      description: |
+        Path to the wolframscript binary on the host. Default uses
+        whatever's on PATH; override if you have multiple Mathematica
+        installs.
+    timeout_seconds:
+      type: integer
+      default: 300
+      description: |
+        Global max execution time per wolframscript call. The
+        in-container --proxy-timeout overrides this DOWN to a smaller
+        value, but cannot exceed it.
+    max_request_bytes:
+      type: integer
+      default: 1048576       # 1 MiB
+      description: |
+        Refuse incoming proxy requests larger than this. Defends
+        against the agent flooding the proxy with multi-GB payloads
+        before json.loads runs.
+    require_sandbox:
+      type: boolean
+      default: true
+      description: |
+        When true (default) the proxy refuses to start unless
+        sandbox-exec is available (macOS) AND the sandbox profile
+        is present. Set false to run on Linux or to deliberately
+        disable sandbox-exec; in that case only the kernel-init
+        sandbox + string filter remain. Reduced isolation; the
+        proxy logs this loudly.
+  additionalProperties: false

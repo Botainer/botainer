@@ -1,0 +1,171 @@
+# SURF Snellius (Dutch national supercomputer, hosted by SURF, Netherlands).
+# https://servicedesk.surf.nl/wiki/spaces/WIKI/pages/30660184/Snellius
+#
+# NOT RUN ON HARDWARE. Transcribed from public documentation.
+
+version: cluster-profile-v1
+
+verification:
+  status: from-public-docs
+  last_checked: "2026-07-29"
+  source: >-
+    https://servicedesk.surf.nl/wiki/display/WIKI/Snellius+partitions
+    (full partition table: node counts, cores, memory, GPUs, walltime),
+    https://servicedesk.surf.nl/wiki/spaces/WIKI/pages/85295828/Snellius+filesystems
+    (home/scratch-local/scratch-shared/scratch-node/project/archive paths,
+    quotas, purge policy), https://servicedesk.surf.nl/wiki/spaces/WIKI/pages/30660251/Apptainer+formerly+Singularity
+    (container runtime: Apptainer, Docker not supported, cbuild workflow).
+    NOT stated on these pages: a general compute-node internet-access
+    policy (the docs show `cbuild`/`staging` service-partition nodes doing
+    `apptainer pull docker://...`, implying THOSE nodes reach the internet,
+    but say nothing about `rome`/`genoa`/`gpu_*` compute partitions either
+    way); confirmation of Lmod specifically (the software page shows a
+    generic `module load <year>` workflow, consistent with either Lmod or
+    classic Environment Modules, without naming which).
+
+cluster:
+  name: nl-surf-snellius
+  aliases: ["snellius"]   # what $SLURM_CLUSTER_NAME / $LMOD_SYSHOST report
+  hostname_patterns:
+    - "int*.snellius.surf.nl"
+    - "snellius*"
+  description: "SURF Snellius (AMD EPYC Rome/Genoa CPU nodes; NVIDIA A100/H100 GPU nodes)"
+
+lmod:
+  # Module system confirmed to use a `module load <year-stack>` workflow
+  # (e.g. `module load 2025`), but not confirmed to be Lmod specifically
+  # vs. classic Environment Modules — no bootstrap path recorded either
+  # way. Left empty rather than guessed.
+  bootstrap: ""
+
+slurm:
+  # All partitions share a 120 h (5-day) max walltime EXCEPT gpu_vis (24 h).
+  # "genoa" chosen as the operational default below (more nodes than
+  # "rome" and the newer CPU generation) — this is botainer's own sensible
+  # choice, NOT a documented vendor default (none was stated).
+  default_partition: genoa
+  default_account: ""
+  default_time_minutes: 240
+  partitions:
+    rome:
+      max_time_minutes: 7200         # 120 h
+      max_cpus: 128
+      max_memory_gb: 224
+    genoa:
+      max_time_minutes: 7200
+      max_cpus: 192
+      max_memory_gb: 336
+    fat_rome:
+      max_time_minutes: 7200
+      max_cpus: 128
+      max_memory_gb: 960
+    fat_genoa:
+      max_time_minutes: 7200
+      max_cpus: 192
+      max_memory_gb: 1440
+    himem_4tb:
+      max_time_minutes: 7200         # only 2 nodes cluster-wide
+      max_cpus: 128
+      max_memory_gb: 3840
+    himem_8tb:
+      max_time_minutes: 7200         # only 2 nodes cluster-wide
+      max_cpus: 128
+      max_memory_gb: 7680
+    gpu_a100:
+      max_time_minutes: 7200
+      max_cpus: 72
+      max_memory_gb: 480
+      gpu_types: [a100]
+    gpu_h100:
+      max_time_minutes: 7200
+      max_cpus: 64
+      max_memory_gb: 720
+      gpu_types: [h100]
+    gpu_mig:
+      # 4 nodes; GPUs are MIG-partitioned (8 slices/node), not 8 full GPUs.
+      max_time_minutes: 7200
+      max_cpus: 72
+      max_memory_gb: 480
+      gpu_types: [a100]
+    gpu_vis:
+      max_time_minutes: 1440         # 24 h — the one exception to the 120 h rule
+      max_cpus: 72
+      max_memory_gb: 480
+      gpu_types: [a100]
+    staging:
+      max_time_minutes: 7200         # service partition for data staging, no GPU
+      max_cpus: 16
+      max_memory_gb: 224
+    cbuild:
+      # service partition for compiling / building container images; this
+      # is where `apptainer pull docker://...` is documented to run.
+      max_time_minutes: 7200
+      max_cpus: 16
+      max_memory_gb: 224
+
+scratch:
+  # scratch-shared is the multi-node-accessible, purged scratch tier
+  # (scratch-local is node-pinned/6-day, scratch-node is job-local/deleted
+  # at job end — neither is the right "shared purged scratch" fit).
+  template: "/scratch-shared/${USER}"
+  auto_cleanup_days: 14             # vendor: "files older than 14 days are removed automatically"
+
+apptainer:
+  cachedir: "/scratch-shared/${USER}/.apptainer/cache"
+  prebuilt_url: ""
+
+modules:
+  denylist: []
+  always_load: []
+
+policy:
+  # Not documented either way for the general compute partitions (only the
+  # cbuild/staging service partitions are shown pulling from the internet).
+  # Defaulting to false rather than asserting a block that wasn't confirmed.
+  refuse_network: false
+
+agent_hints:
+  preamble: |
+    You are on SURF Snellius (Dutch national supercomputer). All partitions
+    cap at 120 h (5 days) EXCEPT `gpu_vis`, which caps at 24 h.
+
+    CPU partitions: `rome` (128 cores/node, 224 GB) and `genoa` (192
+    cores/node, 336 GB, newer/more nodes) are the general-purpose choices.
+    `fat_rome`/`fat_genoa` have much more memory per node (960 GB / 1440 GB)
+    for memory-heavy single-node jobs. `himem_4tb`/`himem_8tb` are
+    extremely scarce (2 nodes each, cluster-wide) — only use these if
+    nothing else fits.
+
+    GPU partitions: `gpu_a100` (4x A100/node) and `gpu_h100` (4x H100/node,
+    fewer CPU cores per node at 64). `gpu_mig` nodes present their 4 A100s
+    as 8 MIG-partitioned slices instead of full GPUs — request accordingly
+    if you don't need a whole GPU. `gpu_vis` is the same hardware as
+    `gpu_a100` but capped at 24 h and presumably intended for
+    visualization/interactive work.
+
+    `staging` and `cbuild` are service partitions, not for general compute:
+    `cbuild` is specifically documented as where you build/convert
+    container images (e.g. `apptainer pull docker://...`), implying THOSE
+    nodes reach the internet — general compute partitions' internet access
+    is not documented either way, so don't assume `pip install` works on a
+    compute node without checking first.
+
+    Containers: Apptainer is the supported runtime (`singularity` symlinked
+    for compatibility). Docker itself is NOT installed/used on Snellius —
+    convert Docker images to Apptainer format, ideally via the `cbuild`
+    partition where internet access for pulling is demonstrated in the docs.
+
+    Filesystems:
+    - $HOME (/home/<user>) — 200 GiB / 1M files. Code and configs.
+      Retained 15 weeks after project expiration; nightly incremental
+      backup (3-week retention).
+    - /scratch-shared/<user> — the large, multi-node-visible working area.
+      PURGED: files older than 14 days are automatically removed. No backup.
+    - /scratch-local/<user> — node-pinned fast storage, purged after just
+      6 days. No backup. $TMPDIR defaults here unless the job requests
+      `--constraint=scratch-node`.
+    - /scratch-node/<user> — NVMe-based, per-job; deleted when the job ends.
+    - /projects/<project> — collaborative bulk storage; expires at the
+      project end date plus a 4-week grace period. No backup.
+    - /archive/<user> — long-term, tape-backed. Slow to retrieve, and NOT
+      reachable directly from compute nodes.

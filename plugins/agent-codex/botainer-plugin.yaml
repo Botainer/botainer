@@ -1,0 +1,106 @@
+# First-party plugin: agent-codex
+# Provides the OpenAI Codex CLI agent inside the container.
+#
+# v0.1.x status: MOUNT mode only. The proxy mode (real OPENAI_API_KEY
+# stays on host, container sees an ephemeral session token) requires
+# the generic credential-proxy plugin which doesn't exist yet — see
+# DN-030. For now, your real OPENAI_API_KEY is
+# bound into the container (per-project, read-only).
+
+apiVersion: botainer-plugin-v1
+name: agent-codex
+version: 0.1.0
+description: OpenAI Codex CLI agent (per-project credentials; MOUNT mode at v0.1.x)
+license: Apache-2.0
+maintainer: botainer
+botainer_min_version: 0.1.0a0
+tier: first-party
+kind: agent
+trust_required: hooked
+runtimes:
+  - docker
+  - apptainer
+
+# AUTH-PRODUCT-PLAN.md §1: this plugin is Mode A (isolated) of the
+# openai family. Other modes are reserved as agent-codex-shared
+# (Mode B, planned for v0.1.x) and agent-codex-proxy (Mode C, planned).
+auth_family: openai
+auth_mode: isolated
+mutually_exclusive_with:
+  - agent-codex-shared
+  - agent-codex-proxy
+
+image:
+  source: dockerfile
+  dockerfile: Dockerfile
+  # The tag `botainer image build agent-codex` produces. Declared here so
+  # `botainer start` can resolve to it without requiring a fresh installed.lock
+  # digest entry.
+  tag: botainer/agent-codex:0.1
+
+commands:
+  - name: login
+    script: hooks/login.py
+    help: Paste an OpenAI API key for this project (per-project credential)
+  - name: status
+    script: hooks/status.py
+    help: Show credential validity + profile info for this project
+
+hooks:
+  - when: pre_session
+    script: hooks/pre_session.py
+    timeout_seconds: 20
+
+capabilities:
+  - mounts.workspace
+  - mounts.extra
+  - network
+  - env.values
+
+contributes:
+  mount_target_prefixes:
+    # /home/agent/.codex is where the credential is bound as of #62 (2026-07-29),
+    # because codex reads OAuth tokens from CODEX_HOME and would never look in
+    # .openai for them. /home/agent/.openai stays declared for older per-project
+    # dirs written before the move — a project that logged in earlier keeps an
+    # api_key there, and dropping the prefix would refuse its session at compose
+    # rather than migrate it.
+    - /home/agent/.codex
+    - /home/agent/.openai
+
+  # Required for apptainer parity: `apptainer exec` won't auto-run
+  # the image's %runscript / ENTRYPOINT the way `docker run` does.
+  # The wrap declares the command explicitly so both adapters render
+  # the same final argv. See agent-claude-shared for the underlying
+  # 2026-05-19 Grace failure that prompted this pattern.
+  entrypoint_wrap:
+    layer: inner
+    command:
+      - /usr/local/bin/agent-codex-entrypoint
+
+  agent_hints_section: |
+    ## Codex agent context
+
+    This is the OpenAI Codex CLI agent. Your API key file is at
+    `/home/agent/.openai/api_key` (read-only); `OPENAI_API_KEY_FILE` holds
+    that PATH. `OPENAI_API_KEY` holds the key VALUE itself (loaded from the
+    file at container start). Treat BOTH the file and the `OPENAI_API_KEY`
+    value as secrets.
+
+    Treat this credential as sensitive — don't print it, don't include
+    it in code you commit. The launcher's per-project isolation means
+    leaks are bounded to this project's sessions, but proxy mode
+    (planned for v0.1.x) will keep the real key off the container
+    entirely.
+
+config_schema:
+  type: object
+  properties:
+    profile:
+      type: string
+      default: default
+      description: |
+        Profile name; allows multiple API keys per project (e.g. dev
+        vs prod). Credentials at
+        ${state_dir}/data/agent-codex/profiles/<profile>/api_key
+  additionalProperties: false

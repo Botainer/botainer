@@ -1,0 +1,156 @@
+# Stanford Sherlock (Stanford Research Computing Center / SRCC).
+# https://www.sherlock.stanford.edu/docs/
+#
+# NOT RUN ON HARDWARE. Transcribed from public documentation, 2026-07-29.
+
+version: cluster-profile-v1
+
+verification:
+  status: from-public-docs
+  last_checked: "2026-07-29"
+  source: >
+    https://www.sherlock.stanford.edu/docs/user-guide/running-jobs/ (partition
+    table: normal/bigmem/gpu/dev/service walltimes+limits, owners partition,
+    --qos=long) +
+    https://www.sherlock.stanford.edu/docs/user-guide/gpu (gpu partition
+    submission, per-user GPU limit) +
+    https://www.sherlock.stanford.edu/docs/advanced-topics/node-features/
+    (GPU_SKU feature names for the public gpu partition) +
+    https://www.sherlock.stanford.edu/docs/storage/filesystems/ ($HOME,
+    $SCRATCH quotas and 90-day purge) +
+    https://www.sherlock.stanford.edu/docs/software/containers/ (Apptainer
+    cache dir convention). Docs did NOT state: a total per-node memory figure
+    for `normal` (only a per-core rate, "6-8 GB RAM/core"); a stable GPU model
+    name for `dev`'s MIG instances; per-partition cpu/memory caps for `owners`
+    (varies per contributing PI group's purchased hardware); any Lmod
+    init-script path (docs only show interactive `ml`/`module` usage).
+
+cluster:
+  name: us-stanford-sherlock
+  aliases: ["sherlock"]   # what $SLURM_CLUSTER_NAME / $LMOD_SYSHOST report
+  hostname_patterns:
+    - "*.sherlock.stanford.edu"
+    - "sherlock.stanford.edu"
+    - "sh-ln*"
+  description: "Stanford Sherlock HPC cluster (Stanford Research Computing)"
+
+lmod:
+  # Not documented: Sherlock's public docs show `ml`/`module` used
+  # interactively and in job scripts, but no init-script path to source from
+  # a non-interactive shell. Left empty rather than guessing a path.
+  bootstrap: ""
+
+slurm:
+  # `normal` is the default (starred) partition in the vendor's table.
+  default_partition: normal
+  default_account: ""
+  default_time_minutes: 120        # "default runtime of 2 hours" on normal
+  partitions:
+    normal:
+      # 2 days by default; extend to 7 days with `--qos=long` (see agent_hints
+      # — this can't be expressed as a second partition entry in this schema).
+      max_time_minutes: 2880
+      max_cpus: 64                 # vendor: "20-64 cores/node"
+      # max_memory_gb intentionally omitted: vendor gives a per-core rate
+      # ("6-8 GB RAM/core"), not a documented per-node total.
+    bigmem:
+      max_time_minutes: 1440       # 1 day
+      max_cpus: 256
+      max_memory_gb: 4096          # "up to 4 TB RAM/node"
+    gpu:
+      max_time_minutes: 2880       # 2 days
+      max_cpus: 64                 # vendor: "20-64 cores/node"
+      max_memory_gb: 2048          # vendor: "up to 2TB RAM/node"
+      # Confirmed via `sh_node_feat -p gpu | grep GPU_SKU` output quoted in
+      # the node-features doc: P100_PCIE, P40, RTX_2080Ti, V100_PCIE,
+      # V100S_PCIE, V100_SXM2. Per-user limit is 16 GPUs (not modeled here —
+      # see agent_hints).
+      gpu_types: [p100, p40, rtx2080ti, v100]
+    dev:
+      # Dedicated nodes for quick interactive/dev work; GPUs here are
+      # lightweight MIG instances. gpu_types omitted: the docs describe them
+      # as "MIG" slices without naming a stable underlying GPU SKU for this
+      # partition specifically, so listing e.g. a100 would be a guess.
+      max_time_minutes: 120        # 2h max
+      max_cpus: 32                 # vendor: "20-32 cores/node"
+    service:
+      # For short, lightweight, recurring/administrative tasks — not
+      # general compute. Oversubscribed shared resources.
+      max_time_minutes: 2880       # 2 days
+      max_cpus: 32                 # vendor: "20-32 cores/node"
+      max_memory_gb: 256
+    owners:
+      # PREEMPTIBLE. This is the shared pool spanning all PI-purchased
+      # nodes: any owner can submit here, but a job can be killed and
+      # requeued the moment the node's purchasing group needs it back
+      # (vendor: preemption is uncommon in practice, ~<3% of jobs in a past
+      # analysis, but jobs here must tolerate it). Runs up to 7 days without
+      # needing --qos=long. max_cpus/max_memory_gb omitted: this partition's
+      # hardware varies per contributing PI group and isn't a single
+      # documented figure.
+      max_time_minutes: 10080      # 7 days
+
+scratch:
+  # $SCRATCH — vendor: "files that are not modified after 90 days are
+  # automatically deleted". This is the prefix agent_hints compares a
+  # /scratch bind source against to decide whether to warn about purging.
+  template: "/scratch/users/${USER}"
+  auto_cleanup_days: 90
+
+apptainer:
+  # Vendor recommendation: redirect the cache off $HOME (15 GB quota) onto
+  # $SCRATCH via APPTAINER_CACHEDIR.
+  cachedir: "${SCRATCH}/.apptainer/cache"
+  prebuilt_url: ""
+
+modules:
+  denylist: []
+  always_load: []
+
+policy:
+  refuse_network: false
+
+agent_hints:
+  preamble: |
+    You are on Stanford Sherlock (Stanford Research Computing).
+
+    Partitions and walltime ceilings:
+    - `normal` (default) — 2 days by default; add `--qos=long` to a job
+      script to extend to 7 days. 20-64 cores/node.
+    - `bigmem` — 1 day max, up to 4 TB RAM/node. Use only if you actually
+      need >256 GB.
+    - `gpu` — 2 days max, 4 or 8 GPUs/node (P100/P40/RTX_2080Ti/V100 in the
+      shared pool), capped at 16 GPUs/user across your running jobs. Request
+      only the GPUs you'll use — it's a scarce, contended resource.
+    - `dev` — 2 hours max, small dedicated nodes with lightweight MIG GPU
+      slices. Good for quick interactive testing, not real runs.
+    - `service` — 2 days max, oversubscribed nodes meant for lightweight
+      recurring/administrative tasks, not general compute.
+    - `owners` — if your group has purchased nodes, this shared pool spans
+      every contributing group's hardware and runs up to 7 days without
+      needing `--qos=long`. Tradeoff: PREEMPTIBLE — a purchasing group can
+      reclaim its node at any moment, killing and requeuing your job.
+      Checkpoint anything long-running here.
+
+    Filesystems — put things in the right place:
+    - $HOME — 15 GB quota. Code and small configs only.
+    - $GROUP_HOME — 1 TB, shared with your group. Similar purpose, more room.
+    - $SCRATCH (/scratch/users/<user>) — 100 TB / 20M inodes per user, the
+      right place for job I/O and large intermediates. PURGED: any file not
+      MODIFIED in 90 days is deleted automatically — note this is based on
+      modification time, so merely `touch`-ing a file does not reset the
+      clock, only writing to it does.
+    - $GROUP_SCRATCH — same purge policy, shared with your group.
+    - $OAK — durable, NOT purged, but also NOT backed up by design; bought in
+      10 TB increments per group. For data you need to keep but can't afford
+      to lose (no replication) — pair with your own backup plan.
+    - $L_SCRATCH (/lscratch/<user>/<jobid>, node-local SSD) — fastest, but
+      wiped immediately when the job ends. Stage hot data here at job start,
+      copy results out before exit.
+
+    Containers: Apptainer/Singularity. Point APPTAINER_CACHEDIR at $SCRATCH
+    (not $HOME — 15 GB fills fast).
+
+    Network is available on compute nodes for package installs etc. (not
+    independently re-verified for this profile; treat as typical of Slurm
+    HPC sites rather than a confirmed guarantee).

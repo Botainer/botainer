@@ -1,0 +1,160 @@
+# PSC Bridges-2 (Pittsburgh Supercomputing Center; NSF ACCESS).
+# https://www.psc.edu/resources/bridges-2/user-guide/
+#
+# NOT RUN ON HARDWARE. Transcribed from public documentation, 2026-07-29.
+
+version: cluster-profile-v1
+
+verification:
+  status: from-public-docs
+  last_checked: "2026-07-29"
+  source: >
+    https://www.psc.edu/resources/bridges-2/user-guide/ (partition summary
+    tables: RM/RM-shared/RM-512 walltime+cores+memory, EM cores/memory,
+    GPU/GPU-shared walltime+GPU types+node specs; $HOME/$PROJECT/$LOCAL/
+    $RAMDISK storage section) +
+    https://www.psc.edu/max-walltime-increase-on-rm-partitions/ (RM family
+    walltime raised 48h->72h, Jan 2024) +
+    https://support.access-ci.org/documentation/resources/bridges-2-em (EM
+    node specs cross-check) +
+    https://support.access-ci.org/documentation/resources/psc-bridges-2-gpu-bridges-2-gpu
+    (GPU/GPU-shared walltime cross-check).
+    CORRECTION vs the seed data this profile started from: GPU and
+    GPU-shared max walltime is 48 hours, NOT 72 hours — the 72h bump only
+    ever applied to the RM family (RM/RM-shared/RM-512); two independent
+    sources (PSC's own user guide and the ACCESS mirror) agree GPU stayed at
+    48h. Docs did NOT state: a documented shared/purged scratch filesystem
+    distinct from $LOCAL (see scratch section below); an exact core-per-GPU
+    ratio for GPU-shared, so no max_cpus is set for GPU/GPU-shared (core and
+    memory ceilings vary by which of the 4 GPU node types you land on — see
+    agent_hints); a Lmod init-script path.
+
+cluster:
+  name: us-psc-bridges2
+  aliases: ["bridges2"]   # what $SLURM_CLUSTER_NAME / $LMOD_SYSHOST report
+  hostname_patterns:
+    - "*.bridges2.psc.edu"
+    - "bridges2.psc.edu"
+  description: "PSC Bridges-2 (AMD EPYC RM/EM nodes; NVIDIA V100/L40S/H100 GPU nodes)"
+
+lmod:
+  # Not documented: the user guide shows `module avail`/`module load` usage
+  # but no init-script path to source from a non-interactive shell.
+  bootstrap: ""
+
+slurm:
+  # Bridges-2 has no single "default" partition documented the way e.g.
+  # Sherlock does — users are expected to pick RM/RM-shared/RM-512/EM/GPU/
+  # GPU-shared explicitly. RM-shared is the sanest default for
+  # unspecified/small single-node work since it doesn't bill (or block on)
+  # a whole node.
+  default_partition: RM-shared
+  default_account: ""
+  default_time_minutes: 60         # vendor: "walltime defaults to 1 hour" (GPU); RM family default is 30 min, so 60 is a safe, round middle ground, not a vendor figure for every partition
+  partitions:
+    RM:
+      # EXCLUSIVE: allocates one or more WHOLE 128-core/256GB nodes and
+      # bills for all of it regardless of how much you actually use.
+      max_time_minutes: 4320        # 72h (raised from 48h, Jan 2024)
+      max_cpus: 128
+      max_memory_gb: 256
+    RM-shared:
+      # Shared: up to half a node (64 cores) per job, others can share the
+      # rest of the node. Right choice for anything smaller than a full node.
+      max_time_minutes: 4320        # 72h
+      max_cpus: 64
+      max_memory_gb: 256            # node total; a shared job gets a proportional slice
+    RM-512:
+      # EXCLUSIVE: one of the 16 special RM nodes with 512GB RAM instead of
+      # 256GB. Same 128 cores as regular RM, same whole-node billing trap.
+      max_time_minutes: 4320        # 72h
+      max_cpus: 128
+      max_memory_gb: 512
+    EM:
+      # Extreme Memory: single node max, cores must be requested in
+      # multiples of 24 (24/48/72/96); memory scales ~1TB per 24 cores, up
+      # to ~4TB at 96 cores (one full EM node). No interactive jobs allowed
+      # here per the vendor docs.
+      max_time_minutes: 7200        # 120h = 5 days
+      max_cpus: 96
+      max_memory_gb: 4096
+    GPU:
+      # EXCLUSIVE: full-node jobs get every CPU, all memory, and all GPUs on
+      # the node(s) you're allocated. Node specs vary by GPU type — see
+      # agent_hints for the per-type core/memory breakdown; no single
+      # max_cpus/max_memory_gb is set here because it isn't one number.
+      max_time_minutes: 2880        # 48h (default 1h) — NOT 72h, see verification note above
+      gpu_types: [h100-80, l40s-48, v100-32, v100-16]
+    GPU-shared:
+      # Shared: request 1-4 GPUs on a node instead of the whole thing.
+      # Same GPU type menu and same 48h walltime cap as GPU.
+      max_time_minutes: 2880        # 48h (default 1h)
+      gpu_types: [h100-80, l40s-48, v100-32, v100-16]
+
+scratch:
+  # Bridges-2 documents NO shared, purged scratch filesystem. The only
+  # ephemeral storage is $LOCAL (node-local disk) and $RAMDISK (node-local
+  # RAM-backed), and BOTH are deleted the moment the job ends, not on a
+  # days-based purge schedule — there is nothing that matches the
+  # "shared filesystem purged after N days" shape this field models. Setting
+  # a template here would either invent a path that doesn't exist or wrongly
+  # suggest a persistent-but-purged area exists, which agent_hints.py would
+  # then compare bind sources against and potentially issue a false purge
+  # warning (or wrongly suppress a true one) for. Left empty on purpose.
+  template: ""
+  auto_cleanup_days: 0
+
+apptainer:
+  cachedir: "${HOME}/.apptainer/cache"
+  prebuilt_url: ""
+
+modules:
+  denylist: []
+  always_load: []
+
+policy:
+  refuse_network: false
+
+agent_hints:
+  preamble: |
+    You are on PSC Bridges-2 (NSF ACCESS allocation).
+
+    Partition choice matters for BILLING here, more than at most sites:
+    - `RM` and `RM-512` and `GPU` are EXCLUSIVE — a job allocates the WHOLE
+      node (128 cores / 256GB or 512GB; or every GPU on the node) and burns
+      the allocation for all of it even if you use a fraction. Only use
+      these for jobs that actually need a full node.
+    - `RM-shared` and `GPU-shared` let you request a slice (up to 64 cores
+      on RM-shared; 1-4 GPUs on GPU-shared) and share the node's cost with
+      other jobs. Use these for anything smaller than a full node — which is
+      most single-process or single-GPU agent work.
+    - `EM` (Extreme Memory) is for jobs needing far more RAM than a normal
+      node: request cores in multiples of 24 (up to 96, one full node),
+      memory scales with cores requested (~1TB per 24 cores, up to ~4TB at
+      96). No interactive jobs on EM.
+
+    Walltime ceilings: 72h on RM/RM-shared/RM-512, 120h (5 days) on EM,
+    48h on GPU/GPU-shared (note: GPU is NOT 72h despite matching the RM
+    family's number — it was never raised).
+
+    GPU node types (name used in `--gres=gpu:<type>:<n>`): h100-80 (2TB RAM,
+    104 cores/node), l40s-48 (1TB RAM, 96 cores/node), v100-32 (512GB RAM,
+    80 cores/node), v100-16 (192GB RAM, 80 cores/node). Standard nodes have
+    8 GPUs; one DGX-2 node has 16.
+
+    Filesystems — nothing here auto-purges on a schedule, but nothing
+    persists past the job either, except two spots:
+    - /jet/home/<user> ($HOME) — 25GB quota, backed up daily (3-4 day
+      restore time). Code and configs.
+    - /ocean/projects/<group>/<user> ($PROJECT) — the big durable space,
+      sized by your allocation, inode quota ~6070 per GB allocated. NOT
+      backed up — anything irreplaceable here needs your own backup plan.
+      This is where large datasets and model weights belong.
+    - $LOCAL (node-local disk) and $RAMDISK (node-local RAM) — working
+      space for a running job only. Both are DELETED THE MOMENT THE JOB
+      ENDS, and if the node crashes, $LOCAL's contents are lost too. Copy
+      anything you need out to $PROJECT before the job finishes — there is
+      no grace period.
+
+    No shared scratch filesystem exists here — don't look for one; use
+    $PROJECT for anything that needs to survive past a single job.

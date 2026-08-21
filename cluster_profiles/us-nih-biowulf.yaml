@@ -1,0 +1,162 @@
+# NIH Biowulf (NIH HPC / Center for Information Technology).
+# https://hpc.nih.gov/docs/userguide.html
+#
+# NOT RUN ON HARDWARE. Transcribed from public documentation, 2026-07-29.
+
+version: cluster-profile-v1
+
+verification:
+  status: from-public-docs
+  last_checked: "2026-07-29"
+  source: >
+    https://hpc.nih.gov/docs/userguide.html (partition descriptions: norm
+    default/single-node, multinode, largemem >=350GB minimum, unlimited,
+    quick "< 4 hours", gpu, visual; /lscratch/$SLURM_JOB_ID node-local,
+    deleted when the job ends; batchlim/freen as the tools for current
+    per-partition numeric limits) +
+    https://hpc.nih.gov/docs/connect.html (login host) +
+    https://hpc.nih.gov/storage/ (/home 16GB fixed quota, /data 100GB
+    initial quota). Docs deliberately do NOT publish a single static
+    max-cpus/max-memory table for norm/multinode/unlimited/quick/visual/
+    largemem's upper bound: Biowulf's node pool is heterogeneous and
+    changes over time, and the user guide explicitly directs users to the
+    `batchlim`/`freen` commands (run ON the cluster) for current numbers
+    instead of a fixed table — so those fields are correctly left OMITTED
+    here rather than guessed from one freen snapshot. The `quick` partition
+    also shows a real historical inconsistency across NIH's own pages: the
+    main user guide says "< 4 hours"; a separate change-announcement says
+    MaxWalltime was reduced to 2 hours. This profile uses the user guide's
+    "4 hours" as current-and-authoritative but flags the discrepancy — do
+    not assume the site's own docs pages agree with each other.
+
+cluster:
+  name: us-nih-biowulf
+  aliases: ["biowulf"]   # what $SLURM_CLUSTER_NAME / $LMOD_SYSHOST report
+  hostname_patterns:
+    - "biowulf.nih.gov"
+    - "*.biowulf.nih.gov"
+  description: "NIH Biowulf HPC cluster (NIH HPC / CIT)"
+
+lmod:
+  # Not documented: the user guide shows `module load`/`module spider`
+  # usage but no init-script path to source from a non-interactive shell.
+  bootstrap: ""
+
+slurm:
+  default_partition: norm
+  default_account: ""
+  default_time_minutes: 120        # vendor: norm's default walltime is 2 hours
+  partitions:
+    norm:
+      # Default partition. Restricted to single-node jobs. Vendor
+      # explicitly does not publish a static max_cpus/max_memory_gb table
+      # here (heterogeneous node pool) — use `freen`/`batchlim` on the
+      # cluster for current numbers.
+      max_time_minutes: 14400       # 10 days
+    multinode:
+      # For large-scale parallel (multi-node) jobs; single-node jobs are
+      # NOT allowed here. Vendor: default walltime 8h, max 10 days.
+      max_time_minutes: 14400       # 10 days
+    largemem:
+      # Vendor states a MINIMUM, not a maximum: jobs here "must request a
+      # memory allocation of at least 350GB". No documented per-node
+      # ceiling is given (large-memory nodes reportedly range ~1-3TB across
+      # sources, but no single figure is authoritative) so max_memory_gb is
+      # left unset rather than guessed.
+      max_time_minutes: 14400       # 10 days
+    unlimited:
+      # Reserved for jobs that genuinely need more than norm's 10-day cap.
+      # No max walltime is documented (that is the point of the partition);
+      # vendor notes only a low CPUs-per-user limit in exchange. Both
+      # max_time_minutes and max_cpus are left unset — "unlimited" is not a
+      # number, and the CPU limit is a per-user throttle, not a partition
+      # ceiling this schema models.
+      {}
+    quick:
+      # Vendor user guide: "For jobs < 4 hours long. These jobs are
+      # scheduled at higher priority." NOTE: a separate NIH HPC change
+      # announcement instead states MaxWalltime was reduced from 2h to 1h
+      # default / 2h max — i.e. NIH's own pages disagree. Using the current
+      # user guide's "4 hours" as the authoritative figure; verify with
+      # `batchlim` before relying on this at the 3-4h boundary.
+      max_time_minutes: 240         # 4h per user guide (see note above)
+    gpu:
+      # GPU nodes; reserved for GPU-built applications (job is rejected at
+      # submission if it doesn't request a GPU gres). Core/memory vary by
+      # node type and are not set here for the same reason as norm.
+      max_time_minutes: 14400       # 10 days
+      gpu_types: [p100, v100, v100x, a100]
+    visual:
+      # Small set of GPU nodes reserved for hardware-accelerated remote
+      # visualization (accessed via the `svis` helper), not general compute.
+      max_time_minutes: 14400       # 10 days
+
+scratch:
+  # /lscratch/$SLURM_JOB_ID is NODE-LOCAL disk allocated per-job via
+  # `--gres=lscratch:<GB>`, and the vendor is explicit that "when the job is
+  # terminated, all data in /lscratch/$SLURM_JOB_ID will be automatically
+  # deleted" — i.e. it disappears at JOB END, not on a days-based purge of a
+  # shared filesystem. That's a different shape than what this field models
+  # (a shared, days-purged scratch FS), and since it's keyed by
+  # $SLURM_JOB_ID it isn't even a stable path to compare a bind source
+  # against. Setting a template here would either invent a path that isn't
+  # really "the" scratch location or wrongly suggest a persistent-but-purged
+  # area exists. Left empty on purpose.
+  template: ""
+  auto_cleanup_days: 0
+
+apptainer:
+  cachedir: "${HOME}/.apptainer/cache"
+  prebuilt_url: ""
+
+modules:
+  denylist: []
+  always_load: []
+
+policy:
+  refuse_network: false
+
+agent_hints:
+  preamble: |
+    You are on NIH Biowulf (NIH HPC / CIT).
+
+    Partitions and walltime ceilings:
+    - `norm` (default) — single-node only, 10 days max. The general-purpose
+      choice for most jobs.
+    - `multinode` — for genuinely parallel multi-node jobs only; single-node
+      jobs are refused here. 10 days max.
+    - `largemem` — only for jobs that need memory `norm` nodes can't offer;
+      you MUST request at least 350GB to land here (that's a floor, not a
+      target — don't request 350GB "just in case"). 10 days max.
+    - `unlimited` — for the rare job that truly needs more than 10 days.
+      Comes with a low per-user CPU-count ceiling in exchange — don't use it
+      as a default just to avoid the walltime limit.
+    - `quick` — for jobs under ~4 hours; runs at higher scheduling priority.
+      NIH's own docs disagree on the exact cap (a user-guide page says 4h, a
+      change-announcement page says 2h) — if a job is close to that
+      boundary, check `batchlim` rather than assuming either number.
+    - `gpu` — GPU-built applications only (a job with no GPU request is
+      rejected at submission). GPU types available: P100, V100, V100x, A100.
+      10 days max.
+    - `visual` — a small pool of GPU nodes for hardware-accelerated remote
+      visualization via `svis`, not general compute.
+    Core/memory ceilings deliberately aren't hard-coded above: Biowulf's
+    node pool is heterogeneous and changes over time. Run `freen` (free
+    nodes/cores by partition) or `batchlim` (your current per-partition
+    limits) on the cluster for live numbers instead of trusting a static
+    table.
+
+    Filesystems:
+    - /home/<user> — fixed 16GB quota, cannot be increased. Code and small
+      configs only.
+    - /data/<user> — 100GB initial quota (expandable via a request form).
+      The durable working area for datasets, environments, and results.
+    - /lscratch/$SLURM_JOB_ID (node-local disk, size requested via
+      `--gres=lscratch:<GB>`) — fast local storage for a single job. DELETED
+      THE MOMENT THE JOB ENDS — this is a job-end wipe, not a days-based
+      purge of a shared filesystem, and there is no grace period. Copy
+      anything you need to keep into /data before the job finishes.
+
+    For many independent tasks (parameter sweeps, per-file processing),
+    prefer a Slurm job array or Biowulf's `swarm` utility over launching
+    many separate individual jobs.

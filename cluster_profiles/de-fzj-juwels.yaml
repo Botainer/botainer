@@ -1,0 +1,160 @@
+# Jülich JUWELS (Jülich Supercomputing Centre / Forschungszentrum Jülich, Germany).
+# https://apps.fz-juelich.de/jsc/hps/juwels/
+#
+# NOT RUN ON HARDWARE. Transcribed from public documentation.
+
+version: cluster-profile-v1
+
+verification:
+  status: from-public-docs
+  last_checked: "2026-07-29"
+  source: >-
+    https://apps.fz-juelich.de/jsc/hps/juwels/batchsystem.html (partition table),
+    https://apps.fz-juelich.de/jsc/hps/juwels/filesystems.html (GPFS tiers, $SCRATCH purge policy),
+    https://apps.fz-juelich.de/jsc/hps/juwels/environment.html (internet-access statement, path variables),
+    https://apps.fz-juelich.de/jsc/hps/juwels/container-runtime.html (Apptainer, module/Lmod integration).
+    NOT stated on these pages: an exact literal $SCRATCH path (docs use the
+    env var and reference quota tooling against "/p/scratch/..." without a
+    full worked example; per-project/per-user subpath layout is not spelled
+    out), and no standalone Lmod bootstrap script (Lmod is preloaded in the
+    login/job environment via JSC's "Stages" software-stack system, not
+    sourced from a documented init path).
+
+cluster:
+  name: de-fzj-juwels
+  aliases: ["juwels"]   # what $SLURM_CLUSTER_NAME / $LMOD_SYSHOST report
+  hostname_patterns:
+    - "juwels*"
+    - "jwlogin*"
+    - "jwb*"
+  description: "Jülich JUWELS Cluster + Booster (AMD EPYC Rome; Booster: 4x NVIDIA A100 per node)"
+
+lmod:
+  # JSC's software stack ("Stages") preloads Lmod in the standard login/job
+  # environment; no separate init script is documented to source. Left
+  # empty rather than guessed.
+  bootstrap: ""
+
+slurm:
+  # JUWELS has two hardware modules under one Slurm instance: "Cluster"
+  # (CPU-only, partitions batch/mem192/devel) and "Booster" (GPU,
+  # partitions booster/develbooster). Vendor-documented default walltime
+  # if unspecified is 1 hour; default_time_minutes below is botainer's own
+  # operational default (see sibling profiles), not a JUWELS-specific value.
+  default_partition: batch
+  default_account: ""
+  default_time_minutes: 240
+  partitions:
+    batch:
+      max_time_minutes: 1440        # 24 h normal; 6 h if --no-container/nocont QOS
+      max_cpus: 48
+      max_memory_gb: 96              # standard Cluster nodes (2,271 of them)
+    mem192:
+      max_time_minutes: 1440        # 24 h normal; 6 h nocont
+      max_cpus: 48
+      max_memory_gb: 192             # large-memory Cluster nodes (240 of them)
+    devel:
+      max_time_minutes: 120         # 2 h; rapid-turnaround dev/debug. Internet access IS enabled here.
+      max_cpus: 48
+      max_memory_gb: 96
+    booster:
+      max_time_minutes: 1440        # 24 h normal; 6 h nocont
+      max_cpus: 48
+      max_memory_gb: 512
+      gpu_types: [a100]
+    develbooster:
+      max_time_minutes: 120         # 2 h; dev/debug on Booster hardware. Internet access IS enabled here.
+      max_cpus: 48
+      max_memory_gb: 512
+      gpu_types: [a100]
+
+scratch:
+  # Confirmed real prefix (JSC quota tooling docs reference paths under
+  # "/p/scratch/..."), but the exact per-project/per-user subdirectory
+  # layout is not spelled out in the pages checked, so only the confirmed
+  # prefix is recorded rather than a guessed full path. Purge policy IS
+  # explicit: "$SCRATCH ... data are automatically deleted (files after 90
+  # days by modification and access date, empty directories after 3 days)".
+  template: "/p/scratch"
+  auto_cleanup_days: 90
+
+apptainer:
+  cachedir: "/p/scratch/.apptainer/cache"
+  prebuilt_url: ""
+
+modules:
+  denylist: []
+  always_load: []
+
+policy:
+  # Explicit from docs: "production compute nodes do not have an external
+  # internet connection" (git/ssh from compute nodes is also disallowed).
+  # NOTE the devel/develbooster partitions are a documented EXCEPTION —
+  # see preamble.
+  # LEFT FALSE DELIBERATELY (corrected 2026-07-29).
+  #
+  # `policy.refuse_network` is a botainer POLICY — "do not give this container
+  # network" — i.e. a control WE claim to enforce. It is NOT a description of
+  # the cluster. This profile had it set to true to record a different fact:
+  # that this SITE's compute nodes have no internet egress.
+  #
+  # Two reasons that was wrong:
+  #   1. Category error. The site's egress is an ENVIRONMENT PROPERTY we should
+  #      report and plan around; refuse_network is an ENFORCEMENT CLAIM. A
+  #      profile cannot enforce anything.
+  #   2. The policy is not wired on HPC at all. `apptainer exec` inherits the
+  #      host network namespace, so network.mode=none cannot be honoured —
+  #      adapters/apptainer.py:74 refuses it explicitly rather than pretend.
+  #      Nothing anywhere reads this field. Setting it true asserted a control
+  #      that does not exist, which is the worst kind of security claim.
+  #
+  # The FACT is preserved where it is actually consumed: agent_hints.preamble
+  # below, which reaches the agent and tells it to pre-stage dependencies.
+  # Per-node-type egress deserves a real field; tracked as gap 9 in
+  # DN-021.
+  refuse_network: false
+
+agent_hints:
+  preamble: |
+    You are on Jülich JUWELS (JSC / Forschungszentrum Jülich), which has two
+    hardware modules: Cluster (CPU-only, AMD EPYC Rome) and Booster (4x
+    NVIDIA A100 GPU per node).
+
+    NETWORK — read this first: production compute nodes (`batch`, `mem192`,
+    `booster`) have NO external internet connection. `pip install`,
+    `git clone` over https, and outbound ssh will all fail there. The
+    `devel` and `develbooster` partitions are a documented exception and DO
+    have internet access — use them (within their 2-hour cap) for anything
+    that needs to fetch packages, then move to a production partition for
+    the actual run with pre-staged dependencies.
+
+    Partitions: `batch` (default, 24 h, standard 96 GiB Cluster nodes),
+    `mem192` (24 h, large-memory 192 GiB Cluster nodes), `booster` (24 h,
+    4x A100 GPU nodes, 512 GiB). `devel`/`develbooster` (2 h) are for
+    interactive testing/debugging and have internet access as noted above.
+    A `nocont` QOS variant caps some of these at 6 h instead of 24 h.
+
+    Containers: Apptainer is supported (JUWELS migrated from Singularity;
+    the `singularity` command is a compatibility symlink to `apptainer`).
+    Building images ON JUWELS is not supported (no root) — pull prebuilt
+    images from a registry, or build elsewhere and transfer the `.sif` in.
+    Set `APPTAINER_CACHEDIR`/`APPTAINER_TMPDIR` off $HOME to avoid quota
+    issues. Container access requires being in the `container` group
+    (requested via JuDoor).
+
+    Filesystems:
+    - $HOME (`$JUSTHOME`) — personal data, backed up. Code/configs/keys only.
+    - $SCRATCH (`$JUSTSCRATCH`, under `/p/scratch/...`) — the large working
+      area, NOT backed up. PURGED: files deleted after 90 days without a
+      modification or access; empty directories after just 3 days.
+    - $PROJECT (`$JUSTPROJECT`) — source code, binaries, libraries; backed up.
+    - $DATA (`$JUSTDATA`) — large-capacity storage for sharing data; snapshot
+      backup.
+    - $ARCHIVE (`$JUSTARCHIVE`) — for files not in active use; migrated to
+      tape, not fast to retrieve.
+    - `/tmp` on login nodes is cleared after 7 days; on compute nodes it is
+      tmpfs (consumes node memory) and should be cleared by your job.
+
+    Access to storage/compute is budget- and project-scoped; use
+    `jutil env activate -p <project>` to expose the right variables, and
+    JuDoor for quota/budget visibility.

@@ -1,0 +1,231 @@
+# University of Sheffield HPC — Stanage (current general-purpose cluster).
+# Docs: https://docs.hpc.shef.ac.uk/en/latest/
+#
+# NOT RUN ON HARDWARE. Transcribed from public documentation on 2026-07-29.
+#
+# Stanage vs Bessemer: the task that produced this file asked about both.
+# Bessemer was RETIRED IN OCTOBER 2025 and is listed under "Decommissioned
+# Clusters" in the current docs (alongside ShARC and Iceberg); its own
+# `/en/latest/bessemer/index.html` page now 404s. It is not live, so this
+# file does not carry a Bessemer hostname pattern or partition data — doing
+# so would risk mis-autodetecting a dead/reassigned hostname. If you're
+# still on Bessemer, it no longer exists; migrate to Stanage.
+# Source: https://docs.hpc.shef.ac.uk/en/latest/decommissioned/index.html
+#
+# Scheduler: confirmed Slurm (not SGE/PBS/LSF). Both
+# https://docs.hpc.shef.ac.uk/en/latest/stanage/cluster_specs.html
+# ("Interactive and batch job scheduling software: Slurm.") and
+# https://docs.hpc.shef.ac.uk/en/latest/hpc/scheduler/index.html
+# ("we use the SLURM scheduler") say so explicitly.
+
+version: cluster-profile-v1
+
+verification:
+  status: from-public-docs
+  last_checked: "2026-07-29"
+  source: >
+    https://docs.hpc.shef.ac.uk/en/latest/stanage/cluster_specs.html
+    (node counts/types, memory, GPU hardware),
+    https://docs.hpc.shef.ac.uk/en/latest/stanage/GPUComputingStanage.html
+    (GPU partition names gpu/gpu-h100/gpu-h100-nvl, --qos=gpu, 12-GPU/user
+    concurrency cap),
+    https://docs.hpc.shef.ac.uk/en/latest/hpc/scheduler/index.html and
+    https://docs.hpc.shef.ac.uk/en/latest/hpc/Choosing-appropriate-resources.html
+    (cluster-wide CPU/time/memory allocation tables),
+    https://docs.hpc.shef.ac.uk/en/latest/hpc/filestore.html
+    (home /users/$USER 50GB-or-300k-files quota; fastdata /mnt/parscratch/
+    no quota, "currently has no automatic file deletion process"; scratch
+    /tmp node-local, deleted at job end),
+    https://docs.hpc.shef.ac.uk/en/latest/hpc/transferring-files.html
+    ("Git is installed on the clusters and can be used on any node"; curl/wget
+    recommended for direct downloads "to a cluster"),
+    https://docs.hpc.shef.ac.uk/en/latest/stanage/software/apps/apptainer.html
+    (Apptainer 1.1.x, per-user dir ~/.apptainer, no default remote registry,
+    auto-binds /mnt/parscratch, /home, /tmp; container *definition files* —
+    not prebuilt binaries — at https://github.com/rses-singularity),
+    https://docs.hpc.shef.ac.uk/en/latest/hpc/modules.html (module system is
+    "Environment Modules", links to modules.sourceforge.net; no Lmod branding
+    or bootstrap-script path found),
+    https://docs.hpc.shef.ac.uk/en/latest/hpc/high-priority.html (hp-* paid
+    partitions exist but "is not currently available, but will be soon" —
+    excluded below as unusable),
+    https://docs.hpc.shef.ac.uk/en/latest/stanage/stanage-FAQ-gotchas.html
+    (login node hostnames),
+    https://docs.hpc.shef.ac.uk/en/latest/decommissioned/index.html (Bessemer
+    retired Oct 2025).
+    NOT stated anywhere found: a named default/general-purpose CPU partition
+    (docs' own batch examples omit --partition entirely); a per-GPU-partition
+    walltime override distinct from the cluster-wide 96h batch max; an
+    explicit top-level "compute nodes have/lack internet" policy statement
+    (inferred instead from the Git/curl/wget language cited above — see the
+    policy comment below for how that inference was made and its limits).
+
+cluster:
+  name: uk-sheffield-stanage
+  aliases: ["stanage"]   # what $SLURM_CLUSTER_NAME / $LMOD_SYSHOST report
+  hostname_patterns:
+    - "stanage-login*"
+    - "stanage.shef.ac.uk"
+  description: >
+    University of Sheffield Stanage HPC cluster (Slurm; launched March 2023
+    as the successor to ShARC). 205 worker nodes, ~12,896 CPU cores, 104
+    GPUs across A100/H100/H100-NVL node types.
+
+lmod:
+  # Docs call the module system "Environment Modules" (module avail/load/
+  # purge) and link to modules.sourceforge.net — the classic Tcl Environment
+  # Modules project, not Lmod by name. No bootstrap script path is
+  # documented as something a user/agent needs to source; `module` just
+  # works in the default login shell. Left blank rather than guessing a
+  # path (e.g. lmod's /etc/profile.d/lmod.sh) that may not exist here.
+  bootstrap: ""
+
+slurm:
+  # No named default/general CPU partition is documented — Stanage's own
+  # quick-start batch example (sbatch hello.slurm) never passes --partition
+  # at all, implying Slurm's own configured default is used automatically.
+  # Inventing a plausible-looking name here (e.g. "compute", "batch") would
+  # be exactly the kind of fabricated fact this file must not contain, since
+  # a wrong --partition value makes sbatch reject the job outright.
+  default_partition: ""
+  default_account: ""
+  # Cluster-wide default for BOTH interactive and batch jobs is 8 hours
+  # ("Time Allocation Limits Table", SLURM (Stanage): 8/8 hrs interactive,
+  # 8/96 hrs batch).
+  default_time_minutes: 480
+  partitions:
+    # The three GPU partitions are the only Slurm partition NAMES actually
+    # documented by name. Each requires --qos=gpu (or --qos=gpu plus the
+    # partition) alongside --gres=gpu:N / the newer --gpus=N syntax.
+    gpu:
+      # No GPU-specific walltime override is documented; using the general
+      # cluster-wide batch max (96h) from the Time Allocation Limits table.
+      max_time_minutes: 5760
+      max_cpus: 48          # A100 node: 2x24-core AMD EPYC 7413
+      max_memory_gb: 503    # "512 GB (503 GB available)" per A100 node spec
+      gpu_types: [a100]     # 4x NVIDIA A100 80GB per node, 13 nodes
+    gpu-h100:
+      max_time_minutes: 5760
+      max_cpus: 48          # H100 node: 2x24-core AMD EPYC 7413
+      max_memory_gb: 503
+      gpu_types: [h100]     # 2x NVIDIA H100 80GB per node, 6 nodes
+    gpu-h100-nvl:
+      max_time_minutes: 5760
+      max_cpus: 96          # H100-NVL node: 2x48-core Intel Xeon 8468
+      max_memory_gb: 503
+      gpu_types: [h100-nvl] # 4x NVIDIA H100 NVL 94GB per node, 4 nodes
+    # NOT included: hp-cpu / hp-a100 / hp-h100 / hp-h100-nvl — these are
+    # real documented partition names for the paid "HPC High-Priority
+    # Service", but that service's own docs page says "is not currently
+    # available, but will be soon" — listing them would suggest a job can
+    # use them today when it cannot.
+
+scratch:
+  # Deliberately left blank. Stanage's shared, quota-free "fastdata" area
+  # (/mnt/parscratch/) is the closest thing to a purged scratch area other
+  # cluster profiles point at — but the docs explicitly say it currently has
+  # NO automated deletion ("no automated quota controls in the Stanage
+  # fastdata areas and the Stanage fastdata area currently has no automatic
+  # file deletion process"; admins reserve the right to manually remove
+  # flagged files after emailing the owner, but there is no day-count to
+  # encode). The only thing actually deleted on a schedule is /tmp, which is
+  # node-local and wiped at job end — too ephemeral to be a cross-job
+  # "scratch template" redirect target. Per the no-guessing rule: a purge policy
+  # that isn't a stated day-count doesn't get encoded as one.
+  template: ""
+  auto_cleanup_days: 0
+
+apptainer:
+  # Docs confirm Apptainer 1.1.x is available, with a per-user config dir at
+  # ~/.apptainer (replacing ~/.singularity post the 2021 Apptainer/Singularity
+  # fork) — but do not state a recommended CACHE location. The path below is
+  # OUR practical recommendation, not a documented Sheffield default: home
+  # (/users/$USER) is capped at 50 GB or 300k files (easily blown by a few
+  # container image caches), while fastdata (/mnt/parscratch) is quota-free
+  # and is already one of the paths Apptainer auto-bind-mounts into
+  # containers. Users/agents must `mkdir -p` this path themselves first —
+  # per docs, /mnt/parscratch/users/$USER does not exist by default.
+  cachedir: "/mnt/parscratch/users/${USER}/.apptainer/cache"
+  # Sheffield publishes container *definition files* (recipes to build from),
+  # not prebuilt downloadable images, at https://github.com/rses-singularity —
+  # that's not a "prebuilt image" URL in the sense this field means, so it's
+  # left blank rather than pointed at a repo of source recipes.
+  prebuilt_url: ""
+
+modules:
+  denylist: []
+  always_load: []
+
+policy:
+  # No page found makes a blanket "compute nodes have/lack internet" claim.
+  # Set to false (unrestricted) on the strength of two specific, current
+  # statements: (1) https://docs.hpc.shef.ac.uk/en/latest/hpc/transferring-files.html
+  # says outright "Git is installed on the clusters and can be used on any
+  # node" for push/pull, deliberately not scoping that to login nodes only;
+  # (2) the same page recommends `curl`/`wget` as the normal, faster way to
+  # fetch files "directly to a cluster". Neither statement is an explicit
+  # "unrestricted egress" guarantee, so treat this as a well-evidenced
+  # inference, not a documented fact — if a network call unexpectedly hangs
+  # inside a batch job, don't assume it's a code bug before checking with
+  # research-it@sheffield.ac.uk or a quick manual probe from a compute node.
+  refuse_network: false
+
+agent_hints:
+  preamble: |
+    You are on the University of Sheffield's Stanage HPC cluster (Slurm).
+    Bessemer, Sheffield's older cluster, was retired in October 2025 and no
+    longer exists — if anything you read mentions it, it's stale.
+
+    Partitions and walltime:
+    - There is no named default CPU partition to pass — omit --partition
+      entirely for ordinary CPU batch/interactive work and Slurm will place
+      it. Only the three GPU partitions have documented names: `gpu` (A100,
+      4/node, 13 nodes), `gpu-h100` (H100, 2/node, 6 nodes), and
+      `gpu-h100-nvl` (H100 NVL, 4/node, 4 nodes). All three need
+      --qos=gpu plus --gres=gpu:N (or the newer --gpus=N).
+    - Interactive jobs default to 8h and cap at 8h. Batch jobs default to 8h
+      and cap at 96h (4 days) cluster-wide — there is no documented
+      per-partition override for the GPU partitions, so plan around 96h as
+      the ceiling everywhere.
+    - Each user may use at most 12 GPUs concurrently (A100+H100 combined,
+      reduced from 16 in Aug 2025) — further GPU jobs queue behind it.
+    - Interactive GPU sessions are explicitly discouraged by the docs
+      (reserve them for short debugging/visualisation/compiles); run real
+      GPU workloads as batch jobs.
+    - GPU device memory (80GB on A100/H100, 94GB on H100-NVL) is far larger
+      than the host memory an interactive session defaults to — request
+      host --mem explicitly (docs' own examples use --mem=82G for A100/H100,
+      --mem=96G for H100-NVL) or CPU<->GPU transfers can fail.
+    - Login nodes are for editing/compiling/submitting only — never run
+      heavy computation there; use srun/sbatch.
+
+    Storage — know where things go, and what does NOT get cleaned up:
+    - Home (/users/$USER): 50 GB or 300,000 files, NOT backed up. Config and
+      small scripts only.
+    - Fastdata (/mnt/parscratch/): no quota, Lustre, the big shared working
+      area — but there is currently NO automatic purge of old files here
+      (unlike many other HPC sites). Don't rely on it being purged, but also
+      don't assume it's permanent: admins may manually remove flagged files
+      after emailing the account owner if usage looks unfair. NOT backed up.
+      You must create your own subdirectory first:
+      `mkdir -p /mnt/parscratch/users/$USER && chmod 700 /mnt/parscratch/users/$USER`.
+    - Scratch (/tmp, per job): node-local, no quota, DELETED when the job
+      ends (and may be periodically cleared on idle nodes too) — copy
+      anything you need out before the job finishes.
+    - Shared/project storage: 10 TB per PI, backed up + snapshotted, but
+      request-based and accessible from login nodes only.
+
+    Network: outbound access from compute nodes appears UNRESTRICTED — the
+    docs explicitly say Git works "on any node" for push/pull, and recommend
+    curl/wget for downloading dependencies straight onto the cluster. This
+    is an inference from that wording, not a documented blanket guarantee;
+    if pip/conda/git networking unexpectedly hangs inside a batch job,
+    don't assume it's your code before checking with Sheffield IT.
+
+    Software: no sudo/root, ever, and no package-manager installs to the
+    base OS (apt/yum/dnf/etc. are all refused). Install into $HOME (small)
+    or /mnt/parscratch (large/shared) instead, via modules, Conda, or
+    Apptainer/Singularity (v1.1.x available; per-user dir is ~/.apptainer,
+    not ~/.singularity; no default remote registry, so specify a full pull
+    URL). Definition files (not prebuilt images) are published at
+    https://github.com/rses-singularity.

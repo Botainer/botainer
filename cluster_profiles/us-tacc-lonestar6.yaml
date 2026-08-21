@@ -1,0 +1,209 @@
+# TACC Lonestar6 (Texas Advanced Computing Center, UT Austin).
+# https://docs.tacc.utexas.edu/hpc/lonestar6/
+#
+# NOT RUN ON HARDWARE. Transcribed from public documentation.
+
+version: cluster-profile-v1
+
+verification:
+  status: from-public-docs
+  last_checked: "2026-07-29"
+  source: >
+    https://docs.tacc.utexas.edu/hpc/lonestar6/ (Slurm 20.11.8; Table 1/2
+    compute + A100/H100/vm-small node specs; Table 3 file-system quotas +
+    10-day scratch purge wording; login hostnames) +
+    https://docs.tacc.utexas.edu/hpc/6lonestar/running/ (Table 5 Production
+    Queues — node/time/job caps and SU charge rates; vm-small and
+    gpu-a100-small queue-selection guidance text) +
+    https://docs.tacc.utexas.edu/hpc/6lonestar/system/ (corroborating node
+    and login-node specs) +
+    https://containers-at-tacc.readthedocs.io/en/latest/singularity/01.singularity_basics.html
+    (tacc-apptainer module name; this is TACC's general container guide,
+    not a Lonestar6-specific page, but the Lmod/module infrastructure it
+    describes is TACC-wide, same as the sibling tacc-stampede3 profile).
+    Docs did NOT state: a literal filesystem path for $SCRATCH/$WORK/$HOME
+    (only the env-var names + quotas); exact max_cpus/max_memory_gb for the
+    gpu-a100-small queue (only "virtual nodes with fewer resources (cores)");
+    a distinct Lmod bootstrap/init script (module command appears available
+    by default in the login shell).
+
+cluster:
+  name: us-tacc-lonestar6
+  aliases: ["lonestar6"]   # what $SLURM_CLUSTER_NAME / $LMOD_SYSHOST report
+  hostname_patterns:
+    - "ls6.tacc.utexas.edu"
+    - "login*.ls6.tacc.utexas.edu"
+    - "ls6*"
+  description: "TACC Lonestar6 (AMD EPYC 7763 \"Milan\" compute/A100 nodes; EPYC 9454 \"Genoa\" H100 nodes; NVIDIA A100 + H100 GPUs)"
+
+lmod:
+  # Lonestar6's guide describes Lmod as available by default in the login
+  # shell ("module load [package]" / "module avail") and states no separate
+  # init/bootstrap script. Left "" deliberately rather than guessed.
+  bootstrap: ""
+
+slurm:
+  # Every queue here allocates a WHOLE node and charges per node-hour —
+  # confirmed explicitly: "Each Lonestar6 node can be assigned to only one
+  # user at a time; hence a complete node is dedicated to a user's job and
+  # accrues wall-clock time for all the node's cores whether or not all
+  # cores are used." The one exception is `vm-small`, whose own guidance
+  # text says to use it "if your job requires 16 cores or less and needs
+  # less than 29 GB of memory" — a real fractional allocation (1/7 of a
+  # physical host) at 0.143 SU/node-hr vs. 1 SU/node-hr for `normal`. That
+  # makes it the right default for a single coding-agent session, unlike
+  # Stampede3 (no such queue exists there).
+  default_partition: vm-small
+  default_account: ""
+  default_time_minutes: 240
+  partitions:
+    # Table 5 (Production Queues) does not restate per-queue hardware; the
+    # max_cpus/max_memory_gb below come from Table 1/2's node specs for the
+    # pool each queue draws from (development/normal/large -> the 560
+    # general "compute" nodes; gpu-a100* -> the 84 A100 nodes; gpu-h100 ->
+    # the 4 H100 nodes; vm-small -> its own VM pool).
+    development:
+      max_time_minutes: 120         # 2 h, 8-node cap — interactive/testing only
+      max_cpus: 128                 # Milan, 2 sockets x 64
+      max_memory_gb: 256
+    normal:
+      max_time_minutes: 2880        # 48 h, 1-64 nodes/job, 1 SU/node-hr
+      max_cpus: 128
+      max_memory_gb: 256
+    large:
+      # RESTRICTED: docs note this queue requires a consulting ticket to
+      # access (65-256 nodes/job). Same node hardware as `normal`.
+      max_time_minutes: 2880
+      max_cpus: 128
+      max_memory_gb: 256
+    gpu-a100:
+      max_time_minutes: 2880        # 48 h, 8-node cap/job, 3 SUs/node-hr
+      max_cpus: 128
+      max_memory_gb: 256
+      gpu_types: [a100]              # 3x NVIDIA A100 PCIe 40GB per node
+    gpu-a100-dev:
+      max_time_minutes: 120          # 2 h, 2-node cap/job, 3 SUs/node-hr
+      max_cpus: 128
+      max_memory_gb: 256
+      gpu_types: [a100]
+    gpu-a100-small:
+      # Docs: "virtual nodes with fewer resources (cores) than the nodes in
+      # the other queues" — no specific core/memory number given, so
+      # max_cpus/max_memory_gb are OMITTED rather than guessed. 1-node
+      # cap/job, 1.5 SUs/node-hr.
+      max_time_minutes: 2880
+      gpu_types: [a100]
+    gpu-h100:
+      # 1-node cap/job, 6 SUs/node-hr (priciest queue). Different CPU
+      # generation than the rest of the system.
+      max_time_minutes: 2880
+      max_cpus: 96                   # Genoa, 2 sockets x 48
+      max_memory_gb: 384
+      gpu_types: [h100]              # 2x NVIDIA H100 PCIe 80GB per node
+    vm-small:
+      # Per docs' own queue-selection guidance: "Run your jobs in this queue
+      # if your job requires 16 cores or less and needs less than 29 GB of
+      # memory." (Physical VM host shows 32 GB shared; 29 GB is the
+      # documented usable guidance, so that's what's recorded here.) 4-node
+      # cap/job, 0.143 SU/node-hr — cheapest queue on the system. Docs warn
+      # memory-bandwidth-heavy jobs may see reduced performance since the
+      # VM shares a physical host with others.
+      max_time_minutes: 2880
+      max_cpus: 16
+      max_memory_gb: 29
+
+scratch:
+  # Docs describe $SCRATCH as shared (BeeGFS, 8 PB, no quota) and purged:
+  # "Files are subject to purge if access time is more than 10 days old."
+  # That is a real, documented, shared + purged scratch, so a template
+  # belongs here.
+  #
+  # BUT: the docs give only the env-var name, never a literal underlying
+  # path (no "/scratch/<id>/<user>"-style example was found for Lonestar6
+  # specifically) — inventing one would be a guess wearing the costume of a
+  # fact. "${SCRATCH}" is itself the literal, correct, documented reference
+  # (the login shell sets it), but because it starts with "$" it does not
+  # give botainer's purge-prefix comparison
+  # (botainer/inspect/agent_hints.py:cluster_purge_prefix) any literal
+  # directory prefix to match against — that comparison will treat this
+  # profile the same as "unknown" until a real path is confirmed on-cluster.
+  # The display-only fields below (`hpc info`, `hpc setup` guidance) are
+  # still correct and useful in the meantime.
+  # CLEARED 2026-07-29. The site documents scratch only as `${SCRATCH}`,
+  # never as a literal path. botainer compares this value as a PATH
+  # PREFIX against the real /scratch bind source to decide whether to
+  # warn about purging; an env-var token has no literal prefix, so it
+  # silently disables that warning while LOOKING like configuration.
+  # Leave it absent rather than guess a token.
+  #
+  # The purge is REAL — Lonestar6 deletes files after ~10 days — and
+  # that fact is stated in agent_hints below so it is not lost. Restore
+  # both fields once the literal path is confirmed on the cluster
+  # (`echo $${SCRATCH}` on a login node answers it in one command).
+  template: ""
+  auto_cleanup_days: 0             # vendor: "access time is more than 10 days old"
+
+apptainer:
+  cachedir: "${SCRATCH}/.apptainer/cache"
+  prebuilt_url: ""
+
+modules:
+  denylist: []
+  always_load:
+    # Per containers-at-tacc docs: "module load tacc-apptainer" — the
+    # Apptainer module is only available on compute nodes at TACC, not login
+    # nodes, so this must be loaded inside the job (e.g. via idev or an
+    # sbatch script), not at login.
+    - tacc-apptainer
+
+policy:
+  refuse_network: false
+
+agent_hints:
+  preamble: |
+    You are on TACC Lonestar6 (Texas Advanced Computing Center, UT Austin).
+    Scheduler is Slurm.
+
+    Every queue except `vm-small` allocates a WHOLE node and charges for all
+    of it regardless of how much you actually use — TACC's own words: "a
+    complete node is dedicated to a user's job and accrues wall-clock time
+    for all the node's cores whether or not all cores are used." There is no
+    generic "shared" queue that lets you request a few cores of a big node.
+
+    - `vm-small` — 16 cores / <29 GB, 1/7 of a physical host, 0.143
+      SU/node-hr (far cheaper than anything else). Right-sized for a single
+      coding-agent session; this profile's default. Memory-bandwidth-heavy
+      work may see reduced, noisier performance since the host is shared.
+    - `development` — full compute node (128 cores, 256 GB), capped at 2
+      hours: quick interactive testing only.
+    - `normal` — full compute node (128 cores, 256 GB), up to 48 hours,
+      1 SU/node-hr. The standard production CPU queue if you need a whole
+      node's cores.
+    - `large` — same hardware as `normal` but for 65-256 node jobs.
+      RESTRICTED: docs say this needs a consulting ticket before you can use
+      it.
+    - `gpu-a100` / `gpu-a100-dev` — full A100 node (128 cores, 256 GB, 3x
+      NVIDIA A100 40GB). `-dev` is the 2-hour testing variant.
+    - `gpu-a100-small` — a smaller A100 allocation ("fewer resources
+      (cores)" per docs, exact size not published), 1.5 SUs/node-hr.
+    - `gpu-h100` — 2x NVIDIA H100 80GB, 96 cores, 384 GB RAM. 1-node cap,
+      6 SUs/node-hr: the priciest queue on the system.
+
+    All queues cap at 48 hours except `development` and `gpu-a100-dev` (2
+    hours).
+
+    Apptainer is only available on compute nodes, not login nodes — the
+    launcher's `module load tacc-apptainer` must run inside the job, never
+    at login.
+
+    Filesystems:
+    - $HOME — 10 GB / 200,000 files, NFS, backed up regularly, not purged.
+      Code and configs only.
+    - $WORK — 1 TB / 3,000,000 files, shared across ALL TACC systems (the
+      quota is global, not per-cluster). Lustre. Not backed up, not purged.
+    - $SCRATCH — no quota (BeeGFS, 8 PB total), not backed up, PURGED: any
+      file whose access time is more than 10 days old is subject to
+      deletion. Docs don't publish a literal path for $SCRATCH (only the
+      env var), so refer to it as `$SCRATCH`, not a hardcoded path.
+    - `/tmp` on a compute node — 288 GB local SSD, wiped at the end of every
+      job, not shared across nodes.

@@ -1,0 +1,292 @@
+# Isambard 3 (GW4 Alliance / University of Bristol; BriCS — Bristol Centre
+# for Supercomputing). Public docs: https://docs.isambard.ac.uk/
+#
+# NOT RUN ON HARDWARE. Transcribed from public documentation, 2026-07-29.
+#
+# AMBIGUITY, read before trusting this file: BriCS currently operates TWO
+# separate, separately-documented systems:
+#   - Isambard 3        — GW4-regional Tier 2 service. Arm "Grace" CPU-only
+#                          nodes plus a small x86 "MACS" comparison testbed
+#                          (CPU + GPU). THIS PROFILE covers Isambard 3.
+#   - Isambard-AI       — much larger, DSIT/UKRI-funded national AI Research
+#                          Resource (AIRR). NVIDIA GH200 Grace-Hopper nodes
+#                          (H100-class GPUs). Separate login endpoint
+#                          (`*.aip2.isambard` vs `*.3.isambard`/`*.macs3.isambard`)
+#                          and a SEPARATE allocation/access process
+#                          (apply.isambard.ac.uk/ukri or /sovai, vs GW4
+#                          per-institution routes for Isambard 3). Same
+#                          scheduler (Slurm) and same 24h walltime cap, but
+#                          NOT covered by the partitions below — pick a
+#                          different profile / write a new one if that's
+#                          what you're actually on.
+# Isambard 3 itself is really two Slurm targets reached via different SSH
+# aliases: `EXAMPLE_PROJECT.3.isambard` (the "grace" CPU partition) and
+# `EXAMPLE_PROJECT.macs3.isambard` (the 8 MACS testbed partitions). Both are
+# folded into one profile here since they share a filesystem/module/policy
+# environment, but `slurm.default_partition` below only applies to the
+# `.3.isambard` (Grace) entry point — see the MACS note under `partitions`.
+#
+# Sources fetched 2026-07-29 (see verification.source for the full list).
+# Scheduler CONFIRMED as Slurm (sbatch/srun examples throughout the guides).
+
+version: cluster-profile-v1
+
+verification:
+  status: from-public-docs
+  last_checked: "2026-07-29"
+  source: >-
+    https://docs.isambard.ac.uk/user-documentation/information/job-scheduling/
+    (partition tables, 24h walltime cap, MACS has NO default partition, macs_qos
+    2-GPU/20-queued-job project limits),
+    https://docs.isambard.ac.uk/specs/ (per-node CPU/memory/GPU specs),
+    https://docs.isambard.ac.uk/user-documentation/information/system-storage/
+    (home/scratch/project/local storage, 60-day scratch purge on Isambard 3),
+    https://docs.isambard.ac.uk/user-documentation/guides/login/ and
+    https://docs.isambard.ac.uk/user-documentation/guides/shortname/ (Clifton
+    SSH-certificate login, per-system SSH aliases),
+    https://docs.isambard.ac.uk/user-documentation/guides/modules/ (module
+    commands, PrgEnv-gnu, brics/userenv),
+    https://docs.isambard.ac.uk/user-documentation/guides/environment_variables/,
+    https://docs.isambard.ac.uk/user-documentation/guides/containers/ and
+    .../containers/apptainer/ (Apptainer available, Arm64/aarch64 images
+    required, docker:// pulls shown working),
+    https://docs.isambard.ac.uk/user-documentation/guides/using_ai_agents/,
+    https://docs.isambard.ac.uk/user-documentation/tutorials/distributed-training/
+    and .../tutorials/datasets-in-squashfs/,
+    https://docs.isambard.ac.uk/user-documentation/faqs/,
+    https://docs.isambard.ac.uk/policies/acceptable_use/,
+    https://docs.isambard.ac.uk/access/, https://docs.isambard.ac.uk/about/,
+    https://docs.isambard.ac.uk/user-documentation/getting_started/.
+    NOT stated anywhere in the above: an explicit compute-node internet/
+    egress policy (no page says restricted OR unrestricted — see policy.
+    refuse_network comment below); an Lmod (or other) bootstrap script path;
+    an APPTAINER_CACHEDIR convention; the real backing DNS hostname of login/
+    compute nodes (SSH access goes through a `clifton`-managed virtual
+    `.isambard` alias domain, not plain DNS, and the docs never print the
+    real hostname it resolves to).
+
+cluster:
+  name: uk-bristol-isambard
+  aliases: ["isambard"]   # what $SLURM_CLUSTER_NAME / $LMOD_SYSHOST report
+  # Left EMPTY on purpose. Isambard's docs never publish the real DNS
+  # hostname of a login or compute node: SSH goes through the `clifton`
+  # certificate tool, which writes a *virtual* `.isambard` alias (e.g.
+  # `EXAMPLE_PROJECT.3.isambard`) into the *user's own* ~/.ssh/config on
+  # their laptop — that alias is not what `socket.gethostname()` returns
+  # once you're actually on the box. The only real hostnames docs/examples
+  # show post-login (`login02`, `login05`, `nid001040`) are generic Cray/
+  # HPC node-naming conventions (esp. `nid*`) shared across many unrelated
+  # sites, so pattern-matching on them would produce false positives on
+  # OTHER clusters — the exact mistake the SDSC profile's comment warns
+  # against. If you're actually running this on Isambard, either add your
+  # real login-node hostname here after checking `hostname` yourself, or
+  # rely on the SLURM_CLUSTER_NAME/LMOD_SYSHOST env-var autodetect fallback
+  # (unverified what those report here — not confirmed against hardware).
+  hostname_patterns: []
+  description: >-
+    Isambard 3 (GW4/Bristol Tier 2 HPC service): Arm Neoverse-based NVIDIA
+    Grace CPU superchip nodes (no GPU) plus the small x86_64 "MACS"
+    multi-architecture testbed (AMD/Intel CPU variants and a handful of
+    A100/H100/MI100 GPU nodes for portability testing). Isambard-AI is a
+    separate, much larger GH200/H100 national AI system with its own
+    allocation route — not this profile.
+
+lmod:
+  # Docs show `module avail` / `module load` throughout and reference a
+  # Cray-style programming environment (PrgEnv-gnu, cc/CC/ftn wrappers),
+  # but no page states the underlying implementation (Lmod vs Environment
+  # Modules) or an init/bootstrap script path. Left empty rather than
+  # guessing a path that may not exist here.
+  bootstrap: ""
+
+slurm:
+  # Confirmed default for the Grace (`EXAMPLE_PROJECT.3.isambard`) entry
+  # point — the docs mark `grace (*)` as the default partition. The MACS
+  # entry point (`EXAMPLE_PROJECT.macs3.isambard`) has NO default partition
+  # at all: none of milan/genoa/berg/spr/sprhbm/ampere/hopper/instinct carry
+  # the default asterisk, so a MACS job with no `--partition` will be
+  # rejected, not silently routed somewhere reasonable.
+  default_partition: grace
+  default_account: ""
+  # Conservative interactive default: MACS GPU partitions are capped at
+  # 2 GPUs and 20 queued/running jobs PER PROJECT (macs_qos), so this
+  # profile errs toward short/cheap jobs rather than assuming headroom.
+  default_time_minutes: 60
+  partitions:
+    # --- Isambard 3 "Grace" (default entry point, CPU only) ---
+    grace:
+      max_time_minutes: 1440   # 24h — uniform cap across all Isambard partitions
+      max_cpus: 144            # 2 x 72-core NVIDIA Grace CPU Superchip
+      max_memory_gb: 240       # 2 x 120 GB
+      # no GPU on Grace nodes
+    # --- Isambard 3 "MACS" (Multi-Architecture Comparison System) ---
+    # x86_64 nodes for portability/comparison work against the Arm Grace
+    # nodes above. Reached via a DIFFERENT SSH alias (`*.macs3.isambard`)
+    # and has NO default partition — always pass --partition explicitly.
+    # Project-wide MACS limits (macs_qos): max 2 GPUs, max 20 queued/running
+    # jobs — very tight; plan GPU partition use accordingly.
+    milan:
+      max_time_minutes: 1440
+      max_cpus: 128             # 2 x AMD EPYC 7713
+      max_memory_gb: 256
+    genoa:
+      max_time_minutes: 1440
+      max_cpus: 64              # 2 x AMD EPYC 9354
+      max_memory_gb: 384
+    berg:
+      max_time_minutes: 1440
+      max_cpus: 128             # 1 x AMD EPYC 9754
+      max_memory_gb: 192
+    spr:
+      max_time_minutes: 1440
+      max_cpus: 64              # 2 x Intel Xeon Gold 6430
+      max_memory_gb: 256
+    sprhbm:
+      max_time_minutes: 1440
+      max_cpus: 64              # 2 x Intel Xeon CPU Max 9462 (HBM)
+      max_memory_gb: 128
+    ampere:
+      max_time_minutes: 1440
+      max_cpus: 32              # 1 x AMD EPYC 7543P host CPU
+      max_memory_gb: 256
+      gpu_types: [a100]         # 4 x A100 40GB per node
+    hopper:
+      max_time_minutes: 1440
+      max_cpus: 32              # 1 x AMD EPYC 7543P host CPU
+      max_memory_gb: 256
+      gpu_types: [h100]         # 4 x H100 80GB per node
+    instinct:
+      max_time_minutes: 1440
+      max_cpus: 32              # 1 x AMD EPYC 7543P host CPU
+      max_memory_gb: 256
+      gpu_types: [mi100]        # 4 x MI100 32GB per node
+
+scratch:
+  # $SCRATCHDIR is a REAL environment variable, not a path this profile has
+  # to reconstruct: it's set by the `brics/userenv` module, which docs say
+  # loads automatically by default. Its underlying path is
+  # /scratch/<PROJECT>/<USER>.<PROJECT> (5 TiB quota), but the project code
+  # isn't known to this shared profile, so `${SCRATCHDIR}` is both more
+  # correct and safer than hand-building that path with a placeholder.
+  # NOTE: botainer's setup-probe (cli/hpc.py _run_setup_probe) only knows how
+  # to resolve `${USER}`/`${SLURM_JOBID}` in this field today — it will NOT
+  # expand `${SCRATCHDIR}` for its existence check. That's a cosmetic gap in
+  # the probe, not a reason to write a less accurate template here.
+  # CLEARED 2026-07-29. The site documents scratch only as `${SCRATCHDIR}`,
+  # never as a literal path. botainer compares this value as a PATH
+  # PREFIX against the real /scratch bind source to decide whether to
+  # warn about purging; an env-var token has no literal prefix, so it
+  # silently disables that warning while LOOKING like configuration.
+  # Leave it absent rather than guess a token.
+  #
+  # The purge is REAL — Isambard 3 deletes files after ~60 days — and
+  # that fact is stated in agent_hints below so it is not lost. Restore
+  # both fields once the literal path is confirmed on the cluster
+  # (`echo $${SCRATCHDIR}` on a login node answers it in one command).
+  template: ""
+  # CONFIRMED purge policy for Isambard 3 specifically: "Files on $SCRATCHDIR
+  # that have not been accessed for 60 days will be deleted." (Isambard-AI
+  # Phase 1/2 differ — docs say THEY retain scratch data until project end;
+  # that's a different system, not reflected here.)
+  auto_cleanup_days: 0
+
+apptainer:
+  # Not documented by Isambard (no APPTAINER_CACHEDIR mention anywhere in
+  # the container guides). This is a recommended default, not a site fact:
+  # $HOME has only a 100 GiB quota and docs explicitly say it's not for bulk
+  # data, so point the cache at the much larger (5 TiB) $SCRATCHDIR instead.
+  cachedir: "${SCRATCHDIR}/.apptainer/cache"
+  prebuilt_url: ""
+
+modules:
+  denylist: []
+  # brics/userenv (sets $SCRATCHDIR/$LOCALDIR/$TMPDIR) loads automatically
+  # by default per docs, so botainer doesn't need to force-load it here.
+  # Separately, docs warn: don't mix Cray compiler wrappers (cc/CC/ftn) with
+  # plain gcc/g++/gfortran in the same build — that's a usage caution, not a
+  # module to deny, so it's called out in agent_hints instead.
+  always_load: []
+
+policy:
+  # NOT explicitly stated either way by any page fetched (guides, FAQs,
+  # acceptable-use policy). Set to false (i.e. assume network IS reachable)
+  # based on circumstantial evidence: the Apptainer guide shows
+  # `apptainer build docker://...` working directly; the FAQ discusses
+  # HuggingFace API rate-limiting being shared "across all Isambard users",
+  # which only makes sense if outbound calls are actually happening; and
+  # the getting-started guide's whole software model assumes users can
+  # pip/conda/spack install things themselves. Counter-signal: the
+  # distributed-training tutorial has users pre-download models on the
+  # LOGIN node and then run the actual Slurm job with
+  # `local_files_only=True` against a pre-populated cache dir — which reads
+  # like a defensive pattern (possibly for reliability/rate-limits under
+  # concurrent jobs, not necessarily a compute-node firewall). Given the
+  # genuine ambiguity, treat this as a best-guess, not a confirmed fact —
+  # see agent_hints below for the same caveat surfaced to the agent.
+  refuse_network: false
+
+agent_hints:
+  preamble: |
+    You are on Isambard 3 (GW4/Bristol Tier 2 HPC; scheduler is Slurm).
+    This is NOT Isambard-AI — that is a separate, much larger GH200/H100
+    system with its own login endpoint and allocation process. If you were
+    told you're on Isambard-AI, this profile's partitions do not apply.
+
+    Isambard 3 is really two Slurm entry points sharing one filesystem/
+    module environment:
+    - Grace (default): Arm NVIDIA Grace CPU superchip nodes, NO GPU, 144
+      cores / 240 GB RAM per node. `grace` is the default partition here —
+      you don't need to name it explicitly.
+    - MACS (Multi-Architecture Comparison System): x86_64 nodes for
+      portability/comparison testing — AMD (milan, genoa, berg) and Intel
+      (spr, sprhbm) CPU-only partitions, plus three small GPU partitions
+      (ampere = 4x A100 40GB, hopper = 4x H100 80GB, instinct = 4x MI100
+      32GB), all 32 cores / 256 GB host per node. MACS has NO default
+      partition — you MUST pass --partition explicitly or the job is
+      rejected outright, not routed anywhere.
+
+    BUDGET TRAP: MACS enforces a per-PROJECT cap of only 2 GPUs and 20
+    queued+running jobs total (macs_qos), across ALL of ampere/hopper/
+    instinct combined. This is very little headroom — do not fan out many
+    GPU jobs at once on MACS.
+
+    All partitions on both entry points cap at 24 hours (1440 min) walltime
+    — there is no separate long-running queue.
+
+    Filesystems:
+    - $HOME — 100 GiB quota, for code/config, not bulk data. Persists to
+      project end (+30-day recovery grace period after).
+    - $SCRATCHDIR (env var, auto-set — don't hardcode the path) — 5 TiB
+      working area. On Isambard 3, files UNACCESSED for 60 DAYS are
+      deleted. Put anything you can't regenerate in $PROJECTDIR instead.
+    - $PROJECTDIR — shared project space (20 TiB on Isambard 3), for
+      sharing data among project members; no stated auto-purge, but tied
+      to the project's own lifetime.
+    - $LOCALDIR — node-local storage. On COMPUTE nodes this is RAM-backed
+      tmpfs (48-512 GiB depending on node type) — writing large files here
+      eats directly into your job's memory allocation. Wiped at job end.
+    - Nothing on Isambard is backed up — this is all working storage.
+
+    Architecture: Grace nodes and Isambard-AI are Arm64 (aarch64) — most
+    prebuilt x86_64 container images will NOT run there. MACS x86 nodes
+    (milan/genoa/berg/spr/sprhbm/ampere/hopper/instinct) exist partly so
+    you can test x86_64 builds. Apptainer is the supported container
+    runtime (Podman-HPC is the other option); `apptainer build docker://…`
+    pulling directly from a registry is shown working in the docs.
+
+    Network access from compute nodes is NOT explicitly documented either
+    way (see policy.refuse_network comment in this profile for the
+    reasoning). Whatever the real answer, Isambard's OWN tutorials
+    pre-download models/datasets on the LOGIN node first and then run the
+    actual Slurm job against that pre-populated cache with an offline/
+    local-files-only flag — follow that pattern for anything large or
+    repeated, rather than assuming live downloads will succeed reliably
+    inside a job.
+
+    Login nodes are shared and rate/connection-limited — don't run
+    long-running or compute-heavy work there, and don't expect a `tmux`
+    session on a login node to survive. SSH access uses the `clifton`
+    certificate tool with 12-hour certs, so expect to re-authenticate
+    roughly daily. Don't mix Cray compiler-wrapper commands (cc/CC/ftn)
+    with plain gcc/g++/gfortran in the same build — docs call this out as
+    a source of inconsistent linking.

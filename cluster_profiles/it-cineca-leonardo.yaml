@@ -1,0 +1,159 @@
+# CINECA Leonardo (EuroHPC, hosted by CINECA, Italy).
+# https://docs.hpc.cineca.it/
+#
+# NOT RUN ON HARDWARE. Transcribed from public documentation.
+#
+# NOTE: CINECA's older Confluence wiki (wiki.u-gov.it/confluence/...), which
+# historically hosted the more detailed "UG3.4: LEONARDO UserGuide", was
+# UNREACHABLE from this session (connection refused) — CINECA has also been
+# migrating docs to docs.hpc.cineca.it, which is what was actually used
+# here. Container/Apptainer guidance and compute-node internet-access
+# policy were not found on the pages that WERE reachable; they may exist on
+# the Confluence wiki or elsewhere. Treat those two gaps as "not checked
+# from here", not "confirmed absent".
+
+version: cluster-profile-v1
+
+verification:
+  status: from-public-docs
+  last_checked: "2026-07-29"
+  source: >-
+    https://docs.hpc.cineca.it/hpc/leonardo.html (partition/QOS table, hardware),
+    https://docs.hpc.cineca.it/hpc/hpc_data_storage.html (filesystem tiers, quotas, $SCRATCH purge policy).
+    NOT stated on these pages: a literal absolute path for $SCRATCH (only
+    the env-var name and its 40-day purge policy are given; the Confluence
+    wiki that might have a worked path example was unreachable this
+    session — see file header); container/Apptainer guidance; module
+    system identity (Lmod vs. something else); and compute-node internet
+    access policy.
+
+cluster:
+  name: it-cineca-leonardo
+  aliases: ["leonardo"]   # what $SLURM_CLUSTER_NAME / $LMOD_SYSHOST report
+  hostname_patterns:
+    - "login*.leonardo.cineca.it"
+    - "lrd*"
+    - "leonardo*"
+  description: "CINECA Leonardo Booster (4x NVIDIA A100 64GB per node) + DCGP (Intel Sapphire Rapids CPU)"
+
+lmod:
+  # Module system identity not confirmed on the pages reached (see file
+  # header). Left empty rather than guessed.
+  bootstrap: ""
+
+slurm:
+  # Booster (GPU) and DCGP (CPU-only) are separate Slurm partitions, each
+  # with several QOS classes. `lrd_all_serial` is the documented default
+  # for BOTH partitions (small, free, serial-only) — used as-is below
+  # rather than substituting a "more useful" default, since the docs are
+  # explicit about it.
+  default_partition: lrd_all_serial
+  default_account: ""
+  default_time_minutes: 240
+  partitions:
+    lrd_all_serial:
+      max_time_minutes: 240          # 4 h, max 4 cores, budget-free
+      max_cpus: 4
+      # max_memory_gb / hardware pool not confirmed for this serial partition.
+    boost_usr_prod:
+      max_time_minutes: 1440         # 24 h, up to 64 nodes
+      max_cpus: 32
+      max_memory_gb: 512
+      gpu_types: [a100]
+    boost_qos_dbg:
+      max_time_minutes: 30           # max 8 nodes, priority 80
+      max_cpus: 32
+      max_memory_gb: 512
+      gpu_types: [a100]
+    boost_qos_bprod:
+      max_time_minutes: 1440         # 24 h, 65-256 nodes (large-job QOS), priority 60
+      max_cpus: 32
+      max_memory_gb: 512
+      gpu_types: [a100]
+    boost_qos_lprod:
+      max_time_minutes: 5760         # 4 days, max 8 nodes, priority 40 (long-running)
+      max_cpus: 32
+      max_memory_gb: 512
+      gpu_types: [a100]
+    dcgp_usr_prod:
+      max_time_minutes: 1440         # 24 h, up to 16 nodes
+      max_cpus: 112
+      max_memory_gb: 512
+    dcgp_qos_dbg:
+      max_time_minutes: 30           # max 2 nodes, priority 80
+      max_cpus: 112
+      max_memory_gb: 512
+    dcgp_qos_bprod:
+      max_time_minutes: 1440         # 24 h, 17-128 nodes (large-job QOS), priority 60
+      max_cpus: 112
+      max_memory_gb: 512
+    dcgp_qos_lprod:
+      max_time_minutes: 5760         # 4 days, max 3 nodes, priority 40 (long-running)
+      max_cpus: 112
+      max_memory_gb: 512
+
+scratch:
+  # $SCRATCH is documented as temporary, user-specific, unrestricted quota,
+  # purged after 40 days of no access — but no literal absolute path was
+  # found on the pages reached (see file header re: the unreachable
+  # Confluence wiki). A wrong guessed path would either suppress a real
+  # purge warning or misfire on an unrelated bind source, so left empty;
+  # the 40-day fact is still recorded in the preamble for the agent's
+  # awareness even though it isn't structurally enforced here.
+  template: ""
+  auto_cleanup_days: 0
+
+apptainer:
+  cachedir: ""
+  prebuilt_url: ""
+
+modules:
+  denylist: []
+  always_load: []
+
+policy:
+  # Not documented on the pages reached; see file header. Defaulting false
+  # rather than asserting a block that wasn't confirmed.
+  refuse_network: false
+
+agent_hints:
+  preamble: |
+    You are on CINECA Leonardo (EuroHPC), which has two Slurm partitions:
+    `boost` (Booster module — 32-core Xeon + 4x NVIDIA A100 64GB per node)
+    and `dcgp` (Data-Centric General Purpose — 112-core Xeon, CPU-only,
+    512 GB/node).
+
+    The default partition/QOS if you don't ask for one is `lrd_all_serial`
+    — small (4 cores max), free, and NOT representative of the machine's
+    real capacity. For actual work choose explicitly:
+    - `boost_usr_prod` / `dcgp_usr_prod` — standard production QOS, 24 h,
+      up to 64 (Booster) or 16 (DCGP) nodes.
+    - `*_qos_dbg` — 30 min, small node counts, higher scheduling priority —
+      for quick testing.
+    - `*_qos_bprod` — the large-job QOS (65-256 Booster nodes / 17-128 DCGP
+      nodes), 24 h, lower priority than `usr_prod`.
+    - `*_qos_lprod` — up to 4 days, small node counts, lowest priority —
+      for long-running jobs that don't need many nodes.
+
+    NETWORK and CONTAINERS: this profile does NOT have confirmed
+    information on compute-node internet access or Apptainer/Singularity
+    support — the CINECA pages reachable when this profile was built did
+    not cover either topic, and CINECA's older Confluence user guide (which
+    may) was unreachable at the time. Don't assume `pip install` or a
+    container runtime works without checking current docs or CINECA
+    support (superc@cineca.it) first.
+
+    Filesystems:
+    - $HOME — 50 GB quota, permanent for the account's lifetime, daily
+      backups (max 3 versions, deleted files kept 2 months).
+    - $WORK (e.g. `/gpfs/work/<account>`) — 1 TB per project, collaborative
+      scratch-like area, kept 6 months after the project ends, then
+      deleted. No backup.
+    - $FAST — Leonardo-specific, 1 TB per project (fixed), optimized for
+      I/O-intensive work, same 6-month post-project retention, no backup.
+    - $SCRATCH — temporary, per-user, unrestricted quota, but PURGED: files
+      untouched for 40 days are deleted. No backup. (Exact path not
+      confirmed from the docs reached — see `scratch` section above.)
+    - $PUBLIC — 50 GB per user, permanent, world-readable to other cluster
+      users — do not put anything sensitive there.
+    - $TMPDIR (/tmp) — node-local, deleted when the job ends.

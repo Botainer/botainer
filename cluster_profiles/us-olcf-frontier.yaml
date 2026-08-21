@@ -1,0 +1,122 @@
+# OLCF Frontier (Oak Ridge Leadership Computing Facility; DOE / ORNL).
+# https://docs.olcf.ornl.gov/systems/frontier_user_guide.html
+#
+# NOT RUN ON HARDWARE. Transcribed from public documentation — see
+# `verification` below.
+
+version: cluster-profile-v1
+
+verification:
+  status: from-public-docs
+  last_checked: "2026-07-29"
+  source: "https://docs.olcf.ornl.gov/systems/frontier_user_guide.html (hardware, scheduler=Slurm, login hostnames, core-specialization -S 8 leaving 56/64 cores allocatable, account -A requirement, GCD-as-GPU note), https://raw.githubusercontent.com/olcf/olcf-user-docs/master/systems/frontier_user_guide.rst (verbatim scheduling-policy section: batch/extended partition text + node-count aging-bin table), https://docs.olcf.ornl.gov/data/index.html and https://docs.olcf.ornl.gov/accounts/olcf_policy_guide.html + https://raw.githubusercontent.com/olcf/olcf-user-docs/master/accounts/olcf_policy_guide.rst (Orion path templates, 90-day purge, home/project-home quotas), https://docs.olcf.ornl.gov/software/containers_on_frontier.html (Apptainer cache note — only a /tmp workaround for an ORAS hash-mismatch bug is documented, no general cache-placement recommendation), https://docs.olcf.ornl.gov/connecting/index.html (ssh hostnames). Docs did NOT state: a default Slurm account (a project via -A is mandatory, no fallback), a default walltime if omitted, an Lmod bootstrap/init script path, concrete walltime/node limits for the `debug` QOS, or any general (non-ORAS-workaround) guidance on where to point APPTAINER_CACHEDIR — all left empty/omitted below for that reason."
+
+cluster:
+  name: us-olcf-frontier
+  aliases: ["frontier"]   # what $SLURM_CLUSTER_NAME / $LMOD_SYSHOST report
+  hostname_patterns:
+    - "frontier.olcf.ornl.gov"
+    - "login*.frontier.olcf.ornl.gov"   # docs: "17 Frontier login nodes",
+                                        # individually addressable as loginNN
+  description: "OLCF Frontier (HPE Cray EX; AMD EPYC 3rd Gen (64-core) + AMD Instinct MI250X)"
+
+lmod:
+  bootstrap: ""   # docs describe `module load` usage but do not publish a
+                  # module-init/bootstrap script path
+
+slurm:
+  # Frontier does NOT set a flat per-partition walltime. `batch` (the
+  # documented default, `-p batch`) uses a node-count "aging bin" scheme
+  # instead (verbatim from the scheduling-policy doc):
+  #   1–91 nodes:      2 h  max walltime
+  #   92–183 nodes:     6 h  max walltime
+  #   184–1,881 nodes: 12 h  max walltime
+  #   1,882–5,644:     12 h  max walltime (+4-day priority aging boost)
+  #   5,645–9,472:     12 h  max walltime (+8-day priority aging boost)
+  # A typical single-node agent job falls in the 1–91-node bin, so 2 h (120
+  # min) is the defensible ceiling to record for `batch` here — NOT the 12 h
+  # figure that only applies to large, multi-hundred-node jobs.
+  # `extended` (`-p extended`) is a separate, real partition for smaller
+  # long-running jobs: flat 24 h max walltime, 64-node max job size
+  # (job-size cap has no field in this schema).
+  # `debug` exists only as a QOS (`-q debug`, default QOS is `normal`), not a
+  # partition — its walltime/node limits are not stated in the fetched docs,
+  # so it is NOT recorded as its own entry here (would be a guess).
+  # Both partitions run on the same node type: 1x 64-core AMD EPYC + 4x MI250X
+  # (8 GCDs, visible to Slurm/ROCR as 8 separate GPUs) + 512 GB DDR4. Slurm's
+  # default core specialization (`-S 8`) reserves one core per L3 region,
+  # leaving 56 of 64 cores allocatable — that's the max_cpus recorded below.
+  default_partition: batch
+  default_account: ""            # no default: -A <project> is mandatory, not optional
+  default_time_minutes: 60       # conservative; stays under the 120 min batch/1-91-node ceiling
+  partitions:
+    batch:
+      max_time_minutes: 120      # 2 h ceiling for 1-91 node jobs (see comment above); large jobs get up to 12h
+      max_cpus: 56               # 64 physical cores/node minus 8 reserved by default core specialization
+      max_memory_gb: 512
+      gpu_types: [mi250x]
+    extended:
+      max_time_minutes: 1440     # 24 h, flat documented cap; also capped at 64 nodes (no field here)
+      max_cpus: 56
+      max_memory_gb: 512
+      gpu_types: [mi250x]
+
+scratch:
+  # Orion (/lustre/orion) is keyed by PROJECT, not just username — docs give
+  # the literal path as /lustre/orion/[projid]/scratch/[userid] (the
+  # "Member Work" area / $MEMBERWORK).
+  template: "/lustre/orion/${PROJECT}/scratch/${USER}"
+  auto_cleanup_days: 90          # vendor: "not accessed (read) or modified within 90-days are eligible to be purged"; runs continuously, not a fixed weekly sweep
+
+apptainer:
+  # Docs only document APPTAINER_CACHEDIR in the context of a /tmp workaround
+  # for an ORAS pull hash-mismatch bug — no general placement guidance.
+  # Following this repo's convention (and Orion's much larger capacity vs.
+  # /tmp or $HOME), point the cache at scratch; this is OUR choice, not an
+  # OLCF recommendation.
+  cachedir: "/lustre/orion/${PROJECT}/scratch/${USER}/.apptainer/cache"
+  prebuilt_url: ""
+
+modules:
+  denylist: []
+  always_load: []
+
+policy:
+  refuse_network: false
+
+agent_hints:
+  preamble: |
+    You are on OLCF Frontier (DOE / Oak Ridge Leadership Computing Facility).
+
+    Every job MUST pass -A <project> — there is no default account, and
+    submission fails without it.
+
+    Partition/QOS trap: `batch` (the default, -p batch) does NOT have a flat
+    walltime cap. It caps walltime by REQUESTED NODE COUNT: a typical
+    single-node agent job (1-91 nodes) is capped at just 2 hours. Only jobs
+    of 184+ nodes get up to 12 hours. If you need longer than 2 hours for a
+    small (1-64 node) job, use `-p extended` instead — flat 24-hour cap,
+    max 64 nodes. `-q debug` is a QOS (not a partition) for quick testing;
+    its exact limits aren't documented here.
+
+    Each node: 1x 64-core AMD EPYC (3rd Gen) CPU + 4x AMD Instinct MI250X +
+    512 GB DDR4. Slurm/ROCR see 8 GPUs per node (each MI250X is 2 GCDs), not
+    4. Default core specialization reserves 8 of the 64 cores for the OS,
+    leaving 56 allocatable per node.
+
+    Filesystems:
+    - $HOME (/ccs/home/<user>) — 50 GB, backed up, NOT purged.
+    - /ccs/proj/<project> (Project Home, NFS) — 50 GB per project, backed up.
+    - /lustre/orion/<project>/scratch/<user> (Orion, Member Work,
+      $MEMBERWORK/<project>) — the large shared working area. PURGED: files
+      not accessed or modified within 90 days are eligible for removal, on a
+      continuous rolling basis (not a fixed weekly date). No backups.
+    - /lustre/orion/<project>/proj-shared and .../world-shared — durable-ish
+      shared project/world work areas, same 90-day purge policy.
+    - Node-local NVMe (2x 1.92 TB per node, the "burst buffer") is available
+      per-job and much faster for heavy I/O; it does not survive the job.
+
+    Apptainer/Singularity: OLCF publishes base CPE images at
+    savannah.ornl.gov/olcf-container-images (ABI-compatible but not
+    guaranteed identical). If an ORAS pull fails with a hash mismatch, either
+    add --disable-cache or point APPTAINER_CACHEDIR at a /tmp directory.

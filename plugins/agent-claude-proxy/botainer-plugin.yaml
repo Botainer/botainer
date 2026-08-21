@@ -1,0 +1,133 @@
+# First-party plugin: agent-claude-proxy
+#
+# A host-side proxy that holds the user's real Anthropic API key (or
+# OAuth refresh token) on the host. The agent container sees ONLY:
+#   - ANTHROPIC_API_KEY=<ephemeral session token> (validated by proxy)
+#   - ANTHROPIC_BASE_URL=http+unix:///run/anthropic-proxy.sock
+#
+# All API requests from the container go to the proxy. The proxy
+# validates the ephemeral token, strips it, replaces with the real
+# credentials, forwards to api.anthropic.com, and streams the response
+# back. The real credentials never enter the container.
+#
+# Compared to v0.1.0's default "mount the credential file into the
+# container" mode, the proxy mode trades a bit of complexity for:
+#   - Compromised agent can't exfiltrate the API key
+#   - Ephemeral tokens are session-scoped (leaked → useless next session)
+#   - Audit log records every request the agent made
+#
+# Per DN-034.
+#
+# MUTUALLY EXCLUSIVE with mount-mode credentials. When this plugin is
+# enabled, the agent-claude plugin's credential bind is skipped (and a
+# refusal raised if both modes are explicitly configured).
+
+apiVersion: botainer-plugin-v1
+name: agent-claude-proxy
+version: 0.1.0
+
+# AUTH-PRODUCT-PLAN.md §1: this plugin is Mode C (proxy) of the
+# anthropic family. Mutually exclusive with the isolated + shared variants.
+auth_family: anthropic
+auth_mode: proxy
+mutually_exclusive_with:
+  - agent-claude
+  - agent-claude-shared
+description: |
+  EXPERIMENTAL at v0.1.0. Credential proxy for the Claude Code agent:
+  keeps the API key on the host; the container sees an ephemeral
+  session token. v0.1.0 limitations: reads PER-PROJECT credentials
+  (shared-auth wiring planned), no refresh-on-401, OAuth credential
+  files (Claude Pro/Max) may not be supported (the proxy expects an
+  API-key file). See internal design notes.
+license: Apache-2.0
+maintainer: botainer
+botainer_min_version: 0.1.0a0
+tier: first-party
+kind: host_helper        # runs as host subprocess (HIGH 10 trust)
+trust_required: hooked
+
+runtimes:
+  - docker
+  - apptainer
+
+depends_on:
+  - agent-claude
+
+capabilities:
+  - host.credential_access     # reads credentials from host state dir
+  - net.outbound_proxy         # marks the plugin as an outbound proxy
+
+hooks:
+  - when: pre_session
+    script: hooks/start_proxy.py
+    timeout_seconds: 15
+  - when: post_session
+    script: hooks/stop_proxy.py
+    timeout_seconds: 10
+
+# Task #154: commands.login was missing; `botainer plugin agent-claude-proxy
+# login` had no entry to dispatch to → proxy mode was unreachable end-to-end.
+# The hooks/login.py file from the agent-claude-shared plugin pattern is
+# the right binding (one OAuth dance, then the proxy uses the resulting
+# credential file on every container start).
+commands:
+  - name: login
+    script: hooks/start_proxy.py
+    help: |
+      One-time OAuth login for proxy mode. Captures the refresh token,
+      stores it in the host credential dir (mode 0600), and exits.
+      Subsequent `botainer start` runs use the stored creds via the proxy.
+
+contributes:
+  # Envelope for the unix-socket bind the proxy contributes via
+  # hooks/start_proxy.py. Without this declared, the strict envelope
+  # check in composition.run_pre_session_hooks refuses the bind.
+  mount_target_prefixes:
+    - /run/anthropic-proxy.sock
+
+  # See agent-claude-shared for the rationale. Same fix.
+  entrypoint_wrap:
+    layer: inner
+    command:
+      - /usr/local/bin/agent-claude-entrypoint
+
+  agent_hints_section: |
+    ## Credential proxy is active
+
+    Your API requests to Anthropic flow through a host-side proxy that
+    holds the real API key. The `ANTHROPIC_API_KEY` you can see in
+    your environment is an ephemeral session token — useless outside
+    this session.
+
+    Don't try to read `/home/agent/.claude/.credentials.json` — it
+    isn't mounted (proxy mode is exclusive with mount mode).
+
+config_schema:
+  type: object
+  properties:
+    upstream:
+      type: string
+      default: "https://api.anthropic.com"
+      description: |
+        Upstream API endpoint. Override only for testing.
+    max_request_size_bytes:
+      type: integer
+      default: 1048576       # 1 MiB
+      description: |
+        Refuse requests larger than this. Defends against the agent
+        sending huge bodies.
+    rate_limit_rps:
+      type: integer
+      default: 60
+      description: |
+        Soft rate limit in requests per second. Excess requests get a
+        429 from the proxy (without forwarding).
+    redact_request_bodies:
+      type: boolean
+      default: false
+      description: |
+        If true, request bodies are not written to the audit log.
+        Default false so prompts are auditable; set true if your
+        prompts contain sensitive content.
+  additionalProperties: false

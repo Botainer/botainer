@@ -1,0 +1,116 @@
+# Indiana University Jetstream2 (NSF ACCESS allocation).
+# https://docs.jetstream-cloud.org/
+#
+# NOT RUN ON HARDWARE. Transcribed from public documentation.
+#
+# IMPORTANT — this is a CLOUD resource, not a batch cluster. Jetstream2
+# allocates OpenStack VM instances (via Exosphere/Horizon/CLI), not sbatch
+# jobs. There is no shared, always-on Slurm scheduler here. A "Magic Castle"
+# virtual Slurm cluster CAN be self-deployed by a user via CACAO, but it is
+# a private, user-configured deployment (own node counts, own partitions
+# chosen at deploy time) — not a fixed system-wide queue table, so there is
+# nothing scheduler-shaped to record in `slurm.partitions` below. See
+# `agent_hints.preamble`.
+
+version: cluster-profile-v1
+
+verification:
+  status: from-public-docs
+  last_checked: "2026-07-29"
+  source: "https://docs.jetstream-cloud.org/overview/architecture/, https://docs.jetstream-cloud.org/overview/overview-doc/ (VM-based, not traditional HPC/HTC), https://docs.jetstream-cloud.org/general/instance-flavors/ (flavor table), https://docs.jetstream-cloud.org/general/virtualclusters/ + https://docs.jetstream-cloud.org/ui/cacao/deployment_magic_castle/ (Slurm only via user-deployed Magic Castle, no shared partitions), https://docs.jetstream-cloud.org/general/storage/ (volumes/Manila/object store, no purge policy stated), https://docs.jetstream-cloud.org/general/policies/ (allocation-expiry destruction timeline: disable at expiry, shelve +10d, destroy +30d; shelved >1yr abandoned; floating IPs idle >90d reclaimable), https://docs.jetstream-cloud.org/ui/exo/access-instance/ (ssh exouser@<floating-IP>, no fixed login hostname documented). Docs do NOT state: a shared/default Slurm partition table, a fixed login-node hostname pattern, an Lmod bootstrap path, or a routine scratch-purge policy — all left empty/omitted below rather than guessed."
+
+cluster:
+  name: us-iu-jetstream2
+  aliases: ["jetstream2"]   # what $SLURM_CLUSTER_NAME / $LMOD_SYSHOST report
+  hostname_patterns: []
+  # No fixed login-node hostname is documented. Each instance gets its own
+  # floating IP; you `ssh exouser@<floating-IP>` (IP found via Exosphere/
+  # Horizon). Nothing glob-matchable to put here without inventing it.
+  description: "IU Jetstream2 (NSF ACCESS); OpenStack cloud VM instances — AMD EPYC CPUs; NVIDIA A100/L40S/H100 GPUs"
+
+lmod:
+  bootstrap: ""   # no module-init path documented; Jetstream2 ships pre-built "featured images" rather than a shared Lmod hierarchy
+
+slurm:
+  # Jetstream2 itself has NO shared/default batch scheduler: compute is an
+  # OpenStack VM instance you provision (Exosphere primary GUI, Horizon, or
+  # CLI/SDK) and get immediately — there is no queue to wait in and no
+  # sbatch/squeue/sinfo on the base system.
+  #
+  # A Slurm cluster is available only as "Magic Castle": a user-triggered
+  # CACAO deployment that stands up a PRIVATE virtual cluster (its own head
+  # + worker nodes and filesystem) on top of Jetstream2 VMs, with node
+  # counts/sizes chosen by that user at deploy time. The docs do not state
+  # default partition names for a fresh deployment, so `partitions` is left
+  # empty rather than invented — there is no single shared table this
+  # profile could correctly describe.
+  default_partition: ""
+  default_account: ""
+  default_time_minutes: 0   # N/A: no batch walltime concept — an instance runs until you stop it or the allocation ends (see scratch/agent_hints below)
+  partitions: {}
+
+scratch:
+  template: ""       # no filesystem is documented as shared+purged scratch (see auto_cleanup_days comment)
+  auto_cleanup_days: 0
+  # Storage (root disk, attached block volumes, Manila network shares,
+  # object store) persists for as long as the instance/allocation exists —
+  # docs describe no routine/scheduled purge. The only documented deletion
+  # trigger is allocation END: disabled at expiry, shelved at +10 days,
+  # PERMANENTLY DESTROYED (instances, volumes, shares, images) at +30 days.
+  # Also: shelved instances idle >1 year are "abandoned" and subject to
+  # admin deletion; floating IPs unused >90 days are reclaimable. None of
+  # this is a scratch-style purge, so template stays "".
+
+apptainer:
+  cachedir: ""    # no documented default/recommended cache path; Apptainer/Singularity is listed as part of the Jetstream2 software collection but no cache-dir convention is given
+  prebuilt_url: ""
+
+modules:
+  denylist: []
+  always_load: []
+
+policy:
+  refuse_network: false
+
+agent_hints:
+  preamble: |
+    You are on IU Jetstream2 (NSF ACCESS allocation). This is a CLOUD
+    resource, not a traditional HPC batch cluster — do not go looking for
+    sbatch/squeue/sinfo, they do not exist on the base system.
+
+    How compute works here: you (or whoever set up this session) provision
+    a persistent OpenStack VM instance ahead of time, via the Exosphere web
+    UI (primary/recommended), Horizon, CACAO, or the OpenStack CLI/SDK —
+    not by submitting a job into a queue. The instance keeps running (and
+    being billed against the allocation) until it is stopped/deleted or the
+    allocation ends; there is no walltime ceiling to plan around the way a
+    batch cluster has one.
+
+    A Slurm cluster CAN exist here, but only if someone separately deployed
+    a private "Magic Castle" virtual cluster via CACAO — that is a
+    self-service, user-configured deployment (its own head/worker nodes,
+    own filesystem, own partitions picked at deploy time). If `sinfo`
+    works, you're inside one of those; if not, you're on a plain instance
+    and there is no scheduler to find.
+
+    Instance sizing (documented flavors — pick by workload, not by habit):
+    - m3.* — general CPU: 1-128 vCPU, 3-500 GB RAM (m3.3xl is request-only).
+    - r3.* — large-memory: 64/128 vCPU, 500/1000 GB RAM (request-only).
+    - g3.medium/large — fractional NVIDIA A100 vGPU (25%/50%, 10/20 GB VRAM).
+    - g3.xl — full A100 (40 GB VRAM).
+    - g4.* — NVIDIA L40S (48-192 GB VRAM total; request-only).
+    - g5.* — NVIDIA H100 (80-320 GB VRAM total; request-only).
+
+    Storage and data safety: there is no purged "scratch" filesystem here.
+    Root disk, attached block volumes, Manila network shares, and the
+    S3-compatible object store all persist with the instance/allocation —
+    nothing is swept on a schedule. The real danger is allocation END: at
+    expiry the allocation is disabled, at +10 days instances are shelved,
+    and at +30 days everything (instances, volumes, shares, images) is
+    PERMANENTLY DESTROYED. Shelved instances left over a year are treated
+    as abandoned; floating IPs idle more than 90 days can be reclaimed.
+    Plan around allocation expiry, not around a nightly purge.
+
+    Access: `ssh exouser@<floating-IP>` once the instance is running (get
+    the IP from Exosphere/Horizon) — there is no fixed login hostname to
+    hardcode.

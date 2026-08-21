@@ -1,0 +1,79 @@
+# Locked-down example config — the strongest posture botainer can actually
+# ENFORCE at v0.1.0. Copy to `.botainer/config.yaml` and adjust.
+#
+# The idea: the agent gets NO network of its own, and reaches Anthropic only
+# through a broker that runs on your host. Two things follow.
+#
+#   1. Egress is structural, not a filter. `network.mode: none` means the
+#      container has no route off the host at all — there is no allowlist to
+#      get wrong, and nothing to bypass. (See the HPC caveat below.)
+#   2. The credential never enters the container. The broker hands the agent a
+#      provably-fake sentinel token and injects the real one host-side. A fully
+#      compromised agent holds nothing worth stealing.
+#
+# Enable the broker's host side once with:
+#     botainer auth use broker
+# It reuses your existing botainer login — no new login, and it cannot log out
+# your everyday Claude Code.
+#
+# WHAT YOU GIVE UP. With `mode: none` the agent cannot pip/npm install, fetch a
+# web page, or clone from a remote. Pre-install what you need on the host
+# (`pip install --target ~/.botainer/state/<uuid>/packages/pip ...`) or use
+# examples/daily-dev.yaml when you need the agent online.
+#
+# HPC CAVEAT (read this if you run on a cluster). Apptainer shares the host
+# network namespace, so `network.mode: none` is NOT enforceable there —
+# botainer REFUSES to start rather than pretend. On HPC, egress control belongs
+# to the cluster (compute nodes are usually offline anyway); keep the broker for
+# the credential half, which does work identically on both runtimes.
+#
+# What is NOT claimed here: this does not sandbox the agent from your project
+# files. It has read-write access to the workspace by design. See
+# docs/CAPABILITY-SURFACE.md for what the container boundary does and does not
+# cover.
+
+version: config-v1
+
+agent: claude
+runtime: auto
+
+network:
+  # none | internet. `endpoint-ip-allowlist` exists in the schema but is
+  # REFUSED at v0.1.0 on every runtime — the per-endpoint iptables enforcement
+  # was retired (#176) and botainer will not ship a restriction it cannot
+  # enforce. Do not put it here expecting a partial win; you get a refusal.
+  mode: none
+
+resources:
+  cpu: 4
+  memory_mb: 8192
+
+plugins_enabled:
+  # ⚠ READ BEFORE COPYING THIS LINE.
+  #
+  # The broker IS the strongest credential posture available: the container
+  # never holds your refresh token, so a prompt-injected agent cannot exfiltrate
+  # it. That is why this "secure" example uses it.
+  #
+  # But enabling it has two consequences you are agreeing to, and neither is
+  # obvious from the plugin name:
+  #
+  #  1. IT SPENDS YOUR SUBSCRIPTION. The broker makes API calls with your OAuth
+  #     token. Despite the "API Usage Billing" label these appear under, the
+  #     charge lands on your Claude subscription, not on a separate API balance.
+  #  2. IT IS A ToS GREY ZONE. Whether brokering a subscription credential this
+  #     way is sanctioned has not been confirmed with Anthropic (tracked as an
+  #     open question to resolve before public release).
+  #
+  # Enabling this plugin is how you consent to both. Nothing else in botainer
+  # will start a broker on your behalf — that is enforced by
+  # tests/integration/test_broker_requires_consent.py.
+  #
+  # If you want strong isolation WITHOUT either consequence, use `isolated`
+  # mode: a per-project credential, no host-side daemon, no billing question.
+  - agent-claude-broker      # real credential stays host-side; agent gets a sentinel
+  - git
+
+plugins:
+  git:
+    mode: guarded

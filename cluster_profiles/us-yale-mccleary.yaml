@@ -1,0 +1,155 @@
+# Yale McCleary cluster profile.
+# https://docs.ycrc.yale.edu/clusters/mccleary/
+#
+# McCleary is a YCRC general-purpose cluster (successor to Farnam +
+# Ruddle); production cluster for life-sciences computing and the
+# broad research mix. Sits alongside Grace + Bouchet in the YCRC
+# rotation.
+#
+# Edit `~/.botainer/cluster.yaml` to override anything here for your
+# personal preferences (e.g. default account).
+#
+# last verified: 2026-06-17 against https://docs.ycrc.yale.edu/clusters/mccleary/.
+# Two values could NOT be confirmed offline and warrant a real-user
+# check before you trust them:
+#   - lmod.bootstrap        : YCRC clusters commonly carry an Lmod
+#                             bootstrap at `/vast/palmer/apps/avx2/lmod/lmod/init/bash`;
+#                             confirm with `echo $LMOD_PKG/init/bash` on a
+#                             login node and set here if it differs.
+#   - apptainer availability: whether apptainer lives on the LOGIN node
+#                             or only on COMPUTE nodes. The install-hpc.sh
+#                             login flow auto-defers the image build, so
+#                             this is informational.
+
+version: cluster-profile-v1
+
+
+# How much should you trust this profile? Surfaced by `botainer hpc setup`
+# and `hpc info` — absence of a claim is reported as UNVERIFIED, never as
+# tested. Re-stamp it once someone has run botainer here and checked the
+# numbers against `sinfo` / `scontrol show partition`.
+verification:
+  status: from-public-docs
+  last_checked: "2026-06-17"
+  source: "https://docs.ycrc.yale.edu/clusters/mccleary/"
+cluster:
+  name: us-yale-mccleary
+  aliases: ["mccleary"]   # what $SLURM_CLUSTER_NAME / $LMOD_SYSHOST report
+  hostname_patterns:
+    - "mccleary*.ycrc.yale.edu"
+    - "mccleary-login*"
+    - "*.mccleary.cluster.yale.edu"
+  description: "Yale McCleary HPC cluster (YCRC general-purpose / life-sciences)"
+
+lmod:
+  # YCRC convention; mirrors the Grace profile (same Vast Palmer apps
+  # tree). Override in ~/.botainer/cluster.yaml if your site uses a
+  # non-standard path; `botainer hpc setup --probe` reports $LMOD_PKG so
+  # you can confirm.
+  bootstrap: /vast/palmer/apps/avx2/lmod/lmod/init/bash
+
+slurm:
+  default_partition: scavenge
+  # ⚠ EMPTY by design (matches Grace / Bouchet): YCRC clusters require a
+  # per-user group account `pi_<your-PI-netid>`. Find it with:
+  #     sacctmgr -nP show assoc user=$USER format=account
+  # then set it with:
+  #     botainer config set plugins.hpc-launcher.account pi_<group>
+  default_account: ""
+  default_time_minutes: 240
+  partitions:
+    # Time caps are informational at v0.1 (not enforced by botainer).
+    scavenge:
+      max_time_minutes: 1440        # 1d, preemptible, no charge
+    day:
+      max_time_minutes: 1440        # 1d, charged
+    week:
+      max_time_minutes: 10080       # 7d, long jobs
+    interactive:
+      max_time_minutes: 360         # 6h, interactive — use `salloc -p interactive`
+    transfer:
+      max_time_minutes: 1440        # 1d, data movement / staging
+    gpu:
+      max_time_minutes: 1440
+      gpu_types: [a100, h100, rtx_5000_ada]
+    gpu_devel:
+      max_time_minutes: 360         # 6h interactive GPU
+      gpu_types: [a100]
+    bigmem:
+      max_time_minutes: 1440
+      max_memory_gb: 4000
+
+scratch:
+  # YCRC convention on McCleary; user-facing shortcut is `~/palmer_scratch`.
+  # Display-only at v0.1 (informs the storage-layout hint at setup; the
+  # actual /scratch bind is from the state-dir subtree).
+  # Was ".../${USER}/${SLURM_JOBID}" until 2026-08-03. Two faults:
+  # SLURM_JOBID is unset on a login node (where hpc setup, init and
+  # inspect run) so it never resolved and scratch silently fell back to
+  # the state root; and it is wrong in kind — botainer's /scratch is
+  # per-PROJECT and persists, so a job-scoped path would be empty every
+  # run. botainer appends the project uuid, so the final path is
+  # <this>/<uuid>; the "botainer" component keeps those uuid dirs in one
+  # place the user can identify and delete.
+  template: "/vast/palmer/scratch/${USER}/botainer"
+  auto_cleanup_days: 60             # YCRC purges scratch after 60 days
+
+apptainer:
+  cachedir: "${HOME}/.apptainer/cache"
+  prebuilt_url: ""                  # display-only at v0.1 (roadmap B5)
+
+modules:
+  denylist: []
+  always_load: []
+
+policy:
+  refuse_network: false
+
+agent_hints:
+  preamble: |
+    You're running on Yale McCleary HPC (YCRC general-purpose +
+    life-sciences cluster, successor to Farnam + Ruddle). The user is
+    here because the laptop wouldn't cut it — typically genomics,
+    bioinformatics, big data, GPU, or long-running jobs. Tailor
+    accordingly.
+
+    Filesystems and quotas:
+    - /home — small, shared, QUOTA-LIMITED. Code + small configs only.
+      Don't put data, conda envs, or model weights here.
+    - /gpfs/gibbs/project/<group> — long-lived per-group project space.
+      Shared datasets, code repos, env directories. User-facing shortcut:
+      ~/project (per-user, per-group symlink convention).
+    - /vast/palmer/scratch/${USER}/ — fast NVMe scratch, AUTO-PURGED
+      after ~60 days of no access. Outputs, intermediate files, working
+      copies. User-facing shortcut: ~/palmer_scratch.
+    - $SLURM_TMPDIR (compute-node-local) — fastest but DISAPPEARS at job
+      end. Stage hot data there at the start of a job, copy results back
+      to scratch before exit.
+
+    Slurm / job submission:
+    - The account is `pi_<your-PI-netid>` (find yours:
+      `sacctmgr -nP show assoc user=$USER format=account`). Set the submit
+      account with `botainer config set plugins.hpc-launcher.account pi_<group>`.
+    - Partitions worth knowing:
+        scavenge — preemptible, no charge, 1-day max. Risk-tolerant work.
+        interactive / gpu_devel — interactive shells; use `salloc -p interactive`.
+        day, week — charged, by time bucket.
+        gpu — A100/H100/RTX 5000 Ada. Request the right GPU with
+            `--gres=gpu:a100:1` etc.
+        bigmem — for memory >1 TB.
+    - For MANY independent tasks (parameter sweeps, per-file processing),
+      prefer a **dSQ job array** (`dsq --job-file commands.txt`) over N
+      separate `hpc submit`s.
+
+    Network and credentials:
+    - Network is unrestricted on McCleary compute nodes — `pip install`,
+      `git clone`, API calls all work directly.
+    - For interactive/GUI work (Jupyter, RStudio), YCRC provides Open
+      OnDemand at https://ood-mccleary.ycrc.yale.edu — the cluster's
+      blessed path for browser-based work.
+
+    Misc:
+    - Use `module avail` to discover software; `module spider <name>` to
+      find load lines. The hpc-modules plugin captures whatever you load
+      on the host into the container env.
+    - Documentation: https://docs.ycrc.yale.edu/clusters/mccleary/

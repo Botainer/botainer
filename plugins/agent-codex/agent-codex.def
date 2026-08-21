@@ -1,0 +1,129 @@
+Bootstrap: docker
+From: node:24-bookworm-slim
+
+# agent-codex Apptainer definition.
+#
+# Task #139: ships .def file so Apptainer builds work on HPC. Was
+# entirely missing; apptainer image build for agent-codex returned
+# 'no .def file' and produced no image, breaking the HPC code path.
+#
+# Mirrors plugins/agent-codex/Dockerfile (which is the Docker source
+# of truth). Kept in sync manually for v0.1.x; will move to a single
+# declarative image_recipe in the plugin manifest as a tracked follow-up.
+#
+# Build with:
+#     apptainer build agent-codex.sif plugins/agent-codex/agent-codex.def
+
+%post
+    set -eux
+    export DEBIAN_FRONTEND=noninteractive
+
+    # Pinned versions (mirror plugins/agent-codex/Dockerfile).
+    # tests/integration/test_image_recipes_match.py asserts these stay
+    # in lockstep with the Dockerfile's ARG values.
+    export CODEX_CLI_VERSION=latest
+    export MINIFORGE_VERSION=24.3.0-0
+    export JULIA_VERSION=1.10.4
+    export AGENT_UID=1001
+    export AGENT_GID=1001
+
+    # Task #138 parity: detect arch instead of hardcoding x86_64.
+    # Map to the per-tool arch tags miniforge/julia downloads use.
+    ARCH="$(uname -m)"
+    case "$ARCH" in
+        x86_64)
+            MINIFORGE_ARCH="x86_64"
+            JULIA_ARCH_DIR="x64"
+            JULIA_ARCH_TAG="linux-x86_64"
+            ;;
+        aarch64|arm64)
+            MINIFORGE_ARCH="aarch64"
+            JULIA_ARCH_DIR="aarch64"
+            JULIA_ARCH_TAG="linux-aarch64"
+            ;;
+        *)
+            echo "FATAL: unsupported arch $ARCH (supported: x86_64, aarch64)" >&2
+            exit 4
+            ;;
+    esac
+
+    # System packages
+    apt-get update
+    apt-get install -y --no-install-recommends \
+        ca-certificates curl wget gnupg2 git \
+        build-essential pkg-config \
+        python3 python3-pip python3-venv python3-dev \
+        ripgrep less jq vim-tiny \
+        libcurl4-openssl-dev libssl-dev libxml2-dev \
+        openmpi-bin libopenmpi-dev \
+        r-base r-base-dev
+    rm -rf /var/lib/apt/lists/*
+
+    # uv (Astral)
+    curl -fsSL https://astral.sh/uv/install.sh | \
+        env UV_INSTALL_DIR=/usr/local/bin sh
+    /usr/local/bin/uv --version
+
+    # Conda (miniforge) — same install as plugins/agent-codex/Dockerfile.
+    curl -fsSL "https://github.com/conda-forge/miniforge/releases/download/${MINIFORGE_VERSION}/Miniforge3-${MINIFORGE_VERSION}-Linux-${MINIFORGE_ARCH}.sh" -o /tmp/miniforge.sh
+    bash /tmp/miniforge.sh -b -p /opt/conda
+    rm /tmp/miniforge.sh
+    /opt/conda/bin/conda clean --all -y
+    echo 'export PATH=/opt/conda/bin:$PATH' >> /etc/environment
+
+    # Julia
+    JULIA_MM=$(echo "${JULIA_VERSION}" | cut -d. -f1-2)
+    curl -fsSL "https://julialang-s3.julialang.org/bin/linux/${JULIA_ARCH_DIR}/${JULIA_MM}/julia-${JULIA_VERSION}-${JULIA_ARCH_TAG}.tar.gz" -o /tmp/julia.tar.gz
+    tar -xzf /tmp/julia.tar.gz -C /opt
+    ln -s /opt/julia-${JULIA_VERSION}/bin/julia /usr/local/bin/julia
+    rm /tmp/julia.tar.gz
+
+    # Codex CLI: task #118 — fail loudly, no stub fallback.
+    npm install -g @openai/codex@${CODEX_CLI_VERSION} || (
+        echo "FATAL: @openai/codex@${CODEX_CLI_VERSION} install failed." >&2
+        echo "  - Check npm view @openai/codex versions" >&2
+        echo "  - Or pass --build-arg CODEX_CLI_VERSION=<known-good>" >&2
+        exit 4
+    )
+
+    # Agent user
+    if ! getent group ${AGENT_GID} >/dev/null; then
+        groupadd --system --gid ${AGENT_GID} agent
+    fi
+    if ! getent passwd ${AGENT_UID} >/dev/null; then
+        useradd --system --uid ${AGENT_UID} --gid ${AGENT_GID} \
+            --create-home --shell /bin/bash agent
+    fi
+
+%environment
+    export PATH=/opt/conda/bin:/usr/local/bin:/usr/bin:/bin
+    export AGENT_NAME=agent-codex
+
+    # Package routing to /packages. These were MISSING here while the Dockerfile
+    # set all eight — under a comment reading "matches agent-claude", which the
+    # .def did not. agent-claude.def has always carried them, so the gap was
+    # codex-on-apptainer ONLY: a caged codex on a cluster installed pip/cargo/
+    # conda packages into the container's ephemeral layer instead of the
+    # persistent /packages bind, losing them at session end. HPC is the product;
+    # this is the parity class CLAUDE.md calls non-negotiable. Found 2026-07-29
+    # by tabulating both images' env against both runtimes rather than reading
+    # either file on its own. Pinned by test_image_validation.py.
+    export PIP_TARGET=/packages/pip
+    export PYTHONPATH=/packages/pip
+    export NODE_PATH=/packages/node_modules
+    export JULIA_DEPOT_PATH=/packages/julia_depot
+    export R_LIBS_USER=/packages/R_libs
+    export CONDA_ENVS_PATH=/packages/conda_envs
+    export CARGO_HOME=/packages/cargo
+    export GOPATH=/packages/go
+
+    # Where entrypoint_wrap.sh reads the API key (isolated/mount-mode auth). The
+    # wrap defaults to this same path when unset, so apptainer worked by
+    # fallback; setting it makes the contract explicit rather than incidental.
+    export OPENAI_API_KEY_FILE=/home/agent/.openai/api_key
+
+%runscript
+    exec /usr/local/bin/agent-codex-entrypoint "$@"
+
+%files
+    entrypoint_wrap.sh /usr/local/bin/agent-codex-entrypoint

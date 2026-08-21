@@ -1,0 +1,154 @@
+# Digital Research Alliance of Canada — "Niagara" (SciNet, University of Toronto).
+#
+# IMPORTANT — NAME CHANGE: Niagara was decommissioned (public secondary
+# sources conflict on the exact date — "September 30, 2025" per one SciNet-
+# sourced summary, "December 15, 2025" per another; not resolved against a
+# primary source, both point to 2025 H2) and replaced by TRILLIUM, also
+# operated by SciNet at the University of Toronto. This file is named
+# canada-niagara.yaml because that's what was requested, but it documents
+# TRILLIUM — the system actually live today. There is no running "Niagara"
+# anymore.
+#
+# docs.alliancecan.ca and docs.scinet.utoronto.ca could not be fetched
+# directly (bot-protection interstitial on the former; domain-verification
+# refusal on the latter). Everything below comes from secondary public
+# sources that WERE fetchable/searchable: scinethpc.ca news posts, Mila's
+# technical reference, and web search of SciNet's own Data Management /
+# Quickstart docs (which describe the purge policy in exact quoted terms
+# even though the page itself could not be fetched directly). See
+# `verification.source`.
+#
+# WHOLE-NODE SCHEDULING (unlike most other Alliance clusters): both Niagara
+# and its successor Trillium schedule by FULL NODE, not by core. Requesting
+# fewer cores than a node does not get you a smaller allocation or a smaller
+# charge — you get (and are charged for) the whole node regardless.
+
+version: cluster-profile-v1
+
+verification:
+  status: from-public-docs
+  last_checked: "2026-07-29"
+  source: >
+    https://scinethpc.ca/trillium/ and https://scinethpc.ca/news/trillium-to-
+    replace-niagara-and-mist-in-2025/ (Trillium specs, replaces Niagara);
+    https://docs.mila.quebec/technical_reference/clusters/drac/ (Trillium
+    described as "two sub-clusters, one CPU and one GPU", per-node scheduling,
+    no internet on compute nodes); web search of
+    docs.scinet.utoronto.ca/index.php/Data_Management (SciNet's own quoted
+    purge policy: "not accessed or modified for more than 2 months" deleted
+    around the 15th of each month, reference time MostRecentOf(atime,ctime));
+    web search corroborating CPU-node spec (192 cores / 768 GB RAM per node,
+    1224 CPU nodes, 235,008 total cores) and GPU-node spec (63 GPU nodes,
+    4x NVIDIA H100 80GB + one 96-core AMD EPYC per node, 252 GPUs total).
+    NOT independently confirmed against a primary docs.scinet.utoronto.ca or
+    docs.alliancecan.ca page fetch (both refused automated access); exact
+    decommission date for Niagara is unresolved between two conflicting
+    secondary reports.
+
+cluster:
+  name: ca-alliance-niagara
+  aliases: ["niagara"]   # what $SLURM_CLUSTER_NAME / $LMOD_SYSHOST report
+  hostname_patterns:
+    - "trillium*"             # current cluster name/login nodes
+    - "niagara*"              # legacy name; unverified whether still a live alias
+  description: >
+    Digital Research Alliance of Canada — requested as "Niagara" but Niagara
+    was decommissioned in 2025; this documents its successor TRILLIUM
+    (SciNet, University of Toronto). WHOLE-NODE SCHEDULING: CPU sub-cluster
+    (1224 nodes, 192 cores / 768 GB RAM each) and GPU sub-cluster (63 nodes,
+    4x NVIDIA H100 80GB + 96-core AMD EPYC each) are both allocated by full
+    node, not by core.
+
+lmod:
+  bootstrap: ""
+
+slurm:
+  # Whole-node scheduling: "max_cpus" below is the PER-NODE core count, which
+  # is also the smallest CPU unit you can request — there is no finer-grained
+  # allocation the way there is on Cedar/Graham/Narval-style clusters.
+  default_partition: ""
+  default_account: ""
+  default_time_minutes: 180
+  partitions:
+    compute:
+      max_time_minutes: 1440       # SciNet Quickstart historically caps standard jobs at 24h; not re-confirmed for Trillium specifically
+      max_cpus: 192                # PER NODE — whole-node scheduling, this is what you get regardless of request
+      max_memory_gb: 768
+    gpu:
+      max_time_minutes: 1440       # same caveat as above — not re-confirmed for Trillium's GPU sub-cluster specifically
+      max_cpus: 96                 # PER NODE — the GPU nodes' own (smaller) CPU count
+      max_memory_gb: 768
+      gpu_types: [h100]
+
+scratch:
+  # SciNet's own documented policy (quoted, via web search of the Data
+  # Management page): "not accessed or modified for more than 2 months"
+  # (~60 days) gets deleted, purge finalized around the 15th of each month.
+  template: "/scratch/${USER}"
+  auto_cleanup_days: 60
+
+apptainer:
+  cachedir: "${SCRATCH}/.apptainer/cache"
+  prebuilt_url: ""
+
+modules:
+  denylist: []
+  always_load: []
+
+policy:
+  # Mila's technical reference explicitly states "no internet access on
+  # compute nodes" for the DRAC cluster line (Niagara/Trillium included), and
+  # this was independently confirmed for Narval via primary-source fetch —
+  # treated as a national-line policy, applied here.
+  # LEFT FALSE DELIBERATELY (corrected 2026-07-29).
+  #
+  # `policy.refuse_network` is a botainer POLICY — "do not give this container
+  # network" — i.e. a control WE claim to enforce. It is NOT a description of
+  # the cluster. This profile had it set to true to record a different fact:
+  # that this SITE's compute nodes have no internet egress.
+  #
+  # Two reasons that was wrong:
+  #   1. Category error. The site's egress is an ENVIRONMENT PROPERTY we should
+  #      report and plan around; refuse_network is an ENFORCEMENT CLAIM. A
+  #      profile cannot enforce anything.
+  #   2. The policy is not wired on HPC at all. `apptainer exec` inherits the
+  #      host network namespace, so network.mode=none cannot be honoured —
+  #      adapters/apptainer.py:74 refuses it explicitly rather than pretend.
+  #      Nothing anywhere reads this field. Setting it true asserted a control
+  #      that does not exist, which is the worst kind of security claim.
+  #
+  # The FACT is preserved where it is actually consumed: agent_hints.preamble
+  # below, which reaches the agent and tells it to pre-stage dependencies.
+  # Per-node-type egress deserves a real field; tracked as gap 9 in
+  # DN-021.
+  refuse_network: false
+
+agent_hints:
+  preamble: |
+    You are on what was called "Niagara" — SciNet's cluster at the
+    University of Toronto. Niagara itself was DECOMMISSIONED in 2025; you
+    are actually on its successor, TRILLIUM. If tooling/scripts still say
+    "niagara", treat it as legacy naming for Trillium.
+
+    THE SINGLE MOST IMPORTANT THING ABOUT THIS CLUSTER: scheduling is by
+    WHOLE NODE, not by core. If you request 4 cores, you still get (and the
+    allocation still charges for) an entire node — 192 cores / 768 GB RAM on
+    the CPU sub-cluster, or 96 cores / 768 GB RAM + 4x H100 on the GPU
+    sub-cluster. There is no way to request "a slice" of a node the way you
+    can on Cedar/Graham/Narval-style clusters. Batch many small tasks
+    together (e.g. GNU parallel inside one whole-node job) rather than
+    submitting many small single-core jobs — the latter wastes the rest of
+    each node you're charged for.
+
+    Filesystems:
+    - $HOME — small, backed up. Code and configs only.
+    - $SCRATCH (/scratch/<user>) — the large working area. PURGED: files not
+      accessed or modified for more than ~2 months (60 days) are deleted,
+      with purges finalized around the 15th of each month. Treat it as
+      genuinely temporary.
+    - $PROJECT — durable, quota-managed group space. Put anything you cannot
+      regenerate here, not on scratch.
+
+    Compute nodes reportedly have no general internet access (per Alliance-
+    wide documentation) — do not assume outbound network calls will work
+    from a batch job; stage data before submission.

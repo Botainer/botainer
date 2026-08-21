@@ -1,0 +1,71 @@
+# Generic example cluster profile.
+# Copy to ~/.botainer/cluster.yaml and customize for your cluster.
+
+version: cluster-profile-v1
+
+
+# How much should you trust this profile? Surfaced by `botainer hpc setup`
+# and `hpc info` — absence of a claim is reported as UNVERIFIED, never as
+# tested. Re-stamp it once someone has run botainer here and checked the
+# numbers against `sinfo` / `scontrol show partition`.
+verification:
+  status: community-contributed
+  source: "documentation example only"
+cluster:
+  name: example
+  hostname_patterns:
+    - "example-login*"
+    - "*.example.cluster.edu"
+  description: "Generic HPC cluster example. Customize for your site."
+
+lmod:
+  # Run `command -v module` on your cluster; the path is usually
+  # something like /etc/profile.d/lmod.sh or /usr/share/lmod/.../init/bash.
+  bootstrap: /etc/profile.d/lmod.sh
+
+slurm:
+  # Run `sinfo` to see your partitions; pick a sensible default.
+  default_partition: standard
+  # Set this to your group's allocation, or leave blank.
+  default_account: ""
+  default_time_minutes: 60
+  partitions:
+    standard:
+      max_time_minutes: 1440
+      max_cpus: 32
+    gpu:
+      max_time_minutes: 1440
+      max_cpus: 16
+      max_memory_gb: 192
+      gpu_types: [a100, v100]
+
+scratch:
+  # Replace with your cluster's scratch FS path.
+  # Was ".../${USER}/${SLURM_JOBID}" until 2026-08-03. Two faults:
+  # SLURM_JOBID is unset on a login node (where hpc setup, init and
+  # inspect run) so it never resolved and scratch silently fell back to
+  # the state root; and it is wrong in kind — botainer's /scratch is
+  # per-PROJECT and persists, so a job-scoped path would be empty every
+  # run. botainer appends the project uuid, so the final path is
+  # <this>/<uuid>; the "botainer" component keeps those uuid dirs in one
+  # place the user can identify and delete.
+  template: "/scratch/${USER}/botainer"
+  auto_cleanup_days: 30
+
+apptainer:
+  cachedir: "${HOME}/.apptainer/cache"
+  prebuilt_url: ""
+
+modules:
+  denylist: []
+  always_load: []
+
+policy:
+  refuse_network: false
+
+agent_hints:
+  preamble: |
+    You're running on a generic HPC cluster.
+    - Working dir on /home is shared FS, quota-limited.
+    - Use /scratch for large data; it may be auto-cleaned periodically.
+    - Wall-clock time counts; checkpoint long jobs.

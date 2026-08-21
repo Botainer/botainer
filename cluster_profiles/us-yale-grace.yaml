@@ -1,0 +1,214 @@
+# Yale Grace cluster profile.
+# https://docs.ycrc.yale.edu/clusters/grace/
+#
+# Edit `~/.botainer/cluster.yaml` to override anything here for your
+# personal preferences (e.g. default account).
+
+version: cluster-profile-v1
+
+
+# How much should you trust this profile? Surfaced by `botainer hpc setup`
+# and `hpc info` — absence of a claim is reported as UNVERIFIED, never as
+# tested. Re-stamp it once someone has run botainer here and checked the
+# numbers against `sinfo` / `scontrol show partition`.
+# NOTE (2026-07-29): the vendor documents Grace as slated for DECOMMISSIONING in
+# 2026, with Bouchet as its replacement. Keep this profile working, but new work
+# on this site belongs in yale-bouchet.yaml.
+verification:
+  # DOWNGRADED 2026-07-29 from tested-on-hardware. That stamp conflated two
+  # different claims: "a session launched here" (true, 2026-07-28) and "these
+  # partition numbers are right" (false — on re-checking the vendor docs, nearly
+  # every row was wrong; see the corrections below). A launch exercises the
+  # adapter, not the table. Only numbers checked against live `sinfo` /
+  # scontrol can restore the stronger stamp.
+  status: from-public-docs
+  last_checked: "2026-07-29"
+  source: "LIVE `sinfo -e` on a Grace login node 2026-07-29 corrected three doc-derived errors: a5000 listed on gpu/gpu_devel/scavenge_gpu (not present), the priority/priority_gpu/priority_mpi partitions missing entirely, and our default_partition set to the preemptible `scavenge` when the cluster's own default is `day`. Partition names, GPU types and memory now match the scheduler; time limits are QOS-derived (see the note in slurm:). Sources: https://docs.ycrc.yale.edu/clusters/grace/ (partition table) + https://docs.ycrc.yale.edu/data/hpc-storage/ (quotas, 60-day purge); launch path exercised 2026-07-28 but the partition data was NOT validated against the live scheduler"
+cluster:
+  name: us-yale-grace
+  aliases: ["grace"]   # what $SLURM_CLUSTER_NAME / $LMOD_SYSHOST report
+  hostname_patterns:
+    - "grace*.cluster.yale.edu"
+    - "grace-login*"
+    - "*.grace.cluster.yale.edu"
+  description: "Yale Grace HPC cluster"
+
+lmod:
+  bootstrap: /vast/palmer/apps/avx2/lmod/lmod/init/bash
+
+slurm:
+  # `day` is the CLUSTER's own default (sinfo prints it as `day*`). This profile
+  # previously defaulted to `scavenge`, which is PREEMPTIBLE — jobs are killed
+  # without warning. Defaulting an agent onto a killable queue is the exact trap
+  # #109 is about, and it was ours, not the site's.
+  default_partition: day
+  default_account: ""
+  default_time_minutes: 240
+  # ── TWO THINGS TO KNOW BEFORE READING THESE NUMBERS ──────────────────
+  # (Both learned 2026-07-29 from live `sinfo -e -o "%P|%l|%L|%c|%m|%G"` on a
+  # Grace login node — the first time this profile was checked against the
+  # scheduler rather than the documentation.)
+  #
+  # 1. `max_time_minutes` here is the EFFECTIVE limit, which mostly comes from
+  #    QOS, not from the partition. Slurm reports the PARTITION TimeLimit as
+  #    `infinite` for gpu, gpu_devel, devel, mpi, bigmem, scavenge_gpu and the
+  #    priority_* family; only day (1d), scavenge (1d) and week (7d) carry a
+  #    real partition cap. The vendor's published numbers are the QOS caps, and
+  #    those are what a user actually hits — so they are what is recorded. This
+  #    is why the schema needs a QOS axis (gap 2 in the schema notes): today the
+  #    two are flattened into one field and the distinction is only this comment.
+  #    DEFAULTTIME is 1:00:00 everywhere, which does match the docs.
+  #
+  # 2. `max_cpus` is a PER-USER limit taken from the vendor docs. It is NOT the
+  #    per-node core count that `sinfo %c` prints (day nodes are 36 or 48 cores;
+  #    the 1500 below is how many cores one user may hold across the partition).
+  #    Two different quantities, one field — also gap 2.
+  #
+  # NOT SHIPPED: Grace also has ~35 per-PI condo partitions (`pi_*`, 28-180 day
+  # limits, group-owned hardware). They are deliberately absent: they name
+  # research groups, they are meaningless to anyone outside those groups, and
+  # they change as hardware is bought. If you belong to one, add it to your own
+  # ~/.botainer/cluster.yaml — that is exactly what the user override is for.
+  #
+  # Corrected wholesale 2026-07-29 against the vendor partition table. Every
+  # row below had at least one wrong value, and four partitions were missing
+  # entirely — which meant `hpc submit -p week` was refused as "unknown
+  # partition" on a cluster that has one.
+  #
+  # max_cpus is the PER-USER limit where the vendor publishes user/group pairs
+  # (e.g. day is 1500/2500); the per-user number is the one that refuses an
+  # individual's job, so it is the useful bound here. max_memory_gb is
+  # per-NODE, matching the vendor column.
+  partitions:
+    day:
+      max_time_minutes: 1440        # 1-00:00:00
+      max_cpus: 1500                # was 24
+      max_memory_gb: 487
+    devel:                          # was MISSING
+      max_time_minutes: 360         # 06:00:00
+      max_cpus: 4
+      max_memory_gb: 181
+    week:                           # was MISSING
+      max_time_minutes: 10080       # 7-00:00:00
+      max_cpus: 108
+      max_memory_gb: 487
+    gpu:
+      max_time_minutes: 2880        # 2-00:00:00 — was 1440
+      max_cpus: 24                  # was 16
+      max_memory_gb: 984            # was 128
+      # a5000 REMOVED 2026-07-29: the vendor doc lists it, live `sinfo -o "%G"`
+      # does not. This partition serves v100 and a100 only. a5000 really is
+      # on the cluster — in scavenge and several pi_* partitions — which is
+      # presumably how the doc came to name it here.
+      gpu_types: [a100, v100]
+    gpu_devel:                      # was MISSING
+      max_time_minutes: 360
+      max_cpus: 10
+      max_memory_gb: 984
+      gpu_types: [a100, rtx3090, v100]   # live sinfo; docs also claimed a5000
+    bigmem:
+      max_time_minutes: 1440
+      max_cpus: 40                  # was 24
+      max_memory_gb: 3935           # was 1024 — off by ~4x
+    mpi:                            # was MISSING
+      max_time_minutes: 1440
+      max_memory_gb: 181
+    priority:                       # from live sinfo; absent from the vendor table
+      max_time_minutes: 1440        # partition is `infinite`; assume the day-class QOS
+      max_memory_gb: 487
+    priority_gpu:
+      max_time_minutes: 1440
+      max_memory_gb: 984
+      gpu_types: [a100]
+    priority_mpi:
+      max_time_minutes: 1440
+      max_memory_gb: 181
+    scavenge:
+      preemptible: true             # jobs are killed without warning — checkpoint
+      max_time_minutes: 1440        # was 360 — 4x wrong when this was the default
+      max_cpus: 10000               # was 8
+      max_memory_gb: 1999
+      gpu_types: [a100, a5000, v100, rtx2080ti, rtx3090, l40s]
+    scavenge_gpu:
+      preemptible: true             # jobs are killed without warning — checkpoint
+      max_time_minutes: 1440        # QOS cap; partition itself is `infinite`
+      max_memory_gb: 984
+      gpu_types: [a100, v100]       # live sinfo; docs also claimed a5000
+
+scratch:
+  # Corrected 2026-07-29. Was "/gpfs/gibbs/scratch/..." — but gibbs is the
+  # PROJECT filesystem here; the vendor's storage page lists Grace's scratch as
+  # `palmer_scratch`, i.e. under /vast/palmer. The old value named a path that
+  # is not this cluster's scratch at all.
+  #
+  # This is the one field with real consequence beyond display: it is what
+  # `agent_hints.cluster_purge_prefix` compares the /scratch bind source
+  # against, so a wrong prefix silently suppresses (or would falsely assert)
+  # the purge warning.
+  # Was ".../${USER}/${SLURM_JOBID}" until 2026-08-03. Two faults:
+  # SLURM_JOBID is unset on a login node (where hpc setup, init and
+  # inspect run) so it never resolved and scratch silently fell back to
+  # the state root; and it is wrong in kind — botainer's /scratch is
+  # per-PROJECT and persists, so a job-scoped path would be empty every
+  # run. botainer appends the project uuid, so the final path is
+  # <this>/<uuid>; the "botainer" component keeps those uuid dirs in one
+  # place the user can identify and delete.
+  template: "/vast/palmer/scratch/${USER}/botainer"
+  auto_cleanup_days: 60             # vendor: "older than 60 days ... deleted"
+
+apptainer:
+  cachedir: "${HOME}/.apptainer/cache"
+  prebuilt_url: ""
+
+modules:
+  denylist: []
+  always_load: []
+
+policy:
+  refuse_network: false
+
+agent_hints:
+  preamble: |
+    You're running on Yale Grace HPC (YCRC). The user is on this cluster
+    because the laptop wouldn't cut it — typically big data, GPU, or
+    long-running jobs. Tailor accordingly.
+
+    Filesystems and quotas (vendor-documented figures, 2026-07-29):
+    - /home/<netid> — 125 GiB and 500,000 files per person, backed up daily.
+      Code and small configs only; do not put data or environments here.
+    - project (symlink in home, on gibbs) — 4 TiB and 5,000,000 files per
+      GROUP, NOT backed up. Durable working space shared with your lab.
+    - palmer_scratch (/vast/palmer/scratch/<netid>) — 10 TiB, 15,000,000
+      files per group, NOT backed up, and PURGED: any file older than 60
+      days is deleted automatically. Right place for intermediates and
+      downloaded models; wrong place for anything you cannot regenerate.
+    - $SLURM_TMPDIR (compute-node-local) — fastest, but DISAPPEARS at job
+      end. Stage hot data there at job start, copy results back to project
+      or scratch before exit.
+
+    Slurm / job submission:
+    - The account is `pi_<your-PI-netid>` (find yours:
+      `sacctmgr -nP show assoc user=$USER format=account`). If submit
+      refuses "account missing", that's the value to set with
+      `botainer config set plugins.hpc-launcher.account pi_<group>`.
+    - Partitions and their MAX walltimes: `devel` 6h, `gpu_devel` 6h,
+      `day` 24h, `bigmem` 24h, `mpi` 24h, `scavenge` 24h (preemptible —
+      your job can be killed at any moment; checkpoint), `scavenge_gpu`
+      24h, `gpu` 48h, `week` 7 days. Wall-clock counts against the lab's
+      allocation — don't over-request time.
+    - For MANY independent tasks (parameter sweeps, per-file processing),
+      prefer a **dSQ job array** (`dsq --job-file commands.txt`) over N
+      separate `hpc submit`s. One scheduler call, easier to monitor.
+
+    Network and credentials:
+    - Network is unrestricted on Grace compute nodes — `pip install`,
+      `git clone`, API calls all work directly.
+    - For interactive/GUI work (Jupyter, RStudio), Yale provides Open
+      OnDemand at https://ood-grace.ycrc.yale.edu — that's the cluster's
+      blessed path for browser-based work.
+
+    Misc:
+    - Use `module avail` to discover software; `module spider <name>` to
+      find load lines. The hpc-modules plugin captures whatever you load
+      on the host into the container env.
+    - Documentation: https://docs.ycrc.yale.edu/clusters/grace/

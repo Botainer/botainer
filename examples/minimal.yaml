@@ -1,0 +1,28 @@
+# Minimal botainer project config.
+# Agent has /workspace + /packages + /scratch; no internet; nothing else.
+# Drop into .botainer/config.yaml.
+
+version: config-v1
+
+agent: claude
+runtime: auto              # docker on laptop, apptainer on HPC
+
+network:
+  mode: internet           # the agent needs to reach its AI service
+                           # (e.g. api.anthropic.com) to work at all. `none`
+                           # would leave it unable to phone home — for a
+                           # locked-down posture see examples/secure.yaml.
+
+resources:
+  cpu: null                # unlimited
+  memory_mb: null          # unlimited
+
+caps:
+  kernel:
+    keep: []
+
+env: {}
+
+plugins_enabled:
+  - agent-claude
+  - git

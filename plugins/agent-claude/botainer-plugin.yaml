@@ -1,0 +1,88 @@
+# First-party plugin: agent-claude
+# Provides the Claude Code agent inside the container. Per user decision
+# (2026-05-15), credentials are per-project at v0.1.0 (master at
+# ~/.botainer/state/<uuid>/data/agent-claude/profiles/<profile>/.credentials.json).
+apiVersion: botainer-plugin-v1
+name: agent-claude
+version: 0.1.0
+description: Anthropic Claude Code agent (per-project credentials at v0.1.0)
+license: Apache-2.0
+maintainer: botainer
+botainer_min_version: 0.1.0a0
+tier: first-party
+kind: agent
+trust_required: hooked
+runtimes:
+  - docker
+  - apptainer
+
+# AUTH-PRODUCT-PLAN.md §1: this plugin is Mode A (isolated) of the
+# anthropic family. Mutually exclusive with the shared + proxy variants.
+auth_family: anthropic
+auth_mode: isolated
+mutually_exclusive_with:
+  - agent-claude-shared
+  - agent-claude-proxy
+
+image:
+  source: dockerfile
+  dockerfile: Dockerfile
+  # The tag `botainer image build agent-claude` produces. Declared here so
+  # `botainer start` can resolve to it without requiring a fresh installed.lock
+  # digest entry (which can be missing if the image was built before plugins
+  # were registered, or via a different MY_BOTAINER state dir).
+  tag: botainer/agent-claude:0.1
+
+commands:
+  - name: login
+    script: hooks/login.py
+    help: Interactive OAuth login to Anthropic, writing credentials to this project's state dir
+  - name: status
+    script: hooks/status.py
+    help: Show credential validity + profile info for this project
+
+hooks:
+  - when: pre_session
+    script: hooks/pre_session.py
+    timeout_seconds: 20
+
+capabilities:
+  - mounts.workspace
+  - mounts.extra
+  - network
+  - env.values
+
+contributes:
+  mount_target_prefixes:
+    - /workspace/.botainer/agent-claude/
+    - /home/agent/.claude/
+
+  # Innermost wrap: primes AGENT_HINTS.md into claude's system prompt
+  # via `--append-system-prompt`. Layer is `inner` so that if any other
+  # plugin contributes an outer-layer wrap, the outer wrap remains the
+  # actual session leader (the docker --entrypoint / apptainer exec
+  # target) rather than being buried as an argv to this script.
+  # Impl review MEDIUM 13. §A19: the historical outer-layer user
+  # (nudge tmux) was retired in favor of a host-side screen wrap.
+  #
+  # The wrap script lives in the image at
+  # /usr/local/bin/agent-claude-entrypoint (see plugins/agent-claude/
+  # Dockerfile + entrypoint_wrap.sh). Even when no other plugin
+  # contributes an entrypoint_wrap, declaring this here keeps the
+  # behavior consistent: the launcher always builds the chain
+  # explicitly rather than relying on the Dockerfile ENTRYPOINT,
+  # which can be overridden by `docker run --entrypoint`.
+  entrypoint_wrap:
+    layer: inner
+    command:
+      - /usr/local/bin/agent-claude-entrypoint
+
+config_schema:
+  type: object
+  properties:
+    profile:
+      type: string
+      default: default
+    model:
+      type: string
+  additionalProperties: false

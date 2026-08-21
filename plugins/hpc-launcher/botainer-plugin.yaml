@@ -1,0 +1,90 @@
+# First-party plugin: hpc-launcher
+# Submits the agent's Slurm job from a login node, using Apptainer inside the
+# allocation. Designed fresh; uses v0.0.x botainer-hpc only as feature
+# inspiration (3681-line bash monolith → clean per-module Python).
+#
+# Three submission modes:
+#   submit  — fresh sbatch allocation (default; for login-node use)
+#   attach  — srun --jobid=$X --overlap (reuse an existing allocation)
+#   here    — run inside the current allocation (no sbatch; for use inside salloc)
+apiVersion: botainer-plugin-v1
+name: hpc-launcher
+version: 0.1.0
+description: Slurm-aware launcher for the agent (use on HPC login nodes)
+license: Apache-2.0
+maintainer: botainer
+botainer_min_version: 0.1.0a0
+tier: first-party
+kind: service-host
+trust_required: hooked
+runtimes:
+  - apptainer
+
+# host_helper sidecars (per codex HIGH 10 — these are HOST helpers, not L1).
+#
+# IMPORTANT: submit.py is NOT a host_pre_launch hook (HPC review F2
+# caught this: the hook contract is "produce an env-file contribution"
+# but submit.py is a full sbatch-submit command. Wiring it as a hook
+# caused composition to BOTH sbatch-submit AND foreground-apptainer-exec
+# on the login node — double launch). It's surfaced as a `botainer plugin
+# hpc-launcher submit` command instead. The user dispatches between
+# `botainer start` (foreground) and the submit command explicitly per
+# their workflow:
+#   - On a login node, want a Slurm job: `botainer plugin hpc-launcher submit`
+#   - Inside an existing allocation: `botainer start` (uses ApptainerAdapter
+#     directly via composition.launch)
+
+commands:
+  - name: submit
+    script: host_helper/submit.py
+    help: Submit a fresh sbatch allocation hosting the agent (run on login node)
+  - name: status
+    script: host_helper/status.py
+    help: Show status of botainer Slurm jobs for this user
+  - name: attach
+    script: host_helper/attach.py
+    help: Reconnect to a running botainer Slurm job
+
+capabilities:
+  - sched.slurm
+
+contributes:
+  mount_target_prefixes:
+    - /workspace/.botainer/hpc-launcher/
+
+config_schema:
+  type: object
+  properties:
+    submission_mode:
+      type: string
+      enum: [submit, attach, here]
+      default: submit
+    partition:
+      type: string
+    account:
+      type: string
+    time_minutes:
+      type: integer
+      minimum: 1
+    cpus:
+      type: integer
+      minimum: 1
+      default: 1
+    memory_gb:
+      type: integer
+      minimum: 1
+    gpus:
+      type: integer
+      minimum: 0
+      default: 0
+    gpu_type:
+      type: string
+    max_concurrent_jobs:
+      # Per-project cap: `hpc submit` refuses past this many live botainer jobs
+      # (HPC-IMPL #7, enforced by submit.py::_refuse_if_concurrency_cap_exceeded).
+      # It's a real consumed key AND suggested by the `botainer init` config
+      # template — it was missing here, so `additionalProperties: false` rejected
+      # a config that followed the template (Grace host-test 2026-07-02).
+      type: integer
+      minimum: 1
+  additionalProperties: false

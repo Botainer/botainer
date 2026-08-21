@@ -1,0 +1,173 @@
+# EPCC Cirrus (University of Edinburgh; new "Cirrus EX4000" generation).
+# https://docs.cirrus.ac.uk/
+#
+# NOT RUN ON HARDWARE. Transcribed from public documentation, 2026-07-29.
+#
+# IMPORTANT — this profile describes the CURRENT "Cirrus EX4000" system,
+# which migrated in 2025 from an older Cirrus generation. The docs'
+# migration notes (https://docs.cirrus.ac.uk/migration-2025/cirrus-differences/)
+# say explicitly: "There are no GPU nodes on Cirrus EX4000" — the older
+# Cirrus DID have NVIDIA GPU nodes, but the CURRENT system documented here
+# is CPU-only (2x 144-core AMD EPYC 9825 "Zen5 Turin" per node). Do not
+# carry forward any assumption that Cirrus has GPUs — it currently does not.
+# Re-check docs.cirrus.ac.uk if this profile is reused after a further
+# hardware refresh.
+#
+# Scheduler confirmed: Slurm ("Cirrus uses the Slurm software to schedule
+# jobs" — user-guide/batch/). Jobs need BOTH --partition AND --qos; the
+# partition alone does not select a walltime/size class (see agent_hints).
+
+version: cluster-profile-v1
+
+verification:
+  status: from-public-docs
+  last_checked: "2026-07-29"
+  source: >-
+    https://docs.cirrus.ac.uk/ (hardware overview, "CPU-based system"),
+    https://docs.cirrus.ac.uk/user-guide/hardware/ (node specs),
+    https://docs.cirrus.ac.uk/user-guide/batch/ (Slurm, partition + QoS
+    tables, /work-only for batch jobs),
+    https://docs.cirrus.ac.uk/user-guide/resource_management/ and
+    https://docs.cirrus.ac.uk/user-guide/data/ (filesystem layout, Lustre
+    /work, no backup),
+    https://docs.cirrus.ac.uk/user-guide/containers/ (Apptainer support),
+    https://docs.cirrus.ac.uk/user-guide/sw-environment/ (Lmod),
+    https://docs.cirrus.ac.uk/user-guide/connecting/ (login hostname),
+    https://docs.cirrus.ac.uk/user-guide/python/ (compute-node fs access),
+    https://docs.cirrus.ac.uk/migration-2025/cirrus-differences/ (no GPUs
+    on EX4000).
+    NOT STATED anywhere checked: outbound/internet network policy for
+    compute nodes (either way); a /work purge or retention policy (docs
+    say /work is "not backed up", which is NOT the same as "purged" —
+    no cleanup schedule is given); an Lmod bootstrap script path; an
+    Apptainer cache-directory convention.
+
+cluster:
+  name: uk-epcc-cirrus
+  aliases: ["cirrus"]   # what $SLURM_CLUSTER_NAME / $LMOD_SYSHOST report
+  hostname_patterns:
+    - "login.cirrus.ac.uk"
+    # Docs give a single login address (no login1/login2 style names);
+    # the domain wildcard covers compute nodenames, which aren't shown
+    # in any ssh example.
+    - "*.cirrus.ac.uk"
+  description: "EPCC Cirrus EX4000 (HPE Cray EX4000; AMD EPYC 9825 Zen5 Turin — CPU-only, no GPU nodes)"
+
+lmod:
+  # Lmod IS confirmed in use ("The software environment on Cirrus is
+  # managed using the Lmod software" — sw-environment/), but the docs
+  # never give the bootstrap script path (no /etc/profile.d/*.sh style
+  # reference). Left blank rather than guessing a path that may not
+  # exist on this system's image.
+  bootstrap: ""
+
+slurm:
+  default_partition: standard
+  default_account: ""
+  # Docs don't state a system default walltime if --time is omitted;
+  # 60 minutes is a conservative interactive default, not a documented
+  # Cirrus value.
+  default_time_minutes: 60
+  partitions:
+    # Only two real Slurm PARTITIONS exist: standard, highmem. Walltime
+    # and job-size ceilings actually come from a separate QoS axis
+    # (--qos=..., required alongside --partition on every job — see
+    # agent_hints). max_time_minutes below is the ceiling under the
+    # "standard" QoS, the one used in every example script on this
+    # partition. Other QoS classes available ON the "standard" partition
+    # push further in either direction and are NOT representable as
+    # separate partitions here (they are not distinct --partition
+    # values): long (4 days / 96h, max 16 nodes), largescale (212h,
+    # min 129 / max 640 nodes, 1 running job), short (20 min, max 2
+    # nodes), lowpriority (24h, max 64 nodes, UKRI-only, uncharged),
+    # highpriority (48h, max 128 nodes, 1.5x charge rate).
+    standard:
+      max_time_minutes: 2880       # 48h, QoS=standard (the common case)
+      max_cpus: 288                # 2x 144-core AMD EPYC 9825 per node
+      max_memory_gb: 768           # most nodes; 64 of 640 have 1536 GB (see highmem)
+    highmem:
+      max_time_minutes: 2880       # 48h; only "standard"/"highpriority" QoS apply here
+      max_cpus: 288
+      max_memory_gb: 1536
+
+scratch:
+  # /work is the shared Lustre filesystem batch jobs must use (docs:
+  # "/home ... are not available to batch jobs"), and is visible from
+  # both login and compute nodes. BUT the docs only say /work is "not
+  # backed up" — they state NO automatic purge/retention schedule at
+  # all (checked resource_management/ and data/ pages). Per this
+  # project's no-guessing rule, an undocumented purge policy must NOT be
+  # invented as a number, so this is left blank rather than asserting
+  # either "never purged" or a specific day count. See agent_hints for
+  # the actual /work path shape (project-code-keyed, not a bare
+  # ${USER} path, so it isn't a clean template substitution anyway).
+  template: ""
+  auto_cleanup_days: 0
+
+apptainer:
+  # Apptainer IS the supported/documented container runtime on Cirrus
+  # ("The container software supported on Cirrus is Apptainer" —
+  # user-guide/containers/). No cache-directory convention is documented
+  # anywhere checked. Left blank rather than guessing a path — note the
+  # default Apptainer cache location is under $HOME, and $HOME is NOT
+  # mounted on Cirrus compute nodes, so an unconfigured default would
+  # silently break there; this needs an operator-confirmed /work-based
+  # override before relying on it.
+  cachedir: ""
+  prebuilt_url: ""
+
+modules:
+  denylist: []
+  always_load: []
+
+policy:
+  # UNDOCUMENTED either way. Checked connecting/, data/, containers/,
+  # python/, sw-environment/, and batch/ — none states whether compute
+  # nodes have outbound/internet access. Left at the schema default
+  # (false = not refused) rather than inventing a restriction that
+  # isn't written down; see the loud caveat in agent_hints below. Do
+  # NOT treat this false as a confirmed "network works" claim.
+  refuse_network: false
+
+agent_hints:
+  preamble: |
+    You are on EPCC Cirrus — specifically "Cirrus EX4000", the current
+    generation (migrated 2025). This system has NO GPU nodes ("There are
+    no GPU nodes on Cirrus EX4000" per EPCC's own migration notes) — if
+    you have older notes about Cirrus having NVIDIA GPUs, they describe
+    the PREVIOUS system and no longer apply. All compute nodes are
+    CPU-only: 2x 144-core AMD EPYC 9825 (288 cores/node).
+
+    Scheduler is Slurm. Every job needs BOTH `--partition` AND `--qos` —
+    the partition alone (`standard` or `highmem`) does not fix your
+    walltime/size limit; the QoS does. Common QoS on `standard`:
+    `standard` (48h, up to 128 nodes/user — the usual choice), `short`
+    (20 min, up to 2 nodes), `long` (4 days, up to 16 nodes), `largescale`
+    (212h, but requires at least 129 nodes and only 1 running job at a
+    time), `lowpriority` (24h, unaffiliated projects only, uncharged).
+    Omitting `--qos` is likely to be rejected or default somewhere you
+    didn't intend — always set it explicitly. Jobs also need
+    `--account=<budget code>` (a short project code like `t01`).
+
+    Filesystems:
+    - /home/<project>/<project>/<user> — NOT available to batch jobs at
+      all (compute nodes cannot see it). Login-node-only: code/config.
+    - /work/<project>/<project>/<user> — the Lustre filesystem batch
+      jobs must use for everything (inputs, outputs, scratch). It is
+      NOT backed up. Cirrus's docs do not state any automatic purge or
+      retention schedule for /work — that's not a promise it's kept
+      forever, it just isn't a documented auto-delete either. Don't
+      assume either way; don't rely on it as permanent storage for
+      anything you can't regenerate.
+
+    Network: Cirrus's public docs do not say whether compute nodes have
+    outbound internet access. Do NOT assume `pip install` / `conda
+    install` / `git clone` will succeed inside a batch job — if you need
+    packages, install/stage them from the login node (or bake an
+    Apptainer image off-system, since building images requires root and
+    must happen elsewhere) before submitting, and treat any in-job
+    network call as untested until you've confirmed it works.
+
+    Containers: Apptainer is supported, but images must be BUILT
+    off-system (e.g. with Docker/Podman on your own machine) — there is
+    no root access to build or modify images on Cirrus itself.

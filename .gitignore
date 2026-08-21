@@ -1,0 +1,50 @@
+# host-only symlink to v0.0.x project (target not visible inside container)
+v0_0_ref
+
+# botainer project config (per-developer)
+.botainer/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+build/
+dist/
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.hypothesis/
+
+# Node
+node_modules/
+
+# macOS
+.DS_Store
+
+# Editor
+*.swp
+.vscode/
+.idea/
+
+# Local-only working dirs (not part of the repo proper)
+codex-review/
+
+# Claude Code local state (per-clone scheduled wakeups, etc.)
+.claude/scheduled_tasks.lock
+
+# Handoff drop-box: incoming tarballs are transfer artifacts, not source.
+# handoff/ is excluded from every release path already; this just keeps them
+# out of `git status` so real untracked work stays visible.
+handoff/incoming/**/*.tar.gz
+
+# The public mirror, produced by tools/dev/export-public.sh. A BUILD ARTEFACT:
+# regenerated, never edited, and carrying its own .git that pushes to GitHub.
+# It lives inside this tree only because the dev container has no other
+# writable host mount. Ignored so `git add -A` can never commit 509 duplicated
+# files into the private repo — and so the export, which selects with
+# `git ls-files`, can never start consuming its own previous output.
+# export-public.sh REFUSES a destination inside this repo that is not ignored.
+/github/

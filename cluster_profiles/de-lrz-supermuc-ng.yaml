@@ -1,0 +1,172 @@
+# LRZ SuperMUC-NG (Leibniz Supercomputing Centre, Germany).
+# https://doku.lrz.de/
+#
+# NOT RUN ON HARDWARE. Transcribed from public documentation.
+
+version: cluster-profile-v1
+
+verification:
+  status: from-public-docs
+  last_checked: "2026-07-29"
+  source: >-
+    https://doku.lrz.de/job-processing-with-slurm-on-supermuc-ng-10746568.html
+    (Phase 1 partition table), https://doku.lrz.de/file-systems-of-supermuc-ng-10746566.html
+    (HOME/WORK/SCRATCH/DSS/DSA tiers, quotas, purge policy),
+    https://doku.lrz.de/operation-of-supermuc-ng-phase-2-403079197.html
+    (Phase 2 GPU hardware, internet-access statement).
+    NOT stated on the Phase-1 partition page: an unambiguous single max
+    walltime for micro/general/fat (the table shows a range, e.g. "48-60
+    hours", with no explanation of what the higher figure requires — the
+    conservative lower bound is recorded here; see comment below) or a
+    documented default partition. NOT stated for Phase 2: distinct Slurm
+    partition names for the GPU nodes (docs say "setup similar to SNG
+    phase 1... except there is no micro queue" and show `test`/`general`
+    partition names again, without clarifying whether these are literally
+    the same partitions selecting GPU nodes via a constraint, or namesaked
+    duplicates) — no separate GPU partition entry is recorded structurally
+    for this reason; see the comment under `slurm.partitions` and the
+    preamble instead. Container/Apptainer guidance was not found on the
+    pages checked and is left out rather than guessed.
+
+cluster:
+  name: de-lrz-supermuc-ng
+  aliases: ["supermuc-ng", "supermucng"]   # what $SLURM_CLUSTER_NAME / $LMOD_SYSHOST report
+  hostname_patterns:
+    - "skx*.sng.lrz.de"
+    - "supermuc-ng*"
+    - "pvc.supermuc.lrz.de"
+  description: "LRZ SuperMUC-NG Phase 1 (Intel Skylake CPU) + Phase 2 (Intel Ponte Vecchio GPU)"
+
+lmod:
+  # LRZ's module system is preloaded in the standard login/job environment;
+  # no standalone Lmod init script is documented. Left empty rather than
+  # guessed.
+  bootstrap: ""
+
+slurm:
+  # Phase 1 (CPU-only) partitions below. Phase 2 (GPU, Ponte Vecchio) is
+  # documented as "setup similar to SNG phase 1... except there is no micro
+  # queue" and its example job scripts reference `test`/`general` partition
+  # names again — but it is NOT clear from the docs whether these are the
+  # literal same Slurm partitions (GPU nodes selected via a constraint) or
+  # a separate namespace, so no separate GPU partition entry is recorded
+  # here to avoid misrepresenting either the CPU or GPU node specs. See
+  # agent_hints.preamble for the GPU access details (accessed via a
+  # separate login target, pvc.supermuc.lrz.de).
+  default_partition: micro
+  default_account: ""
+  default_time_minutes: 240
+  partitions:
+    test:
+      max_time_minutes: 30           # 0.5 h, dedicated priority, 1 job/user
+      max_cpus: 48
+      max_memory_gb: 90
+    micro:
+      # Vendor table shows "48-60 hours" with no explanation of the extra
+      # 12 h; recording the conservative documented floor (48 h).
+      max_time_minutes: 2880
+      max_cpus: 48
+      max_memory_gb: 90
+    general:
+      max_time_minutes: 2880         # same range ambiguity as micro; conservative floor
+      max_cpus: 48
+      max_memory_gb: 90
+    large:
+      max_time_minutes: 1440         # vendor range "24-30 hours"; conservative floor
+      max_cpus: 48
+      max_memory_gb: 90
+    fat:
+      max_time_minutes: 2880         # same range ambiguity as micro/general; conservative floor
+      max_cpus: 48
+      max_memory_gb: 740             # "huge (fat) memory jobs (>90 GB/node)"
+
+scratch:
+  # $SCRATCH, path prefix /hppfs/scratch/<hash>/<user>. Vendor: "usually
+  # 3-4 weeks. Execution of deletion procedure depends on file system
+  # filling" — i.e. NOT a fixed schedule; under heavy fill, files "only a
+  # few days old" may be removed. Recording the conservative 3-week floor
+  # (21 days) rather than the 4-week ceiling, since warning too early is
+  # safer than promising retention the vendor explicitly says isn't
+  # guaranteed.
+  template: "/hppfs/scratch/${LRZ_HASH}/${USER}"
+  auto_cleanup_days: 21
+
+apptainer:
+  cachedir: "/hppfs/scratch/${LRZ_HASH}/${USER}/.apptainer/cache"
+  prebuilt_url: ""
+
+modules:
+  denylist: []
+  always_load: []
+
+policy:
+  # Explicit for Phase 2 (GPU): "The cluster does not allow outgoing
+  # internet from compute nodes. Users must use reverse SSH tunnels from
+  # login nodes for package installation and downloads." Phase 1 was not
+  # separately confirmed on the pages checked but LRZ documents this as a
+  # site-wide compute-node restriction, not GPU-specific, so it is applied
+  # here as the general policy.
+  # LEFT FALSE DELIBERATELY (corrected 2026-07-29).
+  #
+  # `policy.refuse_network` is a botainer POLICY — "do not give this container
+  # network" — i.e. a control WE claim to enforce. It is NOT a description of
+  # the cluster. This profile had it set to true to record a different fact:
+  # that this SITE's compute nodes have no internet egress.
+  #
+  # Two reasons that was wrong:
+  #   1. Category error. The site's egress is an ENVIRONMENT PROPERTY we should
+  #      report and plan around; refuse_network is an ENFORCEMENT CLAIM. A
+  #      profile cannot enforce anything.
+  #   2. The policy is not wired on HPC at all. `apptainer exec` inherits the
+  #      host network namespace, so network.mode=none cannot be honoured —
+  #      adapters/apptainer.py:74 refuses it explicitly rather than pretend.
+  #      Nothing anywhere reads this field. Setting it true asserted a control
+  #      that does not exist, which is the worst kind of security claim.
+  #
+  # The FACT is preserved where it is actually consumed: agent_hints.preamble
+  # below, which reaches the agent and tells it to pre-stage dependencies.
+  # Per-node-type egress deserves a real field; tracked as gap 9 in
+  # DN-021.
+  refuse_network: false
+
+agent_hints:
+  preamble: |
+    You are on LRZ SuperMUC-NG. Phase 1 is CPU-only (Intel Skylake, 48
+    cores/node); Phase 2 is GPU-accelerated (Intel Data Center GPU Max 1550
+    "Ponte Vecchio", 4 GPUs / 8 tiles per node) and is accessed via a
+    separate login target (pvc.supermuc.lrz.de) — check which one your
+    session is on before assuming CPU-only or GPU hardware.
+
+    NETWORK: compute nodes do NOT allow outgoing internet. `pip install`
+    and `git clone` over https will fail there. The documented workaround
+    is a reverse SSH tunnel FROM a login node — set that up before you need
+    network access mid-job, not after.
+
+    Partitions (Phase 1, node-count gated — SLURM allocates whole nodes
+    only): `test` (30 min, 1-16 nodes, dedicated — for quick checks),
+    `micro` (1-16 nodes — the practical default for small/single-node
+    work), `general` (17-768 nodes), `large` (769-3168 nodes, shorter
+    walltime cap, high priority), `fat` (1-128 nodes, 740 GB/node — only if
+    you actually need that much memory). Vendor docs show some partitions'
+    max walltime as a range (e.g. "48-60 hours") without explaining what
+    unlocks the higher figure — assume the LOWER bound (48 h for
+    micro/general/fat, 24 h for large) unless you've confirmed otherwise.
+
+    Phase 2 GPU jobs are documented as using the same partition-naming
+    scheme minus `micro` — treat GPU walltime/node limits as unconfirmed
+    and check current docs or `sinfo` before relying on a number.
+
+    Filesystems:
+    - $HOME (/dss/home/<hash>/<user>) — 100 GB quota, nightly snapshots (7
+      days) plus tape backup. Code, configs, important results.
+    - $WORK (project-scoped) — large on-disk data for the project's
+      lifetime, NOT backed up — archive anything irreplaceable yourself.
+    - $SCRATCH (/hppfs/scratch/<hash>/<user>) — large temporary working
+      area, NOT backed up. Vendor purge is "usually 3-4 weeks" but
+      explicitly NOT a fixed schedule: under heavy fill, files "only a few
+      days old" can be deleted. Do not treat anything here as safe for more
+      than a few days without copying it out.
+    - DSS / DSA (Data Science Storage / Archive) — long-term project data,
+      selectable backup tiers, ends with the data project.
+    - `/tmp` and `$TMPDIR` on nodes — regularly cleared; the docs say not
+      to reference these paths explicitly in scripts.

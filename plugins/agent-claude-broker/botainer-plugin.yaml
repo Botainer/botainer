@@ -1,0 +1,137 @@
+# First-party plugin: agent-claude-broker
+#
+# The credential BROKER — the correct, functional replacement for the dead
+# agent-claude-proxy (T0-3/#59). Where the proxy tried to hand the container an
+# ephemeral ANTHROPIC_API_KEY (which botainer's credential-leak guard refuses on
+# principle, so proxy mode never started), the broker hands the container a
+# provably-FAKE sentinel and holds the real credential host-side.
+#
+# The agent container sees ONLY:
+#   - ANTHROPIC_AUTH_TOKEN=BROKER-SENTINEL.tenant=<id>.nonce=<hex>.NOT-A-REAL-CREDENTIAL
+#   - ANTHROPIC_BASE_URL=http+unix:///run/anthropic-broker.sock
+#
+# Every Anthropic request from the container goes to the broker daemon over a
+# per-session unix socket. The broker STRIPS the container's sentinel
+# Authorization, INJECTS the real `Authorization: Bearer <access token>` read
+# from botainer's OWN login store host-side, forwards to api.anthropic.com, and
+# streams the response back. The real credential never enters the container.
+#
+# CREDENTIAL SOURCE (important): the broker reads botainer's OWN credential —
+# the one `botainer auth login` captured to
+#   <state_root>/shared-auth/agent-claude/.credentials.json  (shared), or
+#   <state_root>/state/<uuid>/data/agent-claude/profiles/<profile>/.credentials.json  (isolated).
+# It does NOT (and on macOS cannot) read the host's native Claude Code
+# credential — that lives in the macOS Keychain, unreadable by any host process.
+# Because botainer's store is independent of your native login, the broker
+# refreshing / rotating its refresh token can never log your everyday Claude
+# Code out. See DN-035.
+#
+# Compared to v0.1.0's mount modes (shared/isolated bind the credential file
+# INTO the container, where the agent can read it), broker mode adds:
+#   - A compromised agent can't exfiltrate the credential (it holds a sentinel).
+#   - Token refresh + rotation happen host-side (agent never holds the refresh
+#     token — the durable secret).
+#   - The broker audit-logs every request the agent made.
+#
+# MUTUALLY EXCLUSIVE with the mount + proxy variants. When enabled, the mount
+# plugins' credential binds are skipped (a refusal is raised if two anthropic
+# variants are explicitly enabled together).
+
+apiVersion: botainer-plugin-v1
+name: agent-claude-broker
+version: 0.1.0
+
+# AUTH-PRODUCT-PLAN.md §1: Mode D (broker) of the anthropic family. Mutually
+# exclusive with the isolated (agent-claude), shared, and dead-proxy variants.
+auth_family: anthropic
+auth_mode: broker
+mutually_exclusive_with:
+  - agent-claude
+  - agent-claude-shared
+  - agent-claude-proxy
+description: |
+  Credential broker for the Claude Code agent: keeps your real Anthropic
+  credential on the host (in the broker daemon) and hands the container only a
+  provably-fake sentinel. Reads botainer's OWN login credential
+  (shared-auth/agent-claude/.credentials.json) — the same file shared mode uses,
+  so it works with your existing botainer login, no new login. Refreshes the
+  OAuth token host-side; the container never holds the refresh token. This is
+  the functional replacement for the (dead) agent-claude-proxy.
+license: Apache-2.0
+maintainer: botainer
+botainer_min_version: 0.1.0a0
+tier: first-party
+kind: host_helper        # runs as host subprocess (HIGH 10 trust)
+trust_required: hooked
+
+runtimes:
+  - docker
+  - apptainer
+
+depends_on:
+  - agent-claude
+
+capabilities:
+  - host.credential_access     # reads botainer's login credential host-side
+  - net.outbound_proxy         # marks the plugin as an outbound proxy
+
+hooks:
+  - when: pre_session
+    script: hooks/start_broker.py
+    timeout_seconds: 15
+  - when: post_session
+    script: hooks/stop_broker.py
+    timeout_seconds: 10
+
+contributes:
+  # Envelope for the binds the broker contributes via hooks/start_broker.py.
+  # Without these declared, the strict envelope check in
+  # composition.run_pre_session_hooks refuses the bind.
+  #   - /run/anthropic-broker.sock : the unix-socket transport (apptainer).
+  #   - /home/agent/.claude        : a dedicated broker-STATE dir (history,
+  #     sessions, .claude.json) so Claude Code remembers across sessions. It
+  #     NEVER contains a credential — the broker injects that host-side — so
+  #     binding it does not reintroduce the mount-mode exposure.
+  mount_target_prefixes:
+    - /run/anthropic-broker.sock
+    - /home/agent/.claude
+
+  # Same rationale as agent-claude-shared: the agent-claude entrypoint must be
+  # the innermost wrap so ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_TOKEN are in scope
+  # when `claude` execs.
+  entrypoint_wrap:
+    layer: inner
+    command:
+      - /usr/local/bin/agent-claude-entrypoint
+
+  agent_hints_section: |
+    ## Credential broker is active (your credential is NOT in this container)
+
+    Your API requests to Anthropic flow through a host-side broker that holds
+    the real credential. The `ANTHROPIC_AUTH_TOKEN` in your environment is a
+    provably-fake SENTINEL (`BROKER-SENTINEL.…NOT-A-REAL-CREDENTIAL`) — it is
+    useless anywhere. Don't try to read a credential file under
+    `/home/agent/.claude/` — none is mounted (broker mode is exclusive with
+    mount mode). There is nothing here to exfiltrate.
+
+# CONFIG-TRUST: the ONLY project-settable field is credential_scope, which
+# merely selects WHICH of the user's OWN login stores to read (shared vs
+# isolated) — it cannot redirect a credential off-host. The upstream API host
+# and the OAuth refresh endpoint/client_id are the destinations the REAL
+# credential is sent to; `.botainer/config.yaml` is untrusted (git-shareable),
+# so those are PINNED in the hook, NOT config keys. A hostile config must not be
+# able to exfiltrate the token by pointing the broker at an attacker's server.
+config_schema:
+  type: object
+  properties:
+    credential_scope:
+      type: string
+      enum: ["shared", "isolated"]
+      default: "shared"
+      description: |
+        Which botainer login store the broker reads. "shared" =
+        <state_root>/shared-auth/agent-claude/.credentials.json (the default;
+        the same file shared mount mode uses). "isolated" = the per-project
+        profile credential. Either way the file is read host-side and never
+        bound into the container.
+  additionalProperties: false

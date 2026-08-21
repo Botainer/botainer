@@ -1,0 +1,209 @@
+# Narval (Digital Research Alliance of Canada / L'Alliance; regional operator
+# Calcul Québec). Built by Dell Canada and CDW Canada; located at École de
+# technologie supérieure (ÉTS), Montreal. In production since October 2021.
+#
+# https://docs.alliancecan.ca/wiki/Narval/en
+# https://docs.alliancecan.ca/wiki/Storage_and_file_management
+# https://docs.alliancecan.ca/wiki/Running_jobs
+# https://docs.alliancecan.ca/wiki/Apptainer
+# https://docs.alliancecan.ca/wiki/Accessing_CVMFS
+#
+# NOT RUN ON HARDWARE. Transcribed from public documentation. The primary
+# docs.alliancecan.ca wiki blocks automated fetches with an Anubis/BotStopper
+# proof-of-work wall from this environment; content below was retrieved
+# through a Google-Translate passthrough of the same pages (i.e. the same
+# server-rendered HTML, not a third-party paraphrase) and cross-checked
+# against an independent mirror (ualberta-rcg.github.io/ragflow-wiki-data,
+# itself scraped from docs.alliancecan.ca) and independent third-party notes
+# (UBC MOAD docs, SFU StatGen lab notes) where available.
+#
+# One discrepancy found and resolved: the Narval node-count table has two
+# additional large-memory row variants (a ~2 TB/node tier and a ~4 TB/node
+# tier) whose exact node-count -> CPU-model -> memory pairing came back
+# INCONSISTENT across repeated fetches of the same table (likely a table
+# parsing issue in the fetch tool, not a real doc disagreement). Rather than
+# guess which pairing is right, this profile omits those two tiers entirely
+# and only encodes the two nodes classes that were IDENTICAL across every
+# fetch: the 1,145 standard CPU nodes and the 159 A100 GPU nodes. See
+# agent_hints.preamble for a qualitative (non-numeric) mention of the
+# large-memory tiers.
+
+version: cluster-profile-v1
+
+verification:
+  status: from-public-docs
+  last_checked: "2026-07-29"
+  source: >
+    https://docs.alliancecan.ca/wiki/Narval/en (node table, login hostname,
+    StdEnv/2023, 7-day max walltime, no-internet-on-compute-nodes policy,
+    hosting/location, portal URL);
+    https://docs.alliancecan.ca/wiki/Storage_and_file_management (60-day
+    scratch purge wording, HOME/SCRATCH/PROJECT/NEARLINE default quotas);
+    https://docs.alliancecan.ca/wiki/Running_jobs (no named partitions —
+    scheduler assigns resources from the request; 168 h cluster-wide cap);
+    https://docs.alliancecan.ca/wiki/Apptainer (APPTAINER_CACHEDIR
+    convention, recommendation to point it at scratch, not a networked
+    home/project mount);
+    https://docs.alliancecan.ca/wiki/Accessing_CVMFS (Lmod bootstrap script
+    path). NOT stated anywhere found: per-node-type max_cpus/max_memory_gb
+    for the two large-memory node tiers (see discrepancy note above); an
+    explicit $SCRATCH path template as a literal string (inferred from the
+    Apptainer page's own example command and third-party confirmation, not
+    from a single canonical "the path is X" sentence); numbered/multiple
+    login-node hostnames (docs describe exactly one: narval.alliancecan.ca).
+
+cluster:
+  name: ca-alliance-narval
+  aliases: ["narval"]   # what $SLURM_CLUSTER_NAME / $LMOD_SYSHOST report
+  hostname_patterns:
+    - "narval.alliancecan.ca"
+    - "narval*"
+  description: "Narval (Digital Research Alliance of Canada / Calcul Québec, ÉTS Montreal; AMD EPYC CPU nodes, NVIDIA A100 GPU nodes)"
+
+lmod:
+  # Alliance Canada's CVMFS-distributed software stack. Documented as the
+  # script that "enabling our environment in your sessions is as simple as
+  # running" — sources Lmod and the default StdEnv modules.
+  bootstrap: "/cvmfs/soft.computecanada.ca/config/profile/bash.sh"
+
+slurm:
+  # Alliance Canada clusters do NOT use named Slurm partitions as the
+  # scheduling mechanism. Running_jobs docs explicitly recommend AGAINST
+  # specifying --partition: "you should allow the scheduler to assign a
+  # partition to your job based on the resources it requests." A job is
+  # gated by its resource request (--cpus-per-task, --mem, --gpus-per-node,
+  # --time) plus its --account allocation, not by a partition name.
+  default_partition: ""
+  # Every job requires --account=<def-/rrg-/rrg-...-ad allocation code>, but
+  # the code is per-user/per-group allocation data, not a cluster fact — left
+  # blank deliberately (also: no account names ship in this public file).
+  default_account: ""
+  # 60 min: matches the docs' stated minimum standard job duration (jobs
+  # under 1 hour are only for "testing", where the true floor is 5 min).
+  default_time_minutes: 60
+  partitions:
+    # Not real --partition names (see comment above) — these are resource
+    # PROFILES for botainer's own caps/hints, keyed by node class, matching
+    # this repo's existing convention (e.g. sdsc-expanse.yaml) of using
+    # descriptive keys under `partitions:` even when the site doesn't have
+    # a literal Slurm partition of that name.
+    cpu:
+      # "no jobs are permitted longer than 168 hours (7 days)" — applies
+      # cluster-wide, confirmed on the Narval page and Running_jobs.
+      max_time_minutes: 10080        # 7 days = 168 h
+      max_cpus: 64                   # standard node: 1,145 of them
+      max_memory_gb: 250             # standard node memory
+    gpu:
+      max_time_minutes: 10080
+      max_cpus: 48                   # GPU node: 159 of them
+      max_memory_gb: 498
+      gpu_types: [a100]              # NVIDIA A100-SXM4, 40 GB/GPU, 4/node, NVLink
+
+scratch:
+  # Alliance-wide convention (Apptainer docs' own cache-dir example uses
+  # "/scratch/$USER/apptainer/cache"; corroborated by independent
+  # third-party Alliance-cluster notes). $SCRATCH is shared Lustre,
+  # per-user, NOT backed up, and IS the purged filesystem (see below) —
+  # satisfies the "only if documented as shared+purged" rule.
+  template: "/scratch/${USER}"
+  # Storage_and_file_management, quoted almost verbatim: "Files older than
+  # 60 days are purged" — age is the younger of atime/ctime (mtime is
+  # explicitly excluded because it "can be backdated"). Deletion runs on a
+  # monthly cycle with advance email warning before the 15th-of-month purge.
+  auto_cleanup_days: 60
+  # NOTE: default $SCRATCH quota is documented as 20 TB / 1,000,000 files
+  # per user (no field in this schema for that; recorded here for the next
+  # reader). $HOME is 50 GB / 500K files; $PROJECT is 1 TB / 500K files per
+  # group (allocation-adjustable); $NEARLINE is 2 TB / 5,000 files per group.
+
+apptainer:
+  # Docs explicitly warn to point APPTAINER_CACHEDIR off any networked
+  # filesystem and suggest scratch instead; this is that documented example,
+  # not a botainer-invented default.
+  cachedir: "/scratch/${USER}/apptainer/cache"
+  prebuilt_url: ""
+
+modules:
+  denylist: []
+  always_load: []
+
+policy:
+  # Narval page, quoted: "By policy, Narval's compute nodes cannot access
+  # the internet. If you need an exception to this rule, contact technical
+  # support explaining what you need and why." This is an explicit
+  # documented statement, so refuse_network: true per this schema's rule.
+  # LEFT FALSE DELIBERATELY (corrected 2026-07-29).
+  #
+  # `policy.refuse_network` is a botainer POLICY — "do not give this container
+  # network" — i.e. a control WE claim to enforce. It is NOT a description of
+  # the cluster. This profile had it set to true to record a different fact:
+  # that this SITE's compute nodes have no internet egress.
+  #
+  # Two reasons that was wrong:
+  #   1. Category error. The site's egress is an ENVIRONMENT PROPERTY we should
+  #      report and plan around; refuse_network is an ENFORCEMENT CLAIM. A
+  #      profile cannot enforce anything.
+  #   2. The policy is not wired on HPC at all. `apptainer exec` inherits the
+  #      host network namespace, so network.mode=none cannot be honoured —
+  #      adapters/apptainer.py:74 refuses it explicitly rather than pretend.
+  #      Nothing anywhere reads this field. Setting it true asserted a control
+  #      that does not exist, which is the worst kind of security claim.
+  #
+  # The FACT is preserved where it is actually consumed: agent_hints.preamble
+  # below, which reaches the agent and tells it to pre-stage dependencies.
+  # Per-node-type egress deserves a real field; tracked as gap 9 in
+  # DN-021.
+  refuse_network: false
+
+agent_hints:
+  preamble: |
+    You are on Narval (Digital Research Alliance of Canada; operated by
+    Calcul Québec; hosted at École de technologie supérieure, Montreal).
+
+    Scheduling: this cluster does NOT use named Slurm partitions. Do not
+    pass --partition — the scheduler places your job from the resources you
+    request (--cpus-per-task, --mem, --gpus-per-node, --time) plus your
+    --account allocation. Every job needs --account set to your group's
+    allocation code.
+
+    Walltime: 7 days (168 hours) is the hard cluster-wide maximum for any
+    job. Jobs under 1 hour are treated as "testing" jobs (5-minute floor);
+    plan real work for >= 1 hour. Longer requests schedule less readily —
+    ask for only the time you need.
+
+    GPUs: request with --gpus-per-node=a100:<n> (the older
+    --gres=gpu:a100:<n> form is documented as possibly going away). GPU
+    nodes here have 4x NVIDIA A100 (40 GB each, NVLink) and 48 CPU cores —
+    docs recommend no more than ~12 CPU cores per A100 requested. There are
+    also a documented (but here undocumented-in-detail) smaller number of
+    large-memory CPU nodes with far more RAM than a standard node — if a job
+    needs a lot of memory, request it via --mem and let the scheduler place
+    you; don't try to name a memory tier.
+
+    Filesystems and where things go:
+    - $HOME (~/, 50 GB / 500K files) — code, small configs, job scripts.
+      Backed up.
+    - $SCRATCH (/scratch/<user>, 20 TB / 1M files) — the large, fast working
+      area. NOT backed up, and files are PURGED once both their atime and
+      ctime are older than 60 days (mtime alone does not save a file, since
+      it can be backdated). You get an email warning near the 1st of the
+      month and a final 72-hour warning around the 12th before the
+      15th-of-month deletion pass. Move anything you need to keep to
+      $PROJECT before it ages out.
+    - $PROJECT (1 TB / 500K files per group by default, allocation-
+      adjustable) — durable, backed-up group storage for anything you can't
+      regenerate.
+    - $SLURM_TMPDIR — node-local, fastest, but wiped at job end; stage
+      hot/small-file data there and copy results out before the job exits.
+    - Point APPTAINER_CACHEDIR at $SCRATCH (not $HOME/$PROJECT) — the docs
+      warn against caching container layers on the networked filesystems.
+
+    Network: compute nodes have NO internet access by policy. Anything that
+    needs to reach the network (package installs, model/dataset downloads)
+    has to happen ahead of time — on the login node (which is also subject
+    to Alliance's acceptable-use limits — do not run heavy compute there)
+    or as a pre-staged transfer — not inside the batch job.
+
+    Module system: Lmod, via the CVMFS-distributed StdEnv/2023 stack;
+    the intentionally-blocked older StdEnv/2016 and StdEnv/2018 will not
+    load here.

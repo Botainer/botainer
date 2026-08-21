@@ -1,0 +1,136 @@
+# First-party plugin: hpc-modules
+# Captures Lmod / environment-modules env on the host (login or compute
+# node), filters to safe vars, and binds the resulting environment into
+# the agent container via `--env-file`.
+#
+# Per project config:
+#
+#   plugins_enabled:
+#     - agent-claude
+#     - hpc-launcher
+#     - hpc-modules
+#   plugins:
+#     hpc-modules:
+#       modules: [python/3.11, gcc/13, cuda/12.3]
+#       purge_first: true
+#       fail_on_missing: true
+#
+# Trust model:
+# - The plugin's hook runs as the user on the host (HIGH 4 — full host
+#   trust). It executes `module load`, which the cluster admin curates.
+# - Env vars set by module load that are normally on env_var_denylist
+#   (LD_LIBRARY_PATH, PYTHONPATH, etc.) are allowed through. These are
+#   the variables modulefiles legitimately set; the denylist exists for
+#   AGENT-supplied env, not for CLUSTER-curated env.
+#
+# Plugin manifest declares `caps.modules_env_override` capability —
+# site policy must grant it to allow the override.
+
+apiVersion: botainer-plugin-v1
+name: hpc-modules
+version: 0.1.0
+description: |
+  Loads HPC environment modules (Lmod / environment-modules) on the
+  host and propagates the resulting environment into the agent
+  container via `--env-file`.
+license: Apache-2.0
+maintainer: botainer
+botainer_min_version: 0.1.0a0
+tier: first-party
+kind: policy-overlay
+trust_required: hooked
+
+runtimes:
+  - docker
+  - apptainer
+
+capabilities:
+  - caps.modules_env_override
+  - caps.modules_software_roots
+  # caps.modules_inner_load (2026-07-01): the alternate mode — bind the Lmod
+  # install tree + MODULEPATH dirs into the container so the AGENT can run
+  # `module load foo` INSIDE the container (dynamic, batch-job friendly).
+  # SITE-ONLY ceiling: mounts.cluster_lmod_root + mounts.cluster_modulepath_roots.
+  # Empty ceiling → feature OFF (default). See docs/CAPABILITY-SURFACE.md §4k.
+  - caps.modules_inner_load
+
+hooks:
+  - when: host_pre_launch
+    script: hooks/load_modules.py
+    timeout_seconds: 30
+
+contributes:
+  agent_hints_section: |
+    ## HPC modules loaded for this session
+
+    The host ran `module load` for cluster-curated software before launching
+    this container. The host software-root directories that `module load` added
+    to PATH / LD_LIBRARY_PATH (e.g. /apps/python/3.11/bin, /apps/cuda/12.3/lib64)
+    are bind-mounted READ-ONLY into the container at their original paths — when
+    the site administrator has listed those roots in the root-owned site policy
+    (mounts.cluster_software_roots). The binds are limited to the directories
+    `module load` ADDED, each contained within that policy ceiling; nothing else
+    from the host is exposed.
+
+    The module env vars are applied to your environment on BOTH runtimes — on
+    the laptop/single-node path (docker or direct `apptainer`) and on the HPC
+    batch (sbatch) path. On the batch path the host module env is captured on
+    the host and prepended into your PATH/LD_LIBRARY_PATH (the container's own
+    entries are preserved), since the module subsystem can't run inside the
+    container. So a `python` that resolves to /apps/... works — PROVIDED the
+    admin listed its software root in the ceiling above; if not, the dir is NOT
+    bound and the tool is unreachable by name (this is the OFF case below). The
+    files are present at their host paths when bound, so you can also invoke
+    them by ABSOLUTE PATH (e.g. /apps/python/3.11/bin/python).
+
+    If a module binary reports "No such file or directory" as an executable
+    (not a runtime-link error), its software root is outside the site policy
+    ceiling (ask the cluster admin to add it) or the feature is off (no ceiling
+    configured) — use a binary that IS reachable or add a mounts.extra entry.
+
+    In-container `module load` (caps.modules_inner_load): when the site
+    admin has set `mounts.cluster_lmod_root` in the root-owned policy, the
+    Lmod install tree and MODULEPATH directories are ALSO bound RO and the
+    `module` command works INSIDE the container (BASH_ENV sources Lmod's
+    init/bash for every `bash -c` subshell). Probe with `module avail` —
+    if it lists modules, the feature is ON and you can `module load
+    <name>/<version>` dynamically (a batch script can load different
+    software per stage instead of predicting everything at submit time).
+    If `module` is not found, the feature is OFF at this site — don't
+    retry; use the pre-captured module env / absolute paths above.
+
+config_schema:
+  type: object
+  properties:
+    modules:
+      type: array
+      items: { type: string }
+      default: []
+      description: |
+        Module specs to `module load` (e.g. "python/3.11").
+    # NOTE: there is deliberately NO `bootstrap_script` config key. The
+    # bootstrap is `source`d on the node, so it must come from an
+    # operator/host source — never the git-shareable project config (that was
+    # an arbitrary-code-execution hole; see AUDIT 2026-06-09 C2). The path is
+    # resolved from BOTAINER_LMOD_BOOTSTRAP (operator override / cluster
+    # profile lmod.bootstrap) or auto-detected from the host login env.
+    purge_first:
+      type: boolean
+      default: true
+      description: |
+        Run `module purge` before loading requested modules. Prevents
+        the user's interactive-shell module state from leaking in.
+    fail_on_missing:
+      type: boolean
+      default: true
+      description: |
+        Refuse session if any requested module isn't found.
+    allowed_env_overrides:
+      type: array
+      items: { type: string }
+      default: []
+      description: |
+        Additional env vars (beyond the built-in MODULE_TRUSTED_DEFAULTS)
+        that may pass through the global denylist when set by `module
+        load`. Use cautiously.
+  additionalProperties: false

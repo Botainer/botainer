@@ -1,0 +1,156 @@
+# OSC Cardinal (Ohio Supercomputer Center).
+# https://www.osc.edu/resources/technical_support/supercomputers/cardinal
+#
+# SCHEDULER: Slurm. Unlike Pitzer, Cardinal has NO PBS-compatibility shim at
+# all — OSC docs state plainly: "The PBS compatibility layer is disabled on
+# Cardinal so PBS batch scripts won't work on Cardinal." Use sbatch/squeue;
+# old qsub-style scripts from Pitzer/Owens must be converted first.
+#
+# NOT RUN ON HARDWARE. Transcribed from public documentation — see
+# `verification` below. Cardinal is OSC's newest cluster (launched Nov 2024)
+# and has noticeably thinner documentation than Pitzer: no per-node-type
+# "guidance_on_requesting_resources" page was found, and the debug partition's
+# underlying node hardware is not documented (see comment on `debug` below).
+
+version: cluster-profile-v1
+
+verification:
+  status: from-public-docs
+  last_checked: "2026-07-29"
+  source: "https://www.osc.edu/resources/technical_support/supercomputers/cardinal (ssh hostname, PBS-shim-disabled statement), https://www.osc.edu/resources/technical_support/supercomputers/cardinal/batch_limit_rules (partition table, per-user limits), https://www.osc.edu/resources/technical_support/supercomputers/cardinal/technical_specifications (node counts, CPU/GPU models, per-node-type memory), https://www.osc.edu/resources/technical_support/supercomputers/cardinal/migrating_jobs_from_other_clusters (PBS-disabled confirmation, qsub->sbatch), https://www.osc.edu/resources/technical_support/supercomputers/cardinal/cardinal_software_environment (Lmod: same module system as other OSC clusters, version now mandatory), https://www.osc.edu/supercomputing/storage-environment-at-osc/available-file-systems (home/scratch quotas and purge; states scratch is 'visible from all OSC HPC systems' and home is 'the same ... regardless of what system you're on' — Cardinal not named explicitly but is one of OSC's current HPC systems), https://www.osc.edu/resources/getting_started/howto/howto_use_docker_and_singularity_containers_at_osc (Apptainer available on all OSC clusters incl. Cardinal; recommends APPTAINER_CACHEDIR=$TMPDIR). Docs did NOT state: a default partition/account/walltime if unspecified, a login-node hostname wildcard beyond the single ssh alias, a documented Lmod init/bootstrap script path, or any per-node hardware spec for the `debug` partition — all left empty/omitted below for that reason."
+
+cluster:
+  name: us-osc-cardinal
+  aliases: ["cardinal"]   # what $SLURM_CLUSTER_NAME / $LMOD_SYSHOST report
+  hostname_patterns:
+    - "cardinal.osc.edu"    # the only ssh hostname OSC documents; no
+                            # login-node wildcard (e.g. cardinal-login01) is
+                            # published
+  description: "OSC Cardinal (Dell; Intel Xeon Max 9470 HBM2e + Platinum 8470 'Sapphire Rapids'; NVIDIA H100)"
+
+lmod:
+  bootstrap: ""   # docs say Cardinal "uses the same module system as the
+                  # other clusters" (Lmod: module load/avail/spider) but do
+                  # not publish a module-init/bootstrap script path. Note:
+                  # module version specification is now MANDATORY on Cardinal
+                  # (`module load intel/2021.10.0`, not bare `module load intel`)
+
+slurm:
+  # OSC does not document a "default" partition/account/walltime applied when
+  # a job omits --partition, so this default_partition is OUR choice (not a
+  # documented default), same reasoning as the Pitzer/Expanse profiles: `cpu`
+  # is the general-purpose, non-GPU, non-restricted partition and covers most
+  # agent work. `longcpu` and `hugemem` are restricted-access/tiny pools —
+  # request only if actually needed. `cache` requires the explicit
+  # --partition=cache flag and exists only to test HBM cache-mode behavior.
+  default_partition: cpu
+  default_account: ""
+  default_time_minutes: 240
+  partitions:
+    cpu:
+      max_time_minutes: 10080       # 168 h (7 days); 322 nodes in this pool; cannot request GPUs
+      max_cpus: 96                  # 104 cores/node, 96 usable (Xeon Max 9470 HBM2e, 2 sockets)
+      max_memory_gb: 640            # 512 GB DDR5 + 128 GB HBM in FLAT mode (addressable); default
+                                     # code path uses DDR only unless configured for HBM
+    longcpu:
+      max_time_minutes: 20160       # 336 h (14 days); restricted access; same 322-node pool as `cpu`
+      max_cpus: 96
+      max_memory_gb: 640
+    cache:
+      max_time_minutes: 10080       # 168 h; only 4 nodes exist cluster-wide; cannot request GPUs
+      max_cpus: 96
+      max_memory_gb: 512            # HBM here is configured in CACHE mode (hardware-managed cache in
+                                     # front of DDR, not separately addressable) — so only the 512 GB
+                                     # DDR5 counts as addressable memory, unlike the `cpu`/`longcpu` pool
+    gpu:
+      max_time_minutes: 10080       # 168 h; 32 nodes in total
+      max_cpus: 96                  # 104 cores/node, 96 usable (Xeon Platinum 8470, no on-package HBM)
+      max_memory_gb: 1024           # 1 TB DDR5
+      gpu_types: [h100]             # 4x NVIDIA H100 96GB per node; a job maxes out GPUs at 6 nodes x
+                                     # 4 GPUs = 24 GPUs total (per-user GPU-job core/node cap is 24)
+    debug:
+      max_time_minutes: 60          # 1 h; max 2 nodes; "for small interactive and test jobs (both
+                                     # CPU and GPU)" per --partition=debug. Docs do NOT state which
+                                     # node hardware pool debug draws from, so max_cpus/max_memory_gb
+                                     # are deliberately OMITTED here rather than guessed.
+      gpu_types: [h100]             # debug explicitly allows a "(1 gpu)" request; H100 is the only
+                                     # GPU model that exists anywhere on this cluster
+    hugemem:
+      max_time_minutes: 10080       # 168 h; max 1 node/job; 16 nodes exist cluster-wide (per-user
+                                     # cap for hugemem jobs is 8 cores / 8 nodes)
+      max_cpus: 96
+      max_memory_gb: 2176           # 2 TB DDR5 + 128 GB HBM (flat mode, "for large SMP-style jobs")
+
+scratch:
+  # /fs/scratch is OSC's shared, purged parallel filesystem. The available-
+  # file-systems page states it is "visible from all OSC HPC systems and all
+  # compute nodes" — it doesn't name Cardinal specifically, but Cardinal is
+  # one of OSC's current HPC systems, same basis the Pitzer profile used for
+  # this identical page. It is keyed by PROJECT CODE (e.g. /fs/scratch/PAS1234),
+  # not by username — no per-user subdirectory convention is documented.
+  template: "/fs/scratch/${PROJECT_CODE}"
+  auto_cleanup_days: 60             # vendor: "not accessed for >= 60 days ... removed every Wednesday"
+
+apptainer:
+  # OSC's Docker/Apptainer howto page explicitly recommends
+  # `APPTAINER_CACHEDIR=$TMPDIR` (node-local scratch) "to improve build
+  # efficiency and avoid potential file system issues" — this is a real,
+  # specific recommendation (unlike Pitzer's page, which just says "change
+  # it" with no path given). Note $TMPDIR is node-local and deleted at job
+  # end, so this cache does not persist across jobs.
+  cachedir: "${TMPDIR}/.apptainer/cache"
+  prebuilt_url: ""
+
+modules:
+  denylist: []
+  always_load: []
+
+policy:
+  refuse_network: false
+
+agent_hints:
+  preamble: |
+    You are on OSC Cardinal (Ohio Supercomputer Center's newest cluster,
+    launched November 2024).
+
+    SCHEDULER: Slurm ONLY — the PBS-compatibility shim that Pitzer still
+    carries is DISABLED on Cardinal. Old qsub-style scripts will not run;
+    use sbatch/squeue.
+
+    Modules: same Lmod system as OSC's other clusters, but module VERSIONS
+    are now mandatory (`module load intel/2021.10.0`, not bare `module load
+    intel`) and several module names changed from Pitzer's RHEL7 environment
+    (e.g. `gnu`->`gcc`, `intel`/`mkl`->`intel-oneapi-mkl`,
+    `intelmpi`->`intel-oneapi-mpi`).
+
+    Partitions:
+    - `cpu` (322 nodes, 96 usable cores, 512 GB DDR5 + 128 GB HBM in FLAT
+      mode) is the general-purpose non-GPU pool. Caps at 168 h (7 days).
+    - `cache` is the same node class but with HBM in CACHE mode instead of
+      FLAT — only 4 nodes exist and you must pass --partition=cache
+      explicitly to get them.
+    - `longcpu` allows 336 h (14 days) but draws from the same 322-node pool
+      as `cpu` and is access-restricted.
+    - `gpu` (32 nodes) gives 4x NVIDIA H100 96GB per node, 1 TB DDR5. A
+      single job maxes out at 6 nodes/24 GPUs.
+    - `hugemem` (16 nodes) gives 2 TB DDR5 + 128 GB HBM for large
+      single-node SMP-style jobs; max 1 node per job.
+    - `debug` caps at 1 h, max 2 nodes, and accepts both CPU-only and
+      GPU (up to 1 GPU) test jobs — OSC does not document which node
+      hardware pool it actually draws from.
+    Per-user limits: 384 running jobs max, 5,184 cores max across all jobs,
+    GPU jobs capped at 24 cores/24 nodes, hugemem jobs capped at 8 cores/8
+    nodes.
+
+    Filesystems:
+    - $HOME — same home directory on every OSC system; 500 GB / 1,000,000
+      files, not increasable, backed up daily.
+    - /fs/scratch/<project-code> — the shared, purged working area, visible
+      from every OSC system. Files untouched for 60+ days are removed every
+      Wednesday. It is keyed by PROJECT CODE, not by username.
+    - /fs/ess/<project-code> — durable, quota-billed project storage.
+    - $TMPDIR — node-local, per-job scratch; deleted when the job ends. OSC
+      recommends pointing APPTAINER_CACHEDIR here for container build
+      efficiency, but that means the cache does not survive past one job.
+    - $PFSDIR — per-job scratch on the parallel filesystem (needs
+      --gres=pfsdir); also deleted when the job ends.

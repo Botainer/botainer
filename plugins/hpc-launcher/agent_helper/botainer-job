@@ -1,0 +1,324 @@
+#!/usr/bin/env python3
+"""botainer-job — the caged agent's job-dispatch CLI (#54, in-container).
+
+Runs INSIDE the agent container (bind-mounted RO at /usr/local/bin/botainer-job
+so it is rebuild-independent — versioned with the launcher, not baked in the
+.sif). It has NO Slurm access: it ONLY writes job requests to /jobs/in and reads
+results from /jobs/out (the directional mailbox, INV-1). A trusted host-side
+dispatcher validates each request against the site policy + profiles and submits
+the CAGED child job (INV-2). Stdlib-only.
+
+    botainer-job profiles
+    botainer-job submit <profile> <cmd> [args...]
+    botainer-job submit <profile> -- <cmd> [args...]
+    botainer-job list [--state STATE]
+    botainer-job status <id>
+    botainer-job logs <id> [--tail N] [--stderr]
+    botainer-job cancel <id>
+
+If the dispatcher isn't running, `submit` still succeeds (the request sits in
+state `pending`); `list` showing a pile of `pending` is the symptom.
+"""
+from __future__ import annotations
+
+import argparse
+import datetime
+import json
+import os
+import re
+import secrets
+import sys
+from pathlib import Path
+
+IN_DIR = Path(os.environ.get("BOTAINER_JOBS_IN", "/jobs/in"))
+OUT_DIR = Path(os.environ.get("BOTAINER_JOBS_OUT", "/jobs/out"))
+REQUEST_VERSION = "botainer-job-v1"
+_ID_RE = re.compile(r"^[0-9a-f]{16}$")
+_PROFILE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+
+def _err(msg: str, code: int = 1) -> "int":
+    sys.stderr.write(f"botainer-job: {msg}\n")
+    return code
+
+
+def _now() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
+def _read_json(path: Path) -> dict | None:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def cmd_profiles(_args: argparse.Namespace) -> int:
+    """List the profiles the operator made available (host-written to out/)."""
+    manifest = _read_json(OUT_DIR / "profiles.json") or {}
+    profs = manifest.get("profiles") or {}
+    if not profs:
+        sys.stderr.write(
+            "botainer-job: no job profiles are available. The operator defines "
+            "them in .botainer/config.yaml `job_profiles:` (you can't read that "
+            "from in here). If this is unexpected, ask the user to add profiles "
+            "and (re)start the dispatcher.\n"
+        )
+        return 0
+    for name in sorted(profs):
+        p = profs[name] or {}
+        desc = p.get("description", "")
+
+        # Show "default (max N)" for each resource that has an opt-in max the
+        # agent can request up to via `submit --cpus/--mem/…`.
+        def _dm(default, mx, label):
+            return f"{label}={default}" + (f"(max {mx})" if mx else "")
+        shape = (
+            f"partition={p.get('partition','?')} "
+            + _dm(p.get('time', '?'), p.get('max_time'), 'time') + " "
+            + _dm(p.get('cpus', '?'), p.get('max_cpus'), 'cpus') + " "
+            + _dm(p.get('memory', '?'), p.get('max_memory'), 'mem') + " "
+            + _dm(p.get('gpus', 0), p.get('max_gpus'), 'gpus') + " "
+            + f"max_concurrent={p.get('max_concurrent','?')}"
+        )
+        # #68 MPI: show multi-node/task shape when the profile is parallel.
+        _nodes = p.get("nodes", 1) or 1
+        _ntasks = p.get("ntasks")
+        _ntpn = p.get("ntasks_per_node")
+        _maxnodes = p.get("max_nodes")
+        if (_nodes and _nodes > 1) or _ntasks or _ntpn or _maxnodes:
+            shape += (
+                f" [MPI nodes={_nodes}" + (f"(max {_maxnodes})" if _maxnodes else "")
+                + (f" ntasks={_ntasks}" if _ntasks else "")
+                + (f" ntasks_per_node={_ntpn}" if _ntpn else "")
+                + " — launched with srun]"
+            )
+        print(f"{name:16} {shape}" + (f"  — {desc}" if desc else ""))
+        # Verbal usage notes (which/when to prefer, where to be conservative).
+        notes = (p.get("notes") or "").strip()
+        for ln in notes.splitlines():
+            if ln.strip():
+                print(f"{'':16}   ↳ {ln.strip()}")
+    return 0
+
+
+def cmd_submit(args: argparse.Namespace) -> int:
+    if not _PROFILE_RE.match(args.profile):
+        return _err(f"invalid profile name {args.profile!r}")
+    command = list(args.command)
+    if command and command[0] == "--":
+        command = command[1:]
+    if not command:
+        return _err("submit needs a command: `botainer-job submit <profile> <cmd> [args…]`")
+    # jobs v2 resource overrides (only used if the profile sets a matching max_*;
+    # otherwise the dispatcher refuses with a clear reason).
+    resources = {}
+    for key, attr in (("cpus", "cpus"), ("memory", "mem"), ("gpus", "gpus"),
+                      ("nodes", "nodes"), ("time", "time")):
+        val = getattr(args, attr, None)
+        if val is not None:
+            resources[key] = val
+    job_id = secrets.token_hex(8)
+    request = {
+        "version": REQUEST_VERSION,
+        "id": job_id,
+        "profile": args.profile,
+        "command": command,          # ARGV, never a shell string
+        "array": None,
+        "resources": resources or None,
+        # #68 hot: run on an idle WARM worker immediately (no queue wait) if the
+        # pool has one for this profile; otherwise it falls back to a cold job.
+        "hot": bool(getattr(args, "hot", False)),
+        "submitted_at": _now(),
+    }
+    try:
+        IN_DIR.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        return _err(f"cannot access the job inbox {IN_DIR} ({exc}). Is this an "
+                    f"HPC session with the dispatcher enabled?")
+    # Atomic write into the agent-owned inbox.
+    tmp = IN_DIR / f".{job_id}.json.tmp"
+    dst = IN_DIR / f"{job_id}.json"
+    try:
+        tmp.write_text(json.dumps(request, indent=2, sort_keys=True), encoding="utf-8")
+        os.replace(tmp, dst)
+    except OSError as exc:
+        return _err(f"could not write job request: {exc}")
+    print(job_id)
+    hot = " (hot: routed to a warm worker if one is idle)" if request["hot"] else ""
+    sys.stderr.write(
+        f"botainer-job: submitted {job_id} (profile {args.profile}){hot}. "
+        f"The dispatcher runs automatically — track with "
+        f"`botainer-job status {job_id}`; it will go pending → running → "
+        f"completed on its own.\n"
+    )
+    return 0
+
+
+def cmd_pool(args: argparse.Namespace) -> int:
+    """Warm/hot worker pool control (agent-facing). start/stop write a control
+    request the host dispatcher acts on; status reads the pool manifest."""
+    action = args.action
+    if action == "status":
+        manifest = _read_json(OUT_DIR / "pool.json") or {}
+        workers = manifest.get("workers") or []
+        if not workers:
+            print("no warm workers (start some with "
+                  "`botainer-job pool start <profile> [--size N]`)")
+            return 0
+        for w in workers:
+            print(f"{w.get('worker_id','?')}  profile={w.get('profile','?')}  "
+                  f"state={w.get('state','?')}")
+        return 0
+    # start / stop → a control request into the inbox.
+    if action == "start" and not _PROFILE_RE.match(args.profile or ""):
+        return _err(f"invalid profile name {args.profile!r}")
+    ctl_id = secrets.token_hex(8)
+    request = {
+        "version": REQUEST_VERSION,
+        "id": ctl_id,
+        "kind": "pool_control",
+        "action": action,
+        "profile": getattr(args, "profile", None),
+        "size": getattr(args, "size", 1),
+        "idle_timeout": getattr(args, "idle_timeout", 300),
+        "worker": getattr(args, "worker", None),
+        "submitted_at": _now(),
+    }
+    try:
+        IN_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = IN_DIR / f".{ctl_id}.json.tmp"
+        tmp.write_text(json.dumps(request, indent=2, sort_keys=True), encoding="utf-8")
+        os.replace(tmp, IN_DIR / f"{ctl_id}.json")
+    except OSError as exc:
+        return _err(f"could not write pool control request: {exc}")
+    sys.stderr.write(
+        f"botainer-job: pool {action} requested. The dispatcher applies it "
+        f"automatically; check `botainer-job pool status` in a few seconds.\n"
+    )
+    return 0
+
+
+def _status_records() -> list[dict]:
+    out: list[dict] = []
+    if not OUT_DIR.is_dir():
+        return out
+    for p in sorted(OUT_DIR.glob("*.status.json")):
+        rec = _read_json(p)
+        if isinstance(rec, dict):
+            out.append(rec)
+    return out
+
+
+def cmd_list(args: argparse.Namespace) -> int:
+    recs = _status_records()
+    if args.state:
+        recs = [r for r in recs if r.get("state") == args.state]
+    if not recs:
+        print("(no jobs)")
+        return 0
+    for r in recs:
+        print(f"{r.get('id','?'):16} {r.get('state','?'):10} "
+              f"{r.get('profile','?'):10} jobid={r.get('slurm_job_id','-')}")
+    return 0
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    if not _ID_RE.match(args.id):
+        return _err(f"invalid job id {args.id!r}")
+    rec = _read_json(OUT_DIR / f"{args.id}.status.json")
+    if rec is None:
+        # Maybe still only in the inbox (pending, dispatcher hasn't seen it).
+        if (IN_DIR / f"{args.id}.json").exists():
+            print(json.dumps({"id": args.id, "state": "pending"}, indent=2))
+            return 0
+        return _err(f"no such job {args.id}", code=2)
+    print(json.dumps(rec, indent=2, sort_keys=True))
+    return 0
+
+
+def cmd_logs(args: argparse.Namespace) -> int:
+    if not _ID_RE.match(args.id):
+        return _err(f"invalid job id {args.id!r}")
+    suffix = "stderr" if args.stderr else "stdout"
+    path = OUT_DIR / f"{args.id}.{suffix}"
+    if not path.exists():
+        return _err(f"no {suffix} for {args.id} yet", code=2)
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        return _err(f"cannot read logs: {exc}")
+    lines = text.splitlines()
+    if args.tail is not None and args.tail >= 0:
+        lines = lines[-args.tail:]
+    print("\n".join(lines))
+    return 0
+
+
+def cmd_cancel(args: argparse.Namespace) -> int:
+    if not _ID_RE.match(args.id):
+        return _err(f"invalid job id {args.id!r}")
+    marker = IN_DIR / f"{args.id}.cancel"
+    try:
+        marker.write_text(_now(), encoding="utf-8")
+    except OSError as exc:
+        return _err(f"could not write cancel marker: {exc}")
+    sys.stderr.write(f"botainer-job: cancel requested for {args.id} "
+                     f"(the dispatcher runs scancel on its next cycle).\n")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="botainer-job", description=__doc__)
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    sub.add_parser("profiles", help="list available job profiles")
+
+    ps = sub.add_parser("submit", help="submit a job into a profile")
+    ps.add_argument("profile")
+    ps.add_argument("--hot", action="store_true",
+                    help="run on an idle warm worker now (no queue wait) if available")
+    # jobs v2: request MORE than the profile default, up to its max_* (if set).
+    ps.add_argument("--cpus", type=int, default=None, help="override cpus (<= profile max_cpus)")
+    ps.add_argument("--mem", default=None, help="override memory e.g. 64G (<= max_memory)")
+    ps.add_argument("--gpus", type=int, default=None, help="override gpus (<= max_gpus)")
+    ps.add_argument("--nodes", type=int, default=None, help="override nodes (<= max_nodes)")
+    ps.add_argument("--time", default=None, help="override time e.g. 02:00:00 (<= max_time)")
+    ps.add_argument("command", nargs=argparse.REMAINDER,
+                    help="the command argv (optionally after `--`)")
+
+    # #68 warm/hot worker pool.
+    pp = sub.add_parser("pool", help="warm/hot worker pool (start/stop/status)")
+    psub = pp.add_subparsers(dest="action", required=True)
+    pps = psub.add_parser("start", help="start warm workers for a profile")
+    pps.add_argument("profile")
+    pps.add_argument("--size", type=int, default=1)
+    pps.add_argument("--idle-timeout", type=int, default=300)
+    psub.add_parser("status", help="show the warm workers")
+    ppstop = psub.add_parser("stop", help="stop warm workers")
+    ppstop.add_argument("--worker", default=None, help="one worker (default: all)")
+
+    pl = sub.add_parser("list", help="list your jobs")
+    pl.add_argument("--state", default=None)
+
+    pst = sub.add_parser("status", help="full status for one job")
+    pst.add_argument("id")
+
+    plg = sub.add_parser("logs", help="stdout/stderr for one job")
+    plg.add_argument("id")
+    plg.add_argument("--tail", type=int, default=None)
+    plg.add_argument("--stderr", action="store_true")
+
+    pc = sub.add_parser("cancel", help="cancel a job")
+    pc.add_argument("id")
+
+    args = parser.parse_args(argv)
+    return {
+        "profiles": cmd_profiles, "submit": cmd_submit, "list": cmd_list,
+        "status": cmd_status, "logs": cmd_logs, "cancel": cmd_cancel,
+        "pool": cmd_pool,
+    }[args.cmd](args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

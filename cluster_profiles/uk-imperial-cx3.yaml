@@ -1,0 +1,263 @@
+# Imperial College London Research Computing Service (RCS) — CX3 cluster.
+# https://icl-rcs-user-guide.readthedocs.io/
+#
+# NOT RUN ON HARDWARE. Transcribed from public documentation on 2026-07-29.
+#
+# *** SCHEDULER IS NOT SLURM. ***
+# Imperial RCS uses PBS Professional (PBS Pro): `qsub` / `qstat` / `qdel`,
+# with `#PBS -l select=...:ncpus=...:mem=...` and `#PBS -l walltime=...`
+# directives. The `slurm:` key below is populated with PBS Pro's real
+# routing-queue data anyway, because the cluster-profile-v1 schema hardcodes
+# that section name regardless of the actual scheduler
+# (see botainer/state/cluster_profile.py). See agent_hints.preamble for the
+# real commands.
+#
+# PBS Pro has no `--partition`-style manual queue choice: you declare the
+# resources a job needs and the scheduler routes it into the first queue
+# whose limits fit (small24/small72/medium24/medium72/large24/large72/
+# largemem72/gpu72/capability24/capability48). The "partitions" below are
+# those routing queues, transcribed from the job-sizing-guidance page.
+#
+# Docs describe THREE more queues (jupyter, jupytergpu, ood) reserved for
+# the JupyterHub / Open OnDemand web portals — 1,4,8 cores / 8,32,64 GB /
+# 2,4,8 h tiers, capped at 1 concurrent job per user across both portals.
+# Deliberately NOT modeled as partitions here: they are not reachable via a
+# plain `qsub` batch script, so an agent submitting scripted jobs has no
+# business targeting them.
+#
+# Docs also state cluster-wide fairness caps (scope not fully disambiguated
+# in what was fetched): max 500 CPUs running concurrently and max 12 GPUs
+# concurrently. Not modeled — no schema field for a cluster-wide cap.
+#
+# The RCS also operates HX1 (restricted/authorised-access only), HX2
+# (general use, separate specs), and HX3 (AI-focused; docs pending at time
+# of writing). This profile documents CX3 only — the general-use system the
+# fetched getting-started/queue docs describe.
+
+version: cluster-profile-v1
+
+verification:
+  status: from-public-docs
+  last_checked: "2026-07-29"
+  source: |
+    https://icl-rcs-user-guide.readthedocs.io/en/latest/hpc/queues/job-sizing-guidance/ (queue limit table: cores/mem/walltime per queue)
+    https://icl-rcs-user-guide.readthedocs.io/en/latest/hpc/queues/gpu-jobs/ (GPU types: L40S default, RTX6000, A100 "limited availability"; A40 is JupyterHub-only, not batch)
+    https://icl-rcs-user-guide.readthedocs.io/en/latest/hpc/queues/ (queues index/nav)
+    https://icl-rcs-user-guide.readthedocs.io/en/latest/hpc/queues/how-it-works/ (routing-queue mechanism; did not explicitly spell out "automatic vs manual" in the fetched text)
+    https://icl-rcs-user-guide.readthedocs.io/en/latest/hpc/getting-started/running-your-first-job/ (qsub / #PBS directive syntax; scheduler confirmed as PBS Pro)
+    https://icl-rcs-user-guide.readthedocs.io/en/latest/hpc/getting-started/using-ssh/ (login hostnames; VPN/Unified-Access requirement off-campus)
+    https://icl-rcs-user-guide.readthedocs.io/en/latest/hpc/getting-started/data-management-on-hpc/ ($HOME 930GB/10M-files quota; $EPHEMERAL 10TB, 30-day auto-delete, not backed up; $TMPDIR node-local, deleted at job end; RDS for durable/project storage)
+    https://icl-rcs-user-guide.readthedocs.io/en/latest/hpc/getting-started/accessing-software/ (module system: `module avail`/`module load`, `tools/prod` loaded by default; NO mention of Apptainer/Singularity/Docker)
+    https://icl-rcs-user-guide.readthedocs.io/en/latest/hpc/cluster-specification/ (CX3/HX1 node hardware: CPU models, GPU models, RAM)
+    https://icl-rcs-user-guide.readthedocs.io/en/latest/hpc/getting-started/ (nav)
+    https://icl-rcs-user-guide.readthedocs.io/en/latest/hpc/ (nav; lists CX3/HX1/HX2/HX3)
+    https://icl-rcs-user-guide.readthedocs.io/en/latest/rds/ (RDS purpose; a retirement/migration notice was present — treat any specific RDS path as unstable, re-check current RCS guidance)
+    https://icl-rcs-user-guide.readthedocs.io/en/latest/hpc/faq/ (FAQ index; no network/firewall entry)
+    https://icl-rcs-user-guide.readthedocs.io/en/latest/hpc/faq/cannot-create-conda-env/ (checked for network/proxy info: none found — issue was a stale conda channel, not connectivity)
+    https://icl-rcs-user-guide.readthedocs.io/en/latest/hpc/faq/ssh-compute-node/ (checked for compute-node network info: none found)
+    https://icl-rcs-user-guide.readthedocs.io/en/latest/hpc/applications/ (module/EasyBuild docs; NO container mention)
+    https://github.com/ImperialCollegeLondon/icl-rcs-user-guide (repo file listing under docs/hpc/applications/ and .../guides/ checked directly: no apptainer/singularity/container page exists in the source tree at all)
+    NOT STATED anywhere fetched: whether batch/compute nodes have outbound
+    internet access (login-node VPN requirement is documented; batch-node
+    egress policy is not, either way); an Lmod bootstrap script path; any
+    Apptainer/Singularity/Docker availability, module name, or cache
+    convention; a numeric max_cpus/max_memory_gb for the capability24/48
+    multi-node queues beyond their stated per-node figures; walltime/mem
+    caps for the JupyterHub-only queues beyond the tiered ranges reported.
+
+cluster:
+  name: uk-imperial-cx3
+  aliases: ["cx3"]   # what $SLURM_CLUSTER_NAME / $LMOD_SYSHOST report
+  hostname_patterns:
+    - "login.cx3.hpc.imperial.ac.uk"
+    - "login-b.cx3.hpc.ic.ac.uk"
+    - "login-c.cx3.hpc.ic.ac.uk"
+    - "login-ai.cx3.hpc.ic.ac.uk"
+    - "login-bi.cx3.hpc.ic.ac.uk"
+    # Compute-node hostnames aren't given in the fetched docs (only login
+    # nodes are). Domain-level globs to catch compute nodes IF they share
+    # the login nodes' domain — unconfirmed, not a documented guarantee.
+    - "*.cx3.hpc.ic.ac.uk"
+    - "*.cx3.hpc.imperial.ac.uk"
+  description: >
+    Imperial College London Research Computing Service — CX3, the
+    general-use PBS Professional HPC cluster. The RCS also runs HX1
+    (authorised-access only), HX2, and HX3 (AI-focused, docs pending);
+    this profile does not cover them.
+
+lmod:
+  # Docs show `module avail` / `module load <name>` in use but never give
+  # an Lmod init/bootstrap script path (and never confirm the module tool
+  # IS Lmod rather than Environment Modules). Left blank rather than guess.
+  bootstrap: ""
+
+slurm:
+  # NOT Slurm — this site runs PBS. The `slurm:` key is this
+  # schema's generic scheduler-map slot (see the header). Declaring it here
+  # is what makes botainer REFUSE to submit rather than emit sbatch at a
+  # PBS cluster; the field defaults to "slurm" if omitted.
+  scheduler: pbs
+  # PBS Pro routes automatically by requested resources — there is no
+  # "submit to the default queue" concept to set here. Blank, same as the
+  # generic-slurm profile's "force an explicit choice" convention.
+  default_partition: ""
+  default_account: ""  # accounts are per-user; also unconfirmed PBS even uses one here
+  default_time_minutes: 60   # conservative interactive-style default; not a documented value
+  partitions:
+    small24:
+      max_time_minutes: 1440   # 24h
+      max_cpus: 16
+      max_memory_gb: 128
+    small72:
+      max_time_minutes: 4320   # 72h
+      max_cpus: 16
+      max_memory_gb: 128
+    medium24:
+      max_time_minutes: 1440
+      max_cpus: 64
+      max_memory_gb: 450
+    medium72:
+      max_time_minutes: 4320
+      max_cpus: 64
+      max_memory_gb: 450
+    large24:
+      max_time_minutes: 1440
+      max_cpus: 128
+      max_memory_gb: 920
+    large72:
+      max_time_minutes: 4320
+      max_cpus: 128
+      max_memory_gb: 920
+    largemem72:
+      max_time_minutes: 4320
+      max_cpus: 128
+      max_memory_gb: 4000
+    gpu72:
+      # All batch GPU jobs run via this one queue (docs: "All GPU jobs
+      # currently run via the gpu72 queue"). Up to 8 GPUs/node.
+      max_time_minutes: 4320
+      max_cpus: 64
+      max_memory_gb: 920
+      gpu_types: [l40s, rtx6000, a100]   # L40S is the default type; A100 "limited availability"
+    capability24:
+      # Multi-node MPI queue, 2-4 nodes. Figures below are PER NODE
+      # (schema has no multi-node total field) — a full job can be up to
+      # ~4x these numbers across nodes.
+      max_time_minutes: 1440
+      max_cpus: 64
+      max_memory_gb: 450
+    capability48:
+      max_time_minutes: 2880   # 48h
+      max_cpus: 64
+      max_memory_gb: 450
+
+scratch:
+  # $EPHEMERAL is a site-provided environment variable that already points
+  # to the right per-user path (unlike clusters where you build the path
+  # yourself from $USER) — written literally, not as a template you fill in.
+  # Docs are explicit and unambiguous on the purge policy: "automatically
+  # deleted after 30 days and they are not backed up." Safe to record.
+  # CLEARED 2026-07-29. The site documents scratch only as `$EPHEMERAL`,
+  # never as a literal path. botainer compares this value as a PATH
+  # PREFIX against the real /scratch bind source to decide whether to
+  # warn about purging; an env-var token has no literal prefix, so it
+  # silently disables that warning while LOOKING like configuration.
+  # Leave it absent rather than guess a token.
+  #
+  # The purge is REAL — Imperial CX3 deletes files after ~30 days — and
+  # that fact is stated in agent_hints below so it is not lost. Restore
+  # both fields once the literal path is confirmed on the cluster
+  # (`echo $$EPHEMERAL` on a login node answers it in one command).
+  template: ""
+  auto_cleanup_days: 0
+
+apptainer:
+  # Apptainer/Singularity/Docker are NOT mentioned anywhere in the fetched
+  # public docs (module docs, applications index, EasyBuild guide) — and a
+  # direct check of the doc repo's source tree (github.com/ImperialCollege
+  # London/icl-rcs-user-guide, docs/hpc/applications/ and .../guides/)
+  # turned up no container-related page at all. Availability is UNDOCUMENTED,
+  # not confirmed absent. This path is only a reasonable placement under the
+  # one documented large/purged working area ($EPHEMERAL) — not itself a
+  # documented convention. Verify with RCS support before relying on it.
+  cachedir: "$EPHEMERAL/.apptainer/cache"
+  prebuilt_url: ""
+
+modules:
+  denylist: []
+  # `tools/prod` is loaded automatically at login per the docs; no need to
+  # list it here.
+  always_load: []
+
+policy:
+  # Docs document the LOGIN-node network requirement in detail (must be on
+  # the Imperial network or Unified-Access VPN to reach login nodes at
+  # all) but say NOTHING, either way, about outbound internet access from
+  # batch/compute nodes once a job is running. Left at the schema default
+  # (false = not refused) rather than asserting a restriction that isn't
+  # documented — but this is genuinely UNVERIFIED, not confirmed-open. See
+  # agent_hints.preamble.
+  refuse_network: false
+
+agent_hints:
+  preamble: |
+    You are on Imperial College London's CX3 HPC cluster (Research
+    Computing Service).
+
+    THIS IS NOT SLURM. The scheduler is PBS Professional (PBS Pro):
+      - Submit:  qsub myjob.sh
+      - Status:  qstat -u $USER
+      - Cancel:  qdel <jobid>
+    A job script needs two resource lines, e.g.:
+      #PBS -l select=1:ncpus=8:mem=64gb
+      #PBS -l walltime=04:00:00
+    There is no `--partition` flag to choose: PBS routes each job
+    automatically into the first queue whose limits fit the resources you
+    asked for (small24/small72/medium24/medium72/large24/large72/
+    largemem72/gpu72/capability24/capability48 — the queue names under
+    this profile's `slurm:` section are these PBS routing queues, not
+    Slurm partitions; the schema just calls that section `slurm` always).
+
+    Walltime ceilings are 24h or 72h depending on queue tier (48h for the
+    two-tier `capability` multi-node queues). Ask for only the cores/mem/
+    time you actually need — over-asking pushes the job into a bigger,
+    more contended tier.
+
+    GPUs: all batch GPU work goes through gpu72 (up to 8 GPUs per node).
+    Documented types: L40S 48GB (default), RTX6000 24GB, A100 40GB
+    ("limited availability"). There are also jupyter/jupytergpu/ood
+    queues, but those are JupyterHub / Open OnDemand web-portal-only
+    (capped at 1 concurrent job per user across both) — do not target
+    them from a scripted qsub job.
+
+    Storage — this is where data loss happens, read it:
+      - $HOME       — 930GB quota, up to 10M files. Code/config only.
+      - $EPHEMERAL  — 10TB/user working area, but AUTOMATICALLY DELETED
+        30 DAYS after creation and NOT backed up. Never treat this as
+        durable; copy anything worth keeping out before the 30 days are up.
+      - $TMPDIR     — node-local fast disk (200-900GB depending on node),
+        DELETED WHEN THE JOB ENDS. Single-job hot scratch only.
+      - Durable/project storage is on the Research Data Store (RDS) —
+        registered separately from HPC access. The fetched docs carried a
+        retirement/migration notice for RDS itself, so treat any specific
+        RDS path as unstable and check current RCS guidance before relying
+        on it for anything long-lived.
+
+    Login requires being on the Imperial network or connected via Unified
+    Access (VPN) — e.g. `ssh you@login.cx3.hpc.imperial.ac.uk` will not
+    connect at all from an arbitrary off-campus network.
+
+    Network from inside a running batch job: NOT documented either way in
+    the public user guide. Do not assume outbound internet access is
+    available inside a qsub job (e.g. for pip/conda installs) — verify
+    empirically with a short test job before depending on it.
+
+    Containers: Apptainer/Singularity/Docker are not mentioned anywhere in
+    the current public docs (module system, applications index, EasyBuild
+    guide) or in the doc repo's source tree — this means UNDOCUMENTED, not
+    confirmed unavailable. Check with RCS support rather than assuming a
+    cache path or that it works at all.
+
+    Modules: `module avail`, `module load <name>` (e.g. `module load
+    GROMACS`); the underlying build system is EasyBuild. `tools/prod` is
+    loaded by default at login.

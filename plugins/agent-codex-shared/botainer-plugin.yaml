@@ -1,0 +1,105 @@
+# First-party plugin: agent-codex-shared (Mode B — shared mount)
+#
+# Mirror of agent-claude-shared for the OpenAI Codex CLI agent.
+# Same architecture (selective bind: per-project state dir bound at
+# /home/agent/.codex; ~/.botainer/shared-auth/agent-codex bound at
+# /shared-auth/agent-codex; per-project dir contains symlink
+# auth.json → /shared-auth/agent-codex/auth.json).
+#
+# Codex auth: OAuth via ChatGPT (`codex login`), stored at
+# ~/.codex/auth.json. Same OAuth dynamics as Claude — refresh tokens
+# rotate periodically. The dir-bind + symlink design tolerates
+# atomic-replace by Codex inside the container.
+
+apiVersion: botainer-plugin-v1
+name: agent-codex-shared
+version: 0.1.0
+description: |
+  OpenAI Codex CLI agent with HOST-WIDE SHARED credentials (Mode B).
+  One login per host covers all projects.
+license: Apache-2.0
+maintainer: botainer
+botainer_min_version: 0.1.0a0
+tier: first-party
+kind: agent
+trust_required: hooked
+runtimes:
+  - docker
+  - apptainer
+
+auth_family: openai
+auth_mode: shared
+mutually_exclusive_with:
+  - agent-codex
+  - agent-codex-proxy
+
+depends_on:
+  - agent-codex
+
+commands:
+  - name: login
+    script: hooks/login.py
+    help: |
+      Log in to OpenAI (shared host-wide). Writes to
+      ~/.botainer/shared-auth/agent-codex/auth.json.
+  - name: status
+    script: hooks/status.py
+    help: Show shared OpenAI credential state on this host.
+
+hooks:
+  - when: pre_session
+    script: hooks/pre_session.py
+    timeout_seconds: 20
+  # Runs the SAME reconcile at session EXIT. Without it a token refreshed
+  # inside the container waits in that project until its NEXT start, and a
+  # DIFFERENT project starting in between inherits the stale one and reports a
+  # login failure. agent-claude-shared got this on 2026-07-28; codex had the
+  # same bug until 2026-08-01 because the fix was never mirrored (#136).
+  - when: post_session
+    script: hooks/post_session.py
+    timeout_seconds: 20
+
+capabilities:
+  - mounts.workspace
+  - mounts.extra
+  - network
+  - env.values
+
+contributes:
+  mount_target_prefixes:
+    - /workspace/.botainer/agent-codex/
+    - /home/agent/.codex
+    - /home/agent/.codex/
+    - /home/agent/.openai
+    - /home/agent/.openai/
+    # Selective-bind target for the shared credential dir.
+    - /shared-auth/agent-codex
+    - /shared-auth/agent-codex/
+
+  # See agent-claude-shared for the rationale (same shape: shared/
+  # proxy variants don't inherit agent-codex's entrypoint_wrap via
+  # depends_on, so apptainer exec fails without an explicit command).
+  entrypoint_wrap:
+    layer: inner
+    command:
+      - /usr/local/bin/agent-codex-entrypoint
+
+  agent_hints_section: |
+    ## OpenAI credentials are SHARED across projects
+
+    Your OpenAI credential file at /home/agent/.codex/auth.json is a
+    symlink to a host-wide shared credential. Other projects on this
+    host share the same OpenAI token. Per-project conversation
+    history, sessions, and project metadata remain isolated to THIS
+    project; only the credential is shared.
+
+config_schema:
+  type: object
+  properties:
+    profile:
+      type: string
+      default: default
+      description: |
+        Profile name (typically 'default'). Used for multiple host-wide
+        OpenAI accounts.
+  additionalProperties: false

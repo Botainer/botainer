@@ -1,0 +1,147 @@
+# TACC Frontera (Texas Advanced Computing Center, UT Austin; NSF-funded).
+# https://docs.tacc.utexas.edu/hpc/frontera/
+#
+# NOT RUN ON HARDWARE. Transcribed from public documentation.
+
+version: cluster-profile-v1
+
+verification:
+  status: from-public-docs
+  last_checked: "2026-07-29"
+  source: >-
+    https://docs.tacc.utexas.edu/hpc/frontera/ (filesystem table 4a/4b,
+    Lmod, Apptainer module) + https://docs.tacc.utexas.edu/hpc/frontera/running/
+    (Table 6 "Frontera Production Queues" — queue names, max duration, SU
+    charge rates). NOT stated as a plain number anywhere in the docs: the
+    exact core count of the RTX-queue nodes (only the CPU model, "2x Intel
+    Xeon E5-2620 v4", is given) — so max_cpus is deliberately OMITTED for the
+    `rtx`/`rtx-dev` partitions rather than derived from the chip model. A
+    "long" queue is mentioned in some older third-party mirrors but does NOT
+    appear in the current Table 6; it is omitted here as unverified.
+
+cluster:
+  name: us-tacc-frontera
+  aliases: ["frontera"]   # what $SLURM_CLUSTER_NAME / $LMOD_SYSHOST report
+  hostname_patterns:
+    - "frontera.tacc.utexas.edu"
+    - "login*.frontera.tacc.utexas.edu"
+    - "frontera*"
+  description: "TACC Frontera (Dell/Intel Cascade Lake; NVIDIA Quadro RTX 5000 GPU subsystem)"
+
+lmod:
+  # Docs confirm Lmod as TACC's module system ("a module system developed and
+  # maintained at TACC") but do not give an init-script path — the login
+  # shell already has `module` available. Left empty rather than guessed.
+  bootstrap: ""
+
+slurm:
+  # `normal` is the general-purpose, non-preemptible queue — the sensible
+  # default for most batch work.
+  default_partition: normal
+  default_account: ""
+  default_time_minutes: 240
+  partitions:
+    # --- Standard Cascade Lake (CLX) nodes: 56 cores/node, 192 GB RAM. ---
+    # All four of these queues run on the same node type; they differ only
+    # in scheduling policy (node-count range, preemption, charge rate).
+    small:
+      max_time_minutes: 2880        # 48h. 1-2 nodes/job (small serial/debug work).
+      max_cpus: 56
+      max_memory_gb: 192
+    normal:
+      max_time_minutes: 2880        # 48h. 3-512 nodes/job. 1.0 SU/node-hour.
+      max_cpus: 56
+      max_memory_gb: 192
+    large:
+      max_time_minutes: 2880        # 48h. 513-2048 nodes/job — capability-class only.
+      max_cpus: 56
+      max_memory_gb: 192
+    development:
+      max_time_minutes: 120         # 2h. For testing job scripts before a real submit.
+      max_cpus: 56
+      max_memory_gb: 192
+    flex:
+      # PREEMPTIBLE: TACC docs describe flex jobs as requeueable/killable
+      # once past an initial grace period. Discounted at 0.8 SU/node-hour
+      # (vs 1.0 SU standard) — cheaper, but only safe for checkpointing or
+      # cheaply-restartable work.
+      max_time_minutes: 2880        # 48h
+      max_cpus: 56
+      max_memory_gb: 192
+    # --- GPU nodes: 2x Intel Xeon E5-2620 v4, 128 GB RAM, 4x RTX 5000/node.
+    # max_cpus intentionally omitted (see verification.source above). ---
+    rtx:
+      max_time_minutes: 2880        # 48h. 3.0 SU/node-hour.
+      max_memory_gb: 128
+      gpu_types: [rtx5000]
+    rtx-dev:
+      max_time_minutes: 120         # 2h. 3.0 SU/node-hour.
+      max_memory_gb: 128
+      gpu_types: [rtx5000]
+    # --- Large-memory node: 4-socket, 112 cores, 2.1 TB Intel Optane NVDIMM. ---
+    nvdimm:
+      max_time_minutes: 2880        # 48h. 2.0 SU/node-hour (2x standard).
+      max_cpus: 112
+      max_memory_gb: 2150           # vendor: "2.1 TB" Optane NVDIMM (2.1 * 1024)
+
+scratch:
+  # $SCRATCH is the purged filesystem (44 PB total across /scratch1 (being
+  # decommissioned as of Dec 2025)/, /scratch2, /scratch3 — a project is
+  # assigned to exactly one). The literal prefix below is what botainer
+  # compares a bind source against, so the per-user tail does not need to
+  # be exact; /scratch3 is the representative choice since /scratch1 is
+  # being retired and new projects land on /scratch2 or /scratch3.
+  template: "/scratch3/${USER}"
+  auto_cleanup_days: 10             # vendor: "purged if access time exceeds ten days"
+
+apptainer:
+  # $HOME is tiny (25 GB) — redirect the Apptainer cache to scratch.
+  cachedir: "/scratch3/${USER}/.apptainer/cache"
+  prebuilt_url: ""
+
+modules:
+  denylist: []
+  always_load: []
+
+policy:
+  refuse_network: false
+
+agent_hints:
+  preamble: |
+    You are on TACC Frontera (NSF-funded, UT Austin).
+
+    Queue choice:
+    - `normal` (48h, 3-512 nodes) is the general-purpose default. `small`
+      (48h, 1-2 nodes) if you only need one or two nodes. `development`
+      (2h) for testing a job script before a real submit.
+    - `large` (513-2048 nodes) is capability-class only — irrelevant unless
+      the workload is genuinely a huge multi-node run.
+    - `flex` (48h) is 0.8 SU/node-hour (cheaper than the 1.0 SU standard
+      rate) but PREEMPTIBLE — your job can be killed and requeued. Only use
+      it for checkpointing or cheaply-restartable work.
+    - `rtx` / `rtx-dev` (48h / 2h) give 4x NVIDIA Quadro RTX 5000 GPUs per
+      node at 3.0 SU/node-hour. These are older, consumer-class GPUs (less
+      VRAM, no datacenter-class FP64/tensor throughput) — do not assume
+      A100/H100-class performance or memory here.
+    - `nvdimm` (48h) gives 2.1 TB of Optane memory per node for workloads
+      that genuinely need huge shared memory, at 2.0 SU/node-hour (2x
+      standard). Don't request it for ordinary jobs.
+    - Everything tops out at 48 hours except `development`/`rtx-dev` (2h).
+      SU charging is per NODE-HOUR — a whole node is billed even if you use
+      one core, on every queue here (there is no fractional/shared-node
+      queue on Frontera, unlike some other TACC systems).
+
+    Filesystems:
+    - $HOME — 25 GB, 200,000 files. Backed up, not purged. Code/configs only.
+    - $WORK — 1 TB, 3,000,000 files. Shared across ALL TACC systems (not
+      just Frontera) — not backed up, not purged, but not high-performance
+      either. Durable place for anything you cannot regenerate.
+    - $SCRATCH — no quota (44 PB total), but PURGED: any file whose ACCESS
+      time exceeds 10 days is subject to deletion. That's last-access, not
+      last-modified. Right place for large intermediates; wrong place for
+      anything you need to keep untouched for a while.
+
+    Containers: Apptainer is not on PATH by default — run
+    `module load tacc-apptainer` first (the modern replacement for the
+    older `tacc-singularity` module; `singularity` commands still work
+    after loading it).

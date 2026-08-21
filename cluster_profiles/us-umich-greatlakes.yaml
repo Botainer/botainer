@@ -1,0 +1,170 @@
+# University of Michigan Great Lakes (ARC-TS / Advanced Research Computing).
+# Public docs consulted (2026-07-29):
+#   https://documentation.its.umich.edu/arc-hpc/greatlakes/user-guide/defaults-limits
+#   https://documentation.its.umich.edu/arc-hpc/greatlakes/policies
+#   https://documentation.its.umich.edu/arc-hpc/greatlakes/user-guide
+#   https://documentation.its.umich.edu/node/4976 (Configuration/hardware)
+# NOTE ON SOURCING: documentation.its.umich.edu sits behind a Cloudflare bot
+# challenge that blocked every direct fetch attempted for this profile (both
+# WebFetch and a plain `curl`, with and without a browser User-Agent, all got
+# the "Just a moment..." challenge page / HTTP 403). Every fact below was
+# recovered via search-engine snippets of those same pages, or via third-party
+# documents that themselves cite ARC-TS's docs (WarpX's HPC install guide,
+# a UMich compute-guide, an official ARC-TS "Cheat Sheet" PDF, and a course
+# syllabus that reproduces ARC-TS's own per-partition cost table). Anything
+# I could not corroborate this way is left OUT rather than guessed.
+#
+# NOT RUN ON HARDWARE. Transcribed from public documentation (see above).
+
+version: cluster-profile-v1
+
+verification:
+  status: from-public-docs
+  last_checked: "2026-07-29"
+  source: >-
+    documentation.its.umich.edu/arc-hpc/greatlakes/{user-guide/defaults-limits,policies,user-guide}
+    and documentation.its.umich.edu/node/4976, all recovered via search-engine
+    snippets because the site's own Cloudflare challenge blocked direct fetch;
+    cross-checked against warpx.readthedocs.io's Great Lakes install page,
+    sled-group.github.io/compute-guide (a UMich lab's internal Great Lakes
+    guide), the ARC-TS "Great Lakes Cheat Sheet" PDF (arc-ts.umich.edu/greatlakes,
+    rev. 5/2020), and a Winter-2025 UMich course syllabus (hermandong.com) that
+    reproduces ARC-TS's own per-partition free-CPU/GB-per-GPU cost table. Did
+    NOT find: a documented default Slurm --time if unspecified; per-node core
+    count for `largemem`; a consistent node-level core/memory total for
+    `spgpu` (sources gave a per-GPU allocation ratio and disagreed on total
+    GPU count, 160 vs 224, so no per-node figure is trustworthy); any
+    documented low-priority/preemptible partition (none found, unlike Savio
+    and Midway3 below).
+
+cluster:
+  name: us-umich-greatlakes
+  aliases: ["greatlakes"]   # what $SLURM_CLUSTER_NAME / $LMOD_SYSHOST report
+  hostname_patterns:
+    - "greatlakes.arc-ts.umich.edu"       # login
+    - "greatlakes-xfer.arc-ts.umich.edu"  # transfer node
+    - "greatlakes*"
+    # Deliberately NOT "*.arc-ts.umich.edu" — that subdomain also hosts other,
+    # separate ARC-TS clusters (e.g. Armis2), which this profile must not claim.
+  description: "University of Michigan Great Lakes (Intel Xeon Gold 6154/6248; NVIDIA V100/A40/A100/P40 GPUs)"
+
+lmod:
+  # Great Lakes uses Lmod (`module load`, `module avail`, etc. — confirmed by
+  # both the ARC-TS Cheat Sheet and arc.umich.edu/greatlakes/software/lmod/),
+  # but no public page states the bootstrap/init script path — it's just
+  # available by default in the login shell. Left empty rather than guessed.
+  bootstrap: ""
+
+slurm:
+  # Default partition IS documented: "standard ... is the default partition if
+  # none specified."
+  default_partition: standard
+  default_account: ""   # every job must pass -A/--account explicitly; no cluster-wide default
+  # Not vendor-specified (no page states what happens if --time is omitted).
+  # 60 min is botainer's own conservative default — safely under every
+  # documented ceiling here, including debug's 4-hour cap.
+  default_time_minutes: 60
+  partitions:
+    # Billing model, per the ARC-TS cost table (via hermandong.com, itself
+    # citing ARC-TS's current-rates page): Great Lakes bills per REQUESTED
+    # core/GPU and proportional memory, not per whole node. There is no
+    # Expanse/Savio-style "exclusive node, billed for all of it whether you
+    # use it or not" trap documented here — request only what you need.
+    standard:
+      max_time_minutes: 20160   # 14 days
+      max_cpus: 36               # node has 36 cores (2x Xeon Gold 6154, 18c each)
+      max_memory_gb: 180         # ~7 GB/core free allocation x 36 cores below
+    largemem:
+      max_time_minutes: 20160   # 14 days
+      max_memory_gb: 1536        # 1.5 TB/node
+      # Per-node CORE count for largemem was not found in any source checked
+      # (only the 1.5 TB memory figure recurred) — max_cpus omitted rather
+      # than guessed.
+    gpu:
+      max_time_minutes: 20160   # 14 days
+      max_cpus: 40               # 2 GPUs/node x 20 cores/GPU (confirmed via an
+      max_memory_gb: 180         # official WarpX batch-script example); memory
+                                  # is 2 x the 90 GB/GPU free-allocation figure
+      gpu_types: [v100]
+    spgpu:
+      max_time_minutes: 20160   # 14 days
+      gpu_types: [a40]
+      # Node-level max_cpus/max_memory_gb OMITTED: only a PER-GPU free
+      # allocation ratio is documented (4 cores + 48 GB per A40 requested),
+      # and sources disagree on the partition's total A40 count (160 vs 224),
+      # so no per-node total here is trustworthy.
+    debug:
+      max_time_minutes: 240     # 4 hours; 1 job/user max (not modeled here)
+      max_cpus: 8
+      max_memory_gb: 40
+    viz:
+      max_time_minutes: 120     # 2 hours; Open OnDemand Remote Desktop only
+      gpu_types: [p40]           # 1 GPU/node
+      # max_cpus/max_memory_gb not stated anywhere found.
+
+scratch:
+  # /scratch is real, shared, and DOES have a documented age-based auto-purge
+  # (60 days, confirmed independently by the WarpX guide, a UMich lab's
+  # compute-guide, and the ARC-TS Cheat Sheet's "purged periodically").
+  # BUT the path is not a flat ${USER} tree: ARC-TS nests it as
+  # /scratch/<root_account>_root/<root_account><N>/<uniqname>, where <N> is a
+  # numbered sub-bucket ARC-TS assigns per group (e.g. observed real examples:
+  # chaijy_root/chaijy0, chaijy_root/chaijy1, lgarmire_root/lgarmire99) — the
+  # exact bucket number is not derivable from the account name alone. Only the
+  # LITERAL "/scratch/" PREFIX is what botainer's purge-comparison logic
+  # actually uses (see tests/unit/test_scratch_is_disposable_warning.py), so
+  # the placeholder tail below is illustrative, not authoritative.
+  template: "/scratch/${SLURM_ACCOUNT}_root/${SLURM_ACCOUNT}0/${USER}"
+  auto_cleanup_days: 60
+
+apptainer:
+  # Not vendor-prescribed; follows the same scratch-relative convention used
+  # by other profiles in this repo (keeps large image/cache layers off the
+  # 80 GB home quota).
+  cachedir: "/scratch/${SLURM_ACCOUNT}_root/${SLURM_ACCOUNT}0/${USER}/.apptainer/cache"
+  prebuilt_url: ""
+
+modules:
+  denylist: []
+  always_load: []
+
+policy:
+  refuse_network: false
+
+agent_hints:
+  preamble: |
+    You are on University of Michigan Great Lakes (ARC-TS).
+
+    Partitions: `standard` (default; 36 cores, 180 GB/node) covers most CPU
+    work. `largemem` gives 1.5 TB RAM/node for jobs that need it. `gpu`
+    (NVIDIA V100, 2/node) and `spgpu` (NVIDIA A40) are the general-purpose GPU
+    partitions; `spgpu` usually has the shortest queue wait. `viz` (NVIDIA
+    P40) is ONLY reachable via Open OnDemand Remote Desktop, capped at 2
+    hours. `debug` caps at 4 hours, 8 cores, 40 GB, 1 job/user — use it for
+    quick turnaround, not real work. Everything else tops out at 14 days.
+
+    Billing model: unlike node-exclusive clusters, Great Lakes charges for
+    the cores/GPUs/memory you REQUEST, not the whole node — e.g. standard
+    gives ~7 GB RAM per core requested at no extra cost, and spgpu gives 4
+    cores + 48 GB per A40 requested. Request only what the job needs.
+
+    No low-priority/preemptible partition is documented for Great Lakes in
+    the sources checked for this profile (contrast with Savio's
+    `savio_lowprio` or a scavenge-style queue elsewhere) — treat any job here
+    as running at normal priority unless you learn otherwise.
+
+    Every job must pass `--account=<account>` explicitly; there is no
+    cluster-wide default account.
+
+    Filesystems:
+    - /home/<uniqname> — 80 GB quota, backed up. Code, scripts, small files.
+    - /scratch/<account>_root/<account-bucket>/<uniqname> — the large,
+      fast working area. AUTO-PURGED: files unaccessed for 60 days are
+      deleted. Nothing warns you first — copy results you need to keep
+      out before they age out.
+    - Turbo (/nfs/turbo/...) — durable, backed-up project storage, but it is
+      NOT provisioned by default: a PI has to order it (minimum 1 TB) before
+      it exists. Don't assume it's there.
+    - Sensitive data should not be stored or processed on Great Lakes
+      (ARC-TS's own guidance) — this is a general-purpose research cluster,
+      not a controlled-data enclave.

@@ -1,0 +1,181 @@
+# ABCI (AI Bridging Cloud Infrastructure), AIST, Japan.
+# https://docs.abci.ai/v3/en/
+#
+# NOT RUN ON HARDWARE. Transcribed from public documentation.
+#
+# *** GENERATION: this documents ABCI 3.0 (current, in production since
+# January 2025), NOT the older ABCI 2.0. *** docs.abci.ai/en/ (no /v3/)
+# serves the ARCHIVED ABCI 2.0 guide and says so itself: "This document is
+# for ABCI 2.0 and may differ from the current version. For the latest
+# documentation, please see ABCI 3.0 User Guide" — that guide lives at
+# docs.abci.ai/v3/en/, which is what was actually used here. This distinction
+# matters a lot for this file: ABCI 2.0 had a shared "Global Scratch Area"
+# with a documented 7-day purge policy, but that area was DISCONTINUED
+# 2024-10-31 (stated on the 2.0 docs) and does not exist at all in the 3.0
+# docs — ABCI 3.0 has no shared scratch filesystem, only job-lifetime-only
+# node-local storage. A profile written from the (easier-to-find) 2.0 docs
+# would have baked in a scratch policy that is simply wrong today.
+#
+# *** SCHEDULER: PBS Pro *** (qsub/qstat/qdel/qrsub, `#PBS` directives) —
+# NOT Slurm, NOT Grid Engine (ABCI 2.0 used Altair/Univa Grid Engine; 3.0
+# switched to PBS Pro). As with au-nci-gadi.yaml, botainer's `slurm:` key is
+# schema naming; `partitions` holds ABCI 3.0's real PBS resource TYPES
+# (rt_HF / rt_HG / rt_HC), which is what you actually pass to `qsub -l
+# select=N:...`.
+
+version: cluster-profile-v1
+
+verification:
+  status: from-public-docs
+  last_checked: "2026-07-29"
+  source: >
+    https://docs.abci.ai/en/ (top-level banner confirming ABCI 3.0 is
+    current and 2.0 is archived: "ABCI was launched in August 2018 and
+    updated to version 3.0 in January 2025"); https://docs.abci.ai/v3/en/job-execution/
+    (PBS Pro confirmed via qsub/qstat/qdel/qrsub and #PBS directive syntax;
+    resource-type table: rt_HF 192 "cpus"/8 GPU/1920 GB mem/14 GB local,
+    exclusive; rt_HG 16 cpus/1 GPU/160 GB mem/1.4 GB local, shared; rt_HC 32
+    cpus/0 GPU/320 GB mem/1.4 GB local, CPU-only shared; walltime: on-demand
+    max 12:00:00/default 1:00:00, spot max 168:00:00/default 1:00:00;
+    concurrent-node caps 1-128 for rt_HF, 1 node for rt_HG/rt_HC; system-wide
+    running-job caps 736/56/14 for rt_HF/rt_HG/rt_HC);
+    https://docs.abci.ai/v3/en/system-overview/ (766 compute nodes; CPU:
+    dual Intel Xeon Platinum 8558, 48 cores/socket = 96 physical cores/node
+    — the PBS "192 cpus" figure for rt_HF is hyperthreaded logical CPUs, 96
+    physical x 2; GPU: 8x NVIDIA H200 SXM 141GB per node, 6,128 GPUs system-
+    wide; memory: 64 GB DDR5-5600 DIMMs x 32/node = matches the 1920 GB/2048
+    GB class figures at the node level for the full/shared split; storage:
+    ~75 PB total — 10 PB /home, 63 PB /groups, 1 PB ABCI Cloud Storage);
+    https://docs.abci.ai/v3/en/storage/ (/home quota "limited to 2TiB";
+    Group Area is admin-requested, no fixed per-group quota stated, no
+    purge stated either way but users are told to copy results out; NO
+    "Global Scratch Area" section exists at all in the 3.0 docs — only
+    node-local storage under $PBS_LOCALDIR, explicitly "removed when the
+    job finished", plus BeeOND, an on-demand job-lifetime parallel FS built
+    from node-local NVMe); https://docs.abci.ai/v3/en/getting-started/
+    (access server as.v3.abci.ai, interactive/login node referred to as
+    "login"); https://docs.abci.ai/v3/en/environment-modules/ (module
+    bootstrap: "source /etc/profile.d/modules.sh" for sh/bash — this is the
+    classic Tcl "Environment Modules" package per modules.sourceforge.net,
+    NOT confirmed to be Lmod specifically, though functionally equivalent).
+    NOT CONFIRMED: an exact login-node FQDN pattern beyond "as.v3.abci.ai";
+    whether rt_HG's 16-cpu figure divides node resources evenly (documented
+    as-is, not reconciled against the 192-cpu/8-GPU full-node figure).
+
+cluster:
+  name: jp-aist-abci
+  aliases: ["abci"]   # what $SLURM_CLUSTER_NAME / $LMOD_SYSHOST report
+  hostname_patterns:
+    - "as.v3.abci.ai"
+    - "abci*"
+  description: >
+    ABCI 3.0 (AIST, Japan) — AI Bridging Cloud Infrastructure. 766 compute
+    nodes, dual Intel Xeon Platinum 8558 (96 physical cores/node) + 8x
+    NVIDIA H200 SXM 141GB per node. SCHEDULER IS PBS PRO (qsub/qstat), not
+    Slurm. This is the CURRENT generation (live since January 2025) —
+    distinct from the older, now-archived ABCI 2.0.
+
+lmod:
+  # Classic Tcl "Environment Modules" (modules.sourceforge.net), not
+  # confirmed as Lmod specifically, but the bootstrap path serves the same
+  # purpose.
+  bootstrap: "/etc/profile.d/modules.sh"
+
+slurm:
+  # NOT Slurm — this site runs PBS. The `slurm:` key is this
+  # schema's generic scheduler-map slot (see the header). Declaring it here
+  # is what makes botainer REFUSE to submit rather than emit sbatch at a
+  # PBS cluster; the field defaults to "slurm" if omitted.
+  scheduler: pbs
+  # SCHEDULER NOTE: PBS Pro, not Slurm (see file header). `partitions`
+  # below holds ABCI 3.0's real PBS resource TYPES (rt_HF/rt_HG/rt_HC),
+  # i.e. what you request via `qsub -l select=N:...`. default_partition
+  # means "default resource type".
+  default_partition: rt_HC
+  default_account: ""
+  default_time_minutes: 60
+  partitions:
+    rt_HF:
+      # "Full" node, exclusive use.
+      max_time_minutes: 2880          # 168:00:00 (7 days) on Spot; on-demand caps at 12:00:00 = 720 min — using the larger Spot-service ceiling since it's the documented job maximum
+      max_cpus: 192                   # PBS-schedulable units = hyperthreaded logical CPUs (96 physical cores x2, dual Xeon Platinum 8558)
+      max_memory_gb: 1920
+      # gpu_types omitted — hardware is 8x NVIDIA H200 SXM 141GB per node,
+      # and "h200" is not in this schema's recognised gpu_types vocabulary
+      # (a100, v100, h100, mi250x). Not approximated to a nearby value.
+    rt_HG:
+      max_time_minutes: 2880          # same service-tier ceiling as rt_HF
+      max_cpus: 16
+      max_memory_gb: 160
+      # gpu_types omitted for the same reason as rt_HF (1x H200 per unit)
+    rt_HC:
+      max_time_minutes: 2880
+      max_cpus: 32
+      max_memory_gb: 320
+      # CPU-only resource type, no GPU
+
+scratch:
+  # NO shared/purged scratch exists on ABCI 3.0. ABCI 2.0's "Global Scratch
+  # Area" (which DID have a documented 7-day purge policy) was discontinued
+  # 2024-10-31 and has no equivalent in the 3.0 docs. The only "scratch"-
+  # like storage now is $PBS_LOCALDIR (node-local NVMe, explicitly deleted
+  # when the job ends) and BeeOND (job-lifetime on-demand parallel FS) —
+  # both fall squarely under this schema's "node-local / deleted-at-job-end"
+  # exclusion, so no path is recorded here.
+  template: ""
+  auto_cleanup_days: 0
+
+apptainer:
+  cachedir: "${HOME}/.apptainer/cache"   # generic default; ABCI 3.0 does document container support (see docs.abci.ai/v3/en/containers/) but a specific cache-dir convention was not extracted here
+  prebuilt_url: ""
+
+modules:
+  denylist: []
+  always_load: []
+
+policy:
+  refuse_network: false   # not documented either way in the reachable pages
+
+agent_hints:
+  preamble: |
+    You are on ABCI 3.0 (AI Bridging Cloud Infrastructure, AIST, Japan) —
+    NOT the older, now-archived ABCI 2.0. If any tooling, script, or
+    training material assumes Univa/Altair Grid Engine (qsub with older-
+    style directives) or the old rt_F/rt_AF/rt_G resource names, it's
+    describing 2.0, not this system.
+
+    *** SCHEDULER IS PBS PRO, NOT SLURM. *** Submit with `qsub`, check with
+    `qstat`, cancel with `qdel`, request interactive resources with `qrsub`,
+    using `#PBS -l select=N:...` directives.
+
+    Resource types (what you request, not a rich named-partition menu):
+    `rt_HF` (full node, exclusive: 8x NVIDIA H200 141GB, ~96 physical
+    cores/192 hyperthreaded, 1920 GB RAM — request this for anything that
+    needs the whole node or most of its GPUs); `rt_HG` (a shared, 1-GPU
+    slice); `rt_HC` (CPU-only, no GPU, shared). Walltime: On-demand
+    (interactive) service caps at 12 hours; Spot (batch) service caps at
+    7 days (168 hours) — both default to just 1 hour if you don't ask for
+    more. There's also a Reserved service with elapsed time bound only by
+    the reservation window, not a per-job cap. Concurrent-job and node-hour
+    ceilings apply system-wide (e.g. rt_HF: up to 128 nodes per job, 736
+    concurrent jobs system-wide) — a large ask may queue for a long time
+    even if individually within limits.
+
+    GPUs are NVIDIA H200 (141 GB HBM3e) — very new hardware; if a
+    dependency pins an old CUDA/driver version, check compatibility before
+    assuming it will just work.
+
+    Filesystems — there is NO general-purpose shared scratch anymore:
+    - /home — 2 TiB quota. Code, configs, and anything you need to persist.
+    - Group Area — shared, admin-requested (via the ABCI User Portal), no
+      fixed quota published; treat as durable project storage but be
+      mindful of shared I/O load.
+    - $PBS_LOCALDIR (node-local NVMe) and BeeOND (on-demand parallel FS
+      built from node-local NVMe) — fast, but explicitly wiped when the job
+      ends. Stage hot data here, copy results to Group Area or /home before
+      the job exits. Do NOT assume anything resembling a "scratch that
+      outlives a job" exists on this system, unlike many other HPC sites.
+
+    ABCI Cloud Storage (S3-compatible, /groups_s3) is also available for
+    object-storage-style workflows — not the same access pattern as a
+    POSIX filesystem.

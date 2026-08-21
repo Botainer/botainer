@@ -1,0 +1,177 @@
+Bootstrap: docker
+From: node:24-bookworm-slim
+
+# agent-claude Apptainer definition.
+#
+# Mirrors the Dockerfile contents (which is the source of truth for the
+# Docker path); kept in sync manually. v0.1.x will move both to a single
+# declarative `image_recipe:` in the plugin manifest (a tracked follow-up).
+#
+# Build with:
+#     apptainer build agent-claude.sif plugins/agent-claude/agent-claude.def
+#
+# HPC users: do this once on a build node (or laptop, then rsync the
+# .sif to the cluster). Apptainer can also pull --no-fakeroot from a
+# Docker image registry once we publish to GHCR (v0.1.x).
+
+# Pinned versions live in %post as exports rather than %arguments.
+# Apptainer's %arguments block doesn't auto-export into %post the way
+# Docker's ARG does for RUN — values would be unset at bash expansion
+# time and `set -u` aborts the build. Real-host failure 2026-05-19.
+
+%post
+    set -eux
+    export DEBIAN_FRONTEND=noninteractive
+
+    # Pinned versions (mirror plugins/agent-claude/Dockerfile).
+    # CLAUDE_CODE_VERSION=latest because Anthropic unpublishes old
+    # versions from npm; pinning a specific version makes the build
+    # fail unpredictably weeks later when that version disappears.
+    # See commit 85f0ca1 — the Dockerfile already does this; the .def
+    # was drifting (2026-05-19 build hit npm 'notarget' on 2.0.39).
+    export CLAUDE_CODE_VERSION=latest
+    export MINIFORGE_VERSION=24.3.0-0
+    export JULIA_VERSION=1.10.4
+    export AGENT_UID=1001
+    export AGENT_GID=1001
+
+    # System packages (mirrors Dockerfile). openmpi-bin + libopenmpi-dev give
+    # dispatched HPC jobs a PMIx-capable MPI so `mpi: pmix` job profiles run
+    # multi-node out of the box (PMIx >= 2.1.1 is cross-version compatible with
+    # the cluster — no version match needed). Docker/laptop carries it unused.
+    apt-get update
+    apt-get install -y --no-install-recommends \
+        ca-certificates curl wget gnupg2 git \
+        build-essential pkg-config \
+        python3 python3-pip python3-venv python3-dev \
+        ripgrep less jq vim-tiny \
+        libcurl4-openssl-dev libssl-dev libxml2-dev \
+        openmpi-bin libopenmpi-dev
+
+    # uv (Astral)
+    curl -fsSL https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
+    /usr/local/bin/uv --version
+
+    # R
+    apt-get install -y --no-install-recommends r-base r-base-dev
+
+    # Task #138: detect arch instead of hardcoding x86_64. Apptainer on
+    # aarch64 cluster nodes (e.g. Grace partitions with ARM) used to
+    # silently get the wrong-arch binaries.
+    ARCH="$(uname -m)"
+    case "$ARCH" in
+        x86_64)
+            MINIFORGE_ARCH="x86_64"
+            JULIA_ARCH_DIR="x64"
+            JULIA_ARCH_TAG="linux-x86_64"
+            ;;
+        aarch64|arm64)
+            MINIFORGE_ARCH="aarch64"
+            JULIA_ARCH_DIR="aarch64"
+            JULIA_ARCH_TAG="linux-aarch64"
+            ;;
+        *)
+            echo "FATAL: unsupported arch $ARCH (supported: x86_64, aarch64)" >&2
+            exit 4
+            ;;
+    esac
+
+    # Conda (miniforge)
+    curl -fsSL "https://github.com/conda-forge/miniforge/releases/download/${MINIFORGE_VERSION}/Miniforge3-${MINIFORGE_VERSION}-Linux-${MINIFORGE_ARCH}.sh" -o /tmp/miniforge.sh
+    bash /tmp/miniforge.sh -b -p /opt/conda
+    rm /tmp/miniforge.sh
+    /opt/conda/bin/conda clean --all -y
+    echo 'export PATH=/opt/conda/bin:$PATH' >> /etc/environment
+
+    # Julia
+    JULIA_MM=$(echo "${JULIA_VERSION}" | cut -d. -f1-2)
+    curl -fsSL "https://julialang-s3.julialang.org/bin/linux/${JULIA_ARCH_DIR}/${JULIA_MM}/julia-${JULIA_VERSION}-${JULIA_ARCH_TAG}.tar.gz" -o /tmp/julia.tar.gz
+    tar -xzf /tmp/julia.tar.gz -C /opt
+    ln -s /opt/julia-${JULIA_VERSION}/bin/julia /usr/local/bin/julia
+    rm /tmp/julia.tar.gz
+
+    # Claude Code CLI (pinned)
+    npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}
+
+    # Web browser for the `browser` plugin (opt-in at runtime). MUST be baked in:
+    # the cage has no root/apt and (apptainer) HOME=/ is unwritable, so nothing
+    # can be fetched/installed at run time. Mirrors plugins/agent-claude/Dockerfile.
+    #   1. apt `chromium` → pulls every runtime lib (libnss3/libgbm1/libasound2/…);
+    #   2. `@playwright/mcp` global → runtime is a plain `playwright-mcp`
+    #      binary, no `npx`/writable-HOME dependency;
+    #   3. Playwright's matching Chromium via @playwright/mcp's own playwright-core.
+    export PLAYWRIGHT_MCP_VERSION=latest
+    export PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers
+    apt-get install -y --no-install-recommends chromium fonts-liberation
+    npm install -g "@playwright/mcp@${PLAYWRIGHT_MCP_VERSION}"
+    command -v playwright-mcp >/dev/null \
+        || { echo "FATAL: playwright-mcp bin missing after install" >&2; exit 1; }
+    GROOT="$(npm root -g)"
+    PW="$(find "$GROOT" -type f -path '*/playwright/cli.js' 2>/dev/null | head -1)"
+    [ -n "$PW" ] || PW="$(find "$GROOT" -type f -path '*/playwright-core/cli.js' 2>/dev/null | head -1)"
+    { [ -n "$PW" ] && [ -f "$PW" ]; } \
+        || { echo "FATAL: no playwright cli.js under $GROOT; cli.js present:" >&2; find "$GROOT" -name cli.js >&2 || true; exit 1; }
+    echo "using playwright cli: $PW"
+    node "$PW" install chromium
+    chmod -R a+rX /opt/pw-browsers
+
+    # Watchable VIEWER stack (opt-in). Mirrors plugins/agent-claude/Dockerfile.
+    # websockify from PIP >= 0.12 (Debian's 0.10 lacks --unix-listen, REQUIRED for
+    # the HPC unix-socket path — a TCP port on a shared apptainer node is
+    # reachable by co-tenants; Fable-5 C1). Only runs when the entrypoint sees
+    # BOTAINER_BROWSER_VIEWER=1.
+    apt-get install -y --no-install-recommends xvfb x11vnc novnc x11-utils fonts-liberation
+    pip3 install --no-cache-dir --break-system-packages "websockify>=0.12"
+    command -v websockify >/dev/null || { echo "FATAL: websockify missing" >&2; exit 1; }
+    websockify --help 2>&1 | grep -qiE 'unix-listen' \
+        || { echo "FATAL: websockify lacks --unix-listen (need >= 0.12)" >&2; exit 1; }
+
+    # Agent user (UID 1001 to avoid node:24's `node` user at 1000)
+    if ! getent group ${AGENT_GID} >/dev/null; then
+        groupadd --system --gid ${AGENT_GID} agent
+    fi
+    if ! getent passwd ${AGENT_UID} >/dev/null; then
+        useradd --system --uid ${AGENT_UID} --gid ${AGENT_GID} --create-home --shell /bin/bash agent
+    fi
+
+    # Cleanup
+    rm -rf /var/lib/apt/lists/*
+
+%files
+    # Entrypoint wrapper (injects AGENT_HINTS into Claude's system prompt).
+    entrypoint_wrap.sh /usr/local/bin/agent-claude-entrypoint
+    # In-agent browser viewer stack launcher (opt-in; see viewer-start.sh).
+    viewer-start.sh /usr/local/bin/botainer-viewer-start
+
+%post
+    chmod 0755 /usr/local/bin/botainer-viewer-start
+    chmod +x /usr/local/bin/agent-claude-entrypoint
+
+%environment
+    export PATH=/opt/conda/bin:$PATH
+    export PIP_TARGET=/packages/pip
+    export PYTHONPATH=/packages/pip
+    export NODE_PATH=/packages/node_modules
+    export JULIA_DEPOT_PATH=/packages/julia_depot
+    export R_LIBS_USER=/packages/R_libs
+    export CONDA_ENVS_PATH=/packages/conda_envs
+    export CARGO_HOME=/packages/cargo
+    export GOPATH=/packages/go
+    export CLAUDE_CONFIG_DIR=/home/agent/.claude
+    export PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers
+
+%runscript
+    # Task #140: apptainer exec runs as the CALLING USER by default,
+    # NOT as the image's USER directive. The agent-uid + agent-gid +
+    # useradd agent setup above is for the DOCKER path (docker --user
+    # runs the container as the agent uid). Under apptainer, the agent
+    # process runs as the host user; /home/agent ownership is irrelevant
+    # because the adapter binds the host user's per-project credentials
+    # at /home/agent/.<agent>/ separately. Not a bug; an architectural
+    # difference between Docker (USER respected) and Apptainer
+    # (caller-user). Documented here so future audits don't re-flag.
+    exec /usr/local/bin/agent-claude-entrypoint "$@"
+
+%labels
+    Maintainer botainer
+    Description "Anthropic Claude Code agent in a containerized session under botainer"

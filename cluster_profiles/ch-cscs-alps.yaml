@@ -1,0 +1,148 @@
+# CSCS Alps (Swiss National Supercomputing Centre, Switzerland) — Daint vCluster.
+# https://docs.cscs.ch/
+#
+# NOT RUN ON HARDWARE. Transcribed from public documentation.
+#
+# Alps is a shared infrastructure hosting several distinct "vClusters"
+# (Daint, Eiger, Clariden, Santis, ...) with different node hardware but a
+# common Slurm/storage/container setup. This profile is written primarily
+# for Daint (the GH200 GPU vCluster named in the task); Eiger (CPU-only,
+# AMD EPYC Rome) and Clariden/Bristen (ML platform) share the same Slurm
+# partition names and Container Engine, but use a different scratch
+# filesystem — see the `scratch` comment below.
+
+version: cluster-profile-v1
+
+verification:
+  status: from-public-docs
+  last_checked: "2026-07-29"
+  source: >-
+    https://docs.cscs.ch/running/slurm/ (partitions),
+    https://docs.cscs.ch/clusters/daint/ (hardware, login nodes, partition table),
+    https://docs.cscs.ch/storage/filesystems/ (filesystems, quotas, purge policy),
+    https://docs.cscs.ch/software/container-engine/ and .../run/ (Container Engine, EDF),
+    https://docs.cscs.ch/guides/internet-access/ (compute-node proxy access),
+    https://docs.cscs.ch/software/uenv/using/ (uenv / Lmod relationship).
+    NOT stated on these pages: per-partition max_cpus / max_memory_gb (Alps
+    docs give walltime and node counts, not core/memory ceilings), and no
+    single documented Lmod bootstrap script (Lmod is reached by first
+    activating a uenv, not sourced standalone).
+
+cluster:
+  name: ch-cscs-alps
+  aliases: ["cscs-alps", "alps"]   # what $SLURM_CLUSTER_NAME / $LMOD_SYSHOST report
+  hostname_patterns:
+    - "daint-ln*"
+    - "daint.alps.cscs.ch"
+    - "eiger-ln*"
+    - "clariden-ln*"
+    - "santis-ln*"
+    - "*.alps.cscs.ch"
+  description: "CSCS Alps / Daint vCluster (NVIDIA GH200 Grace-Hopper superchip nodes)"
+
+lmod:
+  # CSCS's primary software-environment mechanism is `uenv` (SquashFS-packaged
+  # Spack stacks), not a standalone Lmod install. Lmod modules exist INSIDE an
+  # activated uenv ("start a uenv, then `module avail`"), so there is no
+  # documented bootstrap path to source before that. Left empty rather than
+  # guessed.
+  bootstrap: ""
+
+slurm:
+  # Partition names and limits observed on the Daint vCluster; the CSCS
+  # "Running jobs" KB describes the same partition names Alps-wide (normal,
+  # debug, low, xfer). Core/memory ceilings are not published per-partition,
+  # only walltime and node counts, so max_cpus/max_memory_gb are omitted
+  # rather than guessed.
+  default_partition: normal
+  default_account: ""
+  default_time_minutes: 240
+  partitions:
+    normal:
+      max_time_minutes: 1440        # 24 h; effectively unlimited node count
+      gpu_types: [gh200]
+    debug:
+      max_time_minutes: 30          # max 2 nodes/job, ~24 nodes reserved
+      gpu_types: [gh200]
+    low:
+      max_time_minutes: 1440        # 24 h, low priority/preemptible
+      gpu_types: [gh200]
+    xfer:
+      max_time_minutes: 1440        # 24 h; 2 dedicated nodes, data-transfer only
+
+scratch:
+  # $SCRATCH on the HPC/Climate-Weather platform vClusters (Daint, Eiger,
+  # Santis) points at Capstor: /capstor/scratch/cscs/$USER, purged after 30
+  # days of no access. NOTE: on the ML-platform vClusters (Clariden, Bristen)
+  # $SCRATCH instead points at Iopsstor (/iopsstor/scratch/cscs/$USER, 14-day
+  # purge) — if targeting one of those, use that path/period instead.
+  template: "/capstor/scratch/cscs/${USER}"
+  auto_cleanup_days: 30             # vendor: "files deleted after 30 days no access" (Capstor)
+
+apptainer:
+  # CSCS does not run plain Apptainer/Singularity as the primary container
+  # path — see the policy.refuse_network / preamble note on the Container
+  # Engine below. cachedir kept under $SCRATCH so any Apptainer usage that
+  # does happen doesn't fill the small $HOME quota.
+  cachedir: "/capstor/scratch/cscs/${USER}/.apptainer/cache"
+  prebuilt_url: ""
+
+modules:
+  denylist: []
+  always_load: []
+
+policy:
+  # Compute nodes DO reach the internet, but only via a shared NAT proxy
+  # (see preamble) — not a hard block, so this stays false. It is still a
+  # meaningfully restricted/rate-limited path, which is why the preamble
+  # calls it out explicitly rather than relying on this single boolean.
+  refuse_network: false
+
+agent_hints:
+  preamble: |
+    You are on CSCS Alps (Daint vCluster: NVIDIA GH200 Grace-Hopper nodes).
+    Alps also hosts Eiger (CPU-only, AMD EPYC), Clariden/Bristen (ML
+    platform), and Santis under the same Slurm/storage setup with different
+    hardware — if you are actually on one of those, the partition names
+    below still apply but the scratch filesystem differs (see below).
+
+    Partitions: `normal` (24 h, the default), `debug` (30 min, max 2
+    nodes/job — for quick turnaround), `low` (24 h, low priority/preemptible
+    — cheaper but can be deprioritized), `xfer` (24 h, 2 dedicated nodes,
+    for data movement only). Per-partition CPU/memory ceilings are not
+    published by CSCS; only walltime and node-count limits are documented.
+
+    CONTAINERS — this matters a lot here: CSCS does NOT primarily support
+    plain Apptainer/Singularity SIF images. The documented path is the
+    CSCS "Container Engine" (CE): containers are specified via an
+    Environment Definition File (EDF, a TOML file, looked up by default in
+    `${HOME}/.edf`) and run with `srun --environment=<name> ...`. Images
+    must be in SquashFS format — pull an OCI/Docker image with
+    `enroot import docker://REGISTRY#IMAGE:TAG` to convert it first; there
+    is no documented direct support for OCI/Docker or `.sif` files inside
+    CE. Separately, `uenv` provides prebuilt SquashFS software stacks
+    (Spack-built) that you activate directly; Lmod modules only become
+    available AFTER activating a uenv, not standalone. If you were expecting
+    plain `apptainer run/exec` to just work, check the Container Engine docs
+    first — the workflow here is different from most other sites in this
+    profile set.
+
+    NETWORK: compute nodes are NOT air-gapped, but they reach the internet
+    only through a shared NAT proxy (`http_proxy`/`https_proxy` pointing at
+    `proxy.cscs.ch:8080`, already set in the environment). This is a SHARED
+    IP — external services may rate-limit or block it, and CSCS has noted
+    this can happen without warning. Don't assume `pip install` at scale is
+    reliable; prefer prebuilt/uenv software stacks or pre-staged packages
+    where possible.
+
+    Filesystems:
+    - $HOME — small (50 GB / 500K inodes quota). Code and configs only.
+      Retained ~3 months after your last project ends, not indefinitely.
+    - $SCRATCH (/capstor/scratch/cscs/<user> on Daint/Eiger/Santis; Iopsstor
+      on Clariden/Bristen) — the large working area. PURGED: files not
+      ACCESSED in 30 days (Capstor) or 14 days (Iopsstor) are deleted. No
+      backups. CSCS also enforces capacity-based cleanup (starts removing
+      files without notice above 80% filesystem capacity).
+    - Store — for medium-term project data sharing; retained ~3 months
+      after the project ends, backed up (3 most recent copies, nightly).
+      Not permanent — move anything irreplaceable off-cluster.

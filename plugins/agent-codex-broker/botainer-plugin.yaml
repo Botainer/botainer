@@ -1,0 +1,135 @@
+# First-party plugin: agent-codex-broker
+#
+# The credential BROKER for Codex — the OpenAI analog of agent-claude-broker.
+# Where the mount modes (agent-codex / agent-codex-shared) bind the real
+# OPENAI_API_KEY into the container (the agent can read + exfiltrate it), broker
+# mode hands the container a provably-FAKE sentinel and holds the real key
+# host-side in the broker daemon.
+#
+# The agent container sees ONLY:
+#   - OPENAI_API_KEY=BROKER-SENTINEL.tenant=<id>.nonce=<hex>.NOT-A-REAL-CREDENTIAL
+#   - OPENAI_BASE_URL=http://<host-reachable>:<port>/v1
+#
+# Every OpenAI request from the container goes to the broker daemon over a
+# per-session loopback TCP port. The broker STRIPS the container's sentinel
+# Authorization, INJECTS the real `Authorization: Bearer <sk-…>` read from
+# botainer's OWN codex login store host-side, forwards to api.openai.com, and
+# streams the response back. The real key never enters the container.
+#
+# CREDENTIAL SOURCE: the broker reads botainer's OWN codex credential — the one
+# `botainer auth login --agent codex` captured to
+#   <state_root>/shared-auth/agent-codex/auth.json            (shared), or
+#   <state_root>/state/<uuid>/data/agent-codex/profiles/<profile>/api_key  (isolated).
+# NOT the host's native ~/.codex. The hook AUTO-DETECTS the auth mode from the
+# login store and configures the daemon + container accordingly:
+#   * API-KEY   — auth.json `OPENAI_API_KEY` / the isolated `api_key` file →
+#     inject `Bearer sk-…` to the pinned api.openai.com (/v1).
+#   * SUBSCRIPTION — auth.json `tokens.*` (ChatGPT OAuth) → refresh the access
+#     token host-side (auth.openai.com, rotated refresh token persisted) and
+#     rewrite to the ChatGPT backend chatgpt.com/backend-api/codex with the OAuth
+#     Bearer + chatgpt-account-id. Request body forwarded verbatim (codex sends
+#     the same Responses-API body to both backends). See CAPABILITY-SURFACE §4ap.
+#
+# TRANSPORT: TCP-only. The Codex CLI has no unix-socket support (unlike Claude
+# Code's ANTHROPIC_UNIX_SOCKET), so even under apptainer the broker listens on
+# loopback TCP and the container reaches it (127.0.0.1 under apptainer's shared
+# netns; host.docker.internal under Docker Desktop). A loopback port has no uid
+# boundary, so EVERY request must present the per-session sentinel as its access
+# token (required_client_token) — enforced by the daemon.
+#
+# MUTUALLY EXCLUSIVE with the codex mount variants. When enabled, their
+# credential binds are skipped.
+
+apiVersion: botainer-plugin-v1
+name: agent-codex-broker
+version: 0.1.0
+
+# Mode D (broker) of the openai family. Mutually exclusive with the isolated
+# (agent-codex) and shared (agent-codex-shared) mount variants.
+auth_family: openai
+auth_mode: broker
+mutually_exclusive_with:
+  - agent-codex
+  - agent-codex-shared
+description: |
+  NOT WORKING at v0.1.0 — do not enable. Its hooks shipped
+  non-executable so this plugin has never run on any platform, and the
+  first real attempt after that was fixed still failed. Use
+  agent-codex-shared, which is verified on macOS and HPC.
+
+  Credential broker for the Codex agent: keeps your real OpenAI API key on the
+  host (in the broker daemon) and hands the container only a provably-fake
+  sentinel. Reads botainer's OWN codex login (shared-auth/agent-codex/auth.json
+  or the per-project api_key) — no new login. Auto-detects API-key vs ChatGPT-
+  subscription (OAuth) from the login store; the real credential never enters
+  the container. The OpenAI analog of agent-claude-broker.
+license: Apache-2.0
+maintainer: botainer
+botainer_min_version: 0.1.0a0
+tier: first-party
+kind: host_helper        # runs as host subprocess (HIGH 10 trust)
+trust_required: hooked
+
+runtimes:
+  - docker
+  - apptainer
+
+depends_on:
+  - agent-codex
+
+capabilities:
+  - host.credential_access     # reads botainer's codex login credential host-side
+  - net.outbound_proxy         # marks the plugin as an outbound proxy
+
+hooks:
+  - when: pre_session
+    script: hooks/start_broker.py
+    timeout_seconds: 15
+  - when: post_session
+    script: hooks/stop_broker.py
+    timeout_seconds: 10
+
+contributes:
+  # Envelope for the binds the broker contributes via hooks/start_broker.py.
+  #   - /home/agent/.codex : a dedicated broker-STATE dir (CODEX_HOME — history,
+  #     sessions, the AGENTS.md the entrypoint writes). NEVER holds a credential
+  #     (the broker injects that host-side), so binding it does not reintroduce
+  #     the mount-mode exposure. No socket bind: codex is TCP-only.
+  mount_target_prefixes:
+    - /home/agent/.codex
+
+  # The agent-codex entrypoint must be the innermost wrap so OPENAI_BASE_URL /
+  # OPENAI_API_KEY are in scope when `codex` execs.
+  entrypoint_wrap:
+    layer: inner
+    command:
+      - /usr/local/bin/agent-codex-entrypoint
+
+  agent_hints_section: |
+    ## Credential broker is active (your OpenAI key is NOT in this container)
+
+    Your API requests to OpenAI flow through a host-side broker that holds the
+    real key. The `OPENAI_API_KEY` in your environment is a provably-fake
+    SENTINEL (`BROKER-SENTINEL.…NOT-A-REAL-CREDENTIAL`) — it is useless
+    anywhere. Don't try to read a key file under `/home/agent/.openai/` — none
+    is mounted (broker mode is exclusive with mount mode). There is nothing here
+    to exfiltrate.
+
+# CONFIG-TRUST: the ONLY project-settable field is credential_scope, which
+# merely selects WHICH of the user's OWN login stores to read (shared vs
+# isolated) — it cannot redirect a credential off-host. The upstream API host is
+# the destination the REAL key is sent to; `.botainer/config.yaml` is untrusted
+# (git-shareable), so it is PINNED in the hook (+ the daemon), NOT a config key.
+config_schema:
+  type: object
+  properties:
+    credential_scope:
+      type: string
+      enum: ["shared", "isolated"]
+      default: "shared"
+      description: |
+        Which botainer codex login store the broker reads. "shared" =
+        <state_root>/shared-auth/agent-codex/auth.json (the default). "isolated"
+        = the per-project profile api_key. Either way the file is read host-side
+        and never bound into the container.
+  additionalProperties: false

@@ -1,0 +1,247 @@
+# Cambridge Service for Data Driven Discovery (CSD3), University of Cambridge
+# Research Computing Services. EPSRC Tier-2 HPC service.
+# https://docs.hpc.cam.ac.uk/
+#
+# NOT RUN ON HARDWARE. Transcribed from public documentation (see
+# verification.source below for every page fetched and what each did/did not
+# state). Scheduler CONFIRMED as Slurm (docs: "Peta4 and Wilkes3 operate the
+# SLURM batch queueing system").
+#
+# Two things below are deliberately left blank/false rather than guessed —
+# read the comments next to `scratch:` and `policy:` before trusting this
+# file on a real account.
+
+version: cluster-profile-v1
+
+verification:
+  status: from-public-docs
+  last_checked: "2026-07-29"
+  source: >-
+    https://docs.hpc.cam.ac.uk/hpc/user-guide/quickstart.html (scheduler,
+    login hostnames, module-load-on-login, mandatory `-A` project code;
+    does not state compute-node network/internet policy),
+    https://docs.hpc.cam.ac.uk/hpc/user-guide/connecting.html (login node
+    hostnames login-cpu/login-csd3/login-icelake and login-q-1..4/login-p-1..4),
+    https://docs.hpc.cam.ac.uk/hpc/user-guide/batch.html (partition list,
+    per-task memory, mandatory project code `-A PROJECT-CPU`/`-A PROJECT-GPU`;
+    does not itself state max walltime/nodes per partition),
+    https://docs.hpc.cam.ac.uk/hpc/user-guide/icelake.html,
+    https://docs.hpc.cam.ac.uk/hpc/user-guide/cclake.html,
+    https://docs.hpc.cam.ac.uk/hpc/user-guide/sapphire.html,
+    https://docs.hpc.cam.ac.uk/hpc/user-guide/a100.html (per-partition
+    cpus/memory/GPU counts and SL1/SL2 vs SL3 walltime caps),
+    https://docs.hpc.cam.ac.uk/hpc/user-guide/long.html (icelake-long/
+    cclake-long/ampere-long: 7-day cap, requires QOSL, NOT granted by default),
+    https://docs.hpc.cam.ac.uk/hpc/user-guide/policies.html (SL1-4/QOS1-3
+    service-level definitions),
+    https://docs.hpc.cam.ac.uk/hpc/user-guide/io_management.html (home 50GB
+    quota, /rds/user/<user>/hpc-work 1TB quota, both explicitly "no automatic
+    deletion currently"; /local and /ramdisks node-local, "deleted after job
+    completion"),
+    https://docs.hpc.cam.ac.uk/hpc/user-guide/modules.html (module system;
+    `singularity/current` appears in the default `module list` output; does
+    NOT state Lmod vs Tcl-modules, nor any bootstrap init-script path),
+    https://docs.hpc.cam.ac.uk/hpc/user-guide/interactive.html (login-node
+    and sintr interactive limits; no mention of network/internet policy
+    either).
+    NONE of the fetched pages state whether compute nodes have outbound
+    internet access, in either direction — this is UNDOCUMENTED, not
+    "confirmed open". See policy: below.
+    (https://docs.hpc.cam.ac.uk/hpc/user-guide/running.html and
+    .../data.html, suggested as starting points, both 404 — CSD3 docs use
+    batch.html and io_management.html instead.)
+
+cluster:
+  name: uk-cambridge-csd3
+  aliases: ["csd3"]   # what $SLURM_CLUSTER_NAME / $LMOD_SYSHOST report
+  hostname_patterns:
+    - "login.hpc.cam.ac.uk"
+    - "login-cpu.hpc.cam.ac.uk"
+    - "login-csd3.hpc.cam.ac.uk"
+    - "login-icelake.hpc.cam.ac.uk"
+    - "login-q-*.hpc.cam.ac.uk"          # icelake login nodes (login-q-1..4)
+    - "login-p-*.hpc.cam.ac.uk"          # cascade-lake login nodes (login-p-1..4)
+  description: >-
+    Cambridge CSD3 (EPSRC Tier-2). Ice Lake / Cascade Lake / Sapphire Rapids
+    CPU partitions plus an Ampere A100 GPU partition (Wilkes3).
+
+lmod:
+  # Docs confirm a module system ("module load", "module avail") and that a
+  # default `rhel/default-<system-name>` module loads automatically at
+  # login, cascading in other modules (quickstart.html, modules.html) — but
+  # NEVER say whether it's Lmod or Tcl environment-modules, and never give a
+  # bootstrap/init script path. Leaving this blank is correct; don't guess a
+  # path like /etc/profile.d/lmod.sh that no CSD3 page names.
+  bootstrap: ""
+
+slurm:
+  # `icelake` is the current general-purpose CPU partition (Ice Lake is the
+  # newer of the two plain-CPU node generations CSD3 documents; cclake is
+  # the older Cascade Lake generation). Not stated as "the" default anywhere
+  # in the docs — this is a judgement call, not a transcribed fact.
+  default_partition: icelake
+  # Every submission requires a project charge code: quickstart.html shows
+  # "#SBATCH -A CHANGEME" as a mandatory placeholder, and batch.html shows
+  # "-A PROJECT-CPU" / "-A PROJECT-GPU" (suffix depends on CPU vs GPU job).
+  # This is per-user/per-group, so it stays blank here — see agent_hints.
+  default_account: ""
+  # Conservative interactive default; SL3 (the no-cost default service
+  # level) caps walltime at 12h (720 min) anyway — see partitions below.
+  default_time_minutes: 60
+  partitions:
+    icelake:
+      # icelake.html: 36h/12h are the SL1-SL2/SL3 caps (also restated in
+      # policies.html as QOS1=36h, QOS2/QOS3=12h). Recorded here as the
+      # higher (SL1/SL2) ceiling; SL3 (free/default tier) is actually 720.
+      max_time_minutes: 2160
+      max_cpus: 76            # icelake.html: "76 cpus ... 256 GiB of RAM"
+      max_memory_gb: 256
+    icelake-himem:
+      max_time_minutes: 2160
+      max_cpus: 76
+      max_memory_gb: 512      # icelake.html: himem variant, 512 GiB/node
+    cclake:
+      max_time_minutes: 2160  # cclake.html: same 36h/12h SL1-2/SL3 split
+      max_cpus: 56            # cclake.html: "56 cpus ... 192 GiB of RAM"
+      max_memory_gb: 192
+    cclake-himem:
+      max_time_minutes: 2160
+      max_cpus: 56
+      max_memory_gb: 384      # cclake.html: himem variant, 384 GiB/node
+    sapphire:
+      max_time_minutes: 2160  # sapphire.html: same 36h/12h SL1-2/SL3 split
+      max_cpus: 112           # sapphire.html: "112 cpus", 512 GB/node
+      max_memory_gb: 512
+    ampere:
+      # a100.html: 4x A100-SXM-80GB + 128 cores + 1000 GiB RAM per node
+      # (Dell PowerEdge XE8545, Wilkes3). Walltime 36h/12h SL1-2/SL3, same
+      # as the CPU partitions. A single-GPU job gets a 1/4 slice of the
+      # node (32 cpus), but max_cpus here records the whole-node figure to
+      # match how the CPU partitions above are recorded.
+      max_time_minutes: 2160
+      max_cpus: 128
+      max_memory_gb: 1000
+      gpu_types: [a100]
+    icelake-long:
+      # long.html: up to 7 days, but ONLY under the QOSL quality-of-service,
+      # which is "not given by default" — must email support@hpc.cam.ac.uk
+      # with a checkpointing-infeasibility justification. Also caps at 512
+      # cpus PER USER across the whole partition (a user-level aggregate,
+      # not a per-job/per-node figure, so it is not recorded in max_cpus).
+      max_time_minutes: 10080
+      max_cpus: 76
+      max_memory_gb: 256
+    cclake-long:
+      max_time_minutes: 10080  # same QOSL caveat as icelake-long
+      max_cpus: 56
+      max_memory_gb: 192
+    ampere-long:
+      # long.html: same QOSL caveat; per-user aggregate cap is 32 GPUs
+      # (not recorded here for the same reason as the CPU -long entries).
+      max_time_minutes: 10080
+      max_cpus: 128
+      max_memory_gb: 1000
+      gpu_types: [a100]
+
+scratch:
+  # Deliberately left EMPTY — CSD3 does not have a shared filesystem that is
+  # both (a) a sensible per-session working area and (b) purged on a stated
+  # schedule, so there is nothing defensible to put in `template`:
+  #   - io_management.html: /home (50GB quota) and /rds/user/<user>/hpc-work
+  #     (1TB quota, "the correct target for job I/O", and what CSD3 docs
+  #     mean when they say "scratch space") are BOTH explicitly "no
+  #     automatic deletion currently" — i.e. persistent, not disposable.
+  #     Setting template to hpc-work with auto_cleanup_days: 0 would make
+  #     `botainer hpc setup` print "genuinely per-session disposable",
+  #     which is false — that path fills up permanently, it isn't cleaned.
+  #   - /local (node-local disk) and /ramdisks (tmpfs) ARE ephemeral
+  #     ("deleted after job completion") but are ordinary node-local /
+  #     job-scoped storage, not a shared filesystem path a profile template
+  #     can name — there's no stated day-based purge window, just "gone
+  #     when the job ends".
+  # A missing template is the correct state here, not an oversight.
+  template: ""
+  auto_cleanup_days: 0
+
+apptainer:
+  # modules.html shows `singularity/current` in a `module list` example
+  # alongside other default-loaded modules; CSD3 docs don't spell out
+  # whether an explicit `module load singularity` is ever required.
+  #
+  # No CSD3 page documents a recommended APPTAINER_CACHEDIR/
+  # SINGULARITY_CACHEDIR location. This path is an inference from the
+  # documented quota split (home = 50GB, tight for image layers/cache;
+  # /rds/user/<user>/hpc-work = 1TB, the docs' own recommended large
+  # working area) — NOT a transcribed CSD3 recommendation. Flagged here so
+  # nobody mistakes it for one.
+  cachedir: "/rds/user/${USER}/hpc-work/.apptainer/cache"
+  prebuilt_url: ""
+
+modules:
+  denylist: []
+  always_load: []
+
+policy:
+  # UNDOCUMENTED, not confirmed-open: none of the fetched pages (quickstart,
+  # connecting, interactive, or the pytorch/jupyter software pages) say
+  # anything about outbound internet access from compute nodes in either
+  # direction. Left false (don't refuse network) rather than true, because
+  # inventing a restriction that doesn't exist is exactly the kind of
+  # confident wrong fact this file exists to avoid — but this is a real gap,
+  # not a verified "internet works fine". See agent_hints below: an agent
+  # should treat outbound network as untested and check early rather than
+  # assume either way.
+  refuse_network: false
+
+agent_hints:
+  preamble: |
+    You are on Cambridge CSD3 (EPSRC Tier-2 HPC), scheduled by Slurm.
+
+    Project code is MANDATORY on every submission. CSD3's own templates use
+    `#SBATCH -A CHANGEME` as a placeholder you must replace — jobs will not
+    submit without a real `-A PROJECT-CPU` (CPU partitions) or
+    `-A PROJECT-GPU` (ampere) account. There is no cluster-wide default
+    account; get the project code from whoever manages your allocation and
+    set it (`botainer hpc setup --account <project>` or per-project config)
+    before your first submit.
+
+    Partitions: icelake / icelake-himem (Ice Lake, 76 cpus/node, 256 or
+    512 GiB), cclake / cclake-himem (older Cascade Lake, 56 cpus/node, 192
+    or 384 GiB), sapphire (112 cpus/node, 512 GiB), and ampere (Wilkes3,
+    4x A100-80GB + 128 cpus + 1000 GiB per node — GPU jobs get a
+    proportional cpu/mem slice per GPU requested, not the whole node).
+
+    Walltime is capped by your SERVICE LEVEL, not just the partition: SL1/
+    SL2 (paid/allocated) get 36h; SL3, the no-cost default tier most
+    individual accounts start on, is capped at 12h. If a job is rejected
+    for exceeding walltime, assume you're on SL3 before assuming anything
+    else. The `-long` partition variants (icelake-long/cclake-long/
+    ampere-long) allow up to 7 days, but ONLY under the QOSL quality-of-
+    service, which CSD3 does NOT grant by default — it requires emailing
+    support@hpc.cam.ac.uk with a justification for why the job can't
+    checkpoint. Do not plan around `-long` being available.
+
+    Storage — nothing here auto-deletes on a schedule, which cuts both
+    ways: you will not lose work to a surprise purge, but you WILL fill
+    your quota if you leave large intermediate files around.
+    - /home (50GB quota) — code and configs only, not job I/O.
+    - /rds/user/<you>/hpc-work (1TB quota, 1M file limit) — this is what
+      CSD3 docs mean by "scratch": the correct target for job I/O and
+      large working files. It is explicitly NOT auto-purged. Clean up
+      after yourself; nothing else will.
+    - /local (per-node disk) and /ramdisks (tmpfs) — genuinely ephemeral,
+      wiped when the job ends, but node-local: invisible from the login
+      node or other jobs. Fine for scratch within a single job, useless
+      for anything that needs to survive past it.
+
+    Network: CSD3's public docs do not state whether compute nodes have
+    outbound internet access. Don't assume `pip install`/`git clone`/etc.
+    will work from inside a job — test with something cheap early (e.g. a
+    small `curl` or `pip install` of a tiny package) and fall back to
+    pre-staging dependencies from the login node (login-icelake / login-cpu
+    / login-csd3, or login-q-1..4 / login-p-1..4) into /rds if it fails.
+
+    Apptainer/Singularity is available as a module (`singularity/current`
+    shows up in example `module list` output); `module load singularity`
+    if it isn't already loaded. Build .sif images on a compute node
+    (interactively via `sintr`/salloc), not the login node.

@@ -1,0 +1,46 @@
+# First-party plugin: git
+# Provides guarded-mode git for the agent. In `guarded` mode, .git/hooks/ is
+# overlaid read-only inside the container so the agent can't install
+# host-executed git hooks. (Was named `protected` in earlier development;
+# renamed in v0.1.x for clarity — "guarded" describes what it does to the
+# hooks dir rather than promising a generic "protection.")
+apiVersion: botainer-plugin-v1
+name: git
+version: 0.1.0
+description: Git in guarded mode (read-only overlay on .git/hooks/)
+license: Apache-2.0
+maintainer: botainer
+botainer_min_version: 0.1.0a0
+tier: first-party
+kind: policy-overlay
+trust_required: declarative
+runtimes:
+  - docker
+  - apptainer
+
+# No image; this plugin only contributes mount overlays via its pre_session
+# hook (AUDIT 2026-06-09 H6: was `hooks: []`, so guarded mode was a no-op).
+hooks:
+  - when: pre_session
+    script: hooks/pre_session.py
+    timeout_seconds: 15
+commands: []
+
+capabilities:
+  - mounts.extra
+
+contributes:
+  # The pre_session hook emits read-only overlays on these targets in guarded
+  # mode (and refuses the session on a dangerous pre-existing .git/config).
+  mount_target_prefixes:
+    - /workspace/.git/hooks
+    - /workspace/.git/config
+
+config_schema:
+  type: object
+  properties:
+    mode:
+      type: string
+      enum: [guarded, off]
+      default: guarded
+  additionalProperties: false

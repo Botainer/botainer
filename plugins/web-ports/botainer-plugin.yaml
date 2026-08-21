@@ -1,0 +1,89 @@
+# First-party plugin: web-ports
+# Forward declared TCP ports from the agent container to localhost on
+# the host. For Jupyter notebooks, Gradio apps, Streamlit, code-server,
+# etc. — anything the agent runs that serves over HTTP.
+#
+# Per project config (.botainer/config.yaml):
+#
+#   plugins_enabled:
+#     - web-ports
+#   plugins:
+#     web-ports:
+#       ports:
+#         - 8888                 # forward 8888 → localhost:8888
+#         - { container: 8501, host: 8501 }            # Streamlit
+#         - { container: 7860, host: 7860 }            # Gradio
+#         - { container: 8443, host: 8443, label: "code-server" }
+#
+# SECURITY:
+#   - Default bind is 127.0.0.1 (loopback only). Anyone with shell access
+#     to your host can still reach these ports — surfaced in the capability
+#     summary at session start.
+#   - 0.0.0.0 binding is allowed but discouraged; the agent's web app
+#     becomes reachable from other hosts on the network. Refuse without
+#     explicit opt-in (Phase B; not in v0.1.0).
+#
+# Apptainer/HPC:
+#   - Apptainer doesn't support `-p` flag (it runs in user's namespace).
+#     For HPC use: SSH tunnel from your laptop to the login node, then
+#     onward. The plugin refuses on apptainer runtime with a clear hint.
+
+apiVersion: botainer-plugin-v1
+name: web-ports
+version: 0.1.0
+description: |
+  Forward TCP ports from the agent container to the host so you can
+  open the agent's web apps (Jupyter, Streamlit, etc.) in your browser.
+license: Apache-2.0
+maintainer: botainer
+botainer_min_version: 0.1.0a0
+tier: first-party
+kind: policy-overlay
+trust_required: declarative
+
+runtimes:
+  - docker
+
+capabilities:
+  - net.port_forward
+
+contributes:
+  agent_hints_section: |
+    ## Web ports forwarded to the host
+
+    If you start a web server in this session, the user can open it in
+    their browser at the URLs listed in the capability summary at
+    session start. Bind your service to `0.0.0.0` (not `127.0.0.1`)
+    so Docker's port-forwarding can reach it — the container's
+    loopback isn't visible from the host.
+
+config_schema:
+  type: object
+  properties:
+    ports:
+      type: array
+      items:
+        oneOf:
+          - type: integer
+            minimum: 1
+            maximum: 65535
+          - type: object
+            properties:
+              container:
+                type: integer
+                minimum: 1
+                maximum: 65535
+              host:
+                type: integer
+                minimum: 1
+                maximum: 65535
+              host_bind:
+                type: string
+                default: "127.0.0.1"
+              label:
+                type: string
+                default: ""
+            required: [container]
+            additionalProperties: false
+      default: []
+  additionalProperties: false

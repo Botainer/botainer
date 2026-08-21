@@ -1,0 +1,104 @@
+# NERSC Perlmutter (DOE / Lawrence Berkeley National Laboratory).
+# https://docs.nersc.gov/
+#
+# NOT RUN ON HARDWARE. Transcribed from public documentation — see
+# `verification` below. Validate it against the live scheduler with
+# `sinfo -o '%P %l %m %c %G'` and `scontrol show partition`.
+
+version: cluster-profile-v1
+
+verification:
+  status: from-public-docs
+  last_checked: "2026-07-29"
+  source: "https://docs.nersc.gov/jobs/policy/ (QOS table) + https://docs.nersc.gov/filesystems/perlmutter-scratch/ (8-week purge)"
+
+cluster:
+  name: us-nersc-perlmutter
+  aliases: ["perlmutter"]   # what $SLURM_CLUSTER_NAME / $LMOD_SYSHOST report
+  hostname_patterns:
+    - "login*.chn.perlmutter.nersc.gov"
+    - "perlmutter*"
+    # NOT "nid*": that is the standard Cray node prefix, so it would also match
+    # compute nodes on ARCHER2, LUMI and every other Cray EX — autodetecting
+    # NERSC's limits onto an unrelated machine.
+    - "*.nersc.gov"
+  description: "NERSC Perlmutter (HPE Cray EX; AMD EPYC + NVIDIA A100)"
+
+lmod:
+  # NERSC uses its own module stack; the login shell already provides
+  # `module`. Left empty deliberately rather than guessed — a wrong bootstrap
+  # path fails louder than an absent one.
+  bootstrap: ""
+
+slurm:
+  # Perlmutter schedules by QOS rather than by conventional partitions, and
+  # `--qos` is what actually bounds a job. botainer's `partitions` map is the
+  # closest structural fit, so QOS names live here; `hpc submit -p regular`
+  # therefore means `--qos=regular`.
+  #
+  # NOT recorded: max_cpus. NERSC publishes limits in NODES, not cores, and
+  # translating one to the other requires knowing which node type you land on
+  # (CPU nodes are 128 cores, GPU nodes 64). Inventing a core count would be a
+  # guess wearing the costume of a fact.
+  default_partition: regular
+  default_account: ""
+  default_time_minutes: 240
+  partitions:
+    regular:
+      max_time_minutes: 2880        # 48 h
+    debug:
+      max_time_minutes: 30          # 8 nodes max
+    interactive:
+      max_time_minutes: 240         # salloc only, 4 nodes
+    shared:
+      max_time_minutes: 2880        # fractional-node charging
+    preempt:
+      max_time_minutes: 2880        # discounted; 2 h minimum, can be killed
+    premium:
+      max_time_minutes: 2880        # 2-4x charge multiplier
+    overrun:
+      max_time_minutes: 2880        # free, only once allocation is exhausted
+
+scratch:
+  # $PSCRATCH expands to /pscratch/sd/<first letter of user>/<user>. The
+  # template's literal prefix is what botainer compares a bind source
+  # against, so the per-user tail does not need to be exact.
+  template: "/pscratch/sd/${USER_INITIAL}/${USER}"
+  auto_cleanup_days: 56             # vendor: "not accessed within 8 weeks"
+
+apptainer:
+  cachedir: "${SCRATCH}/.apptainer/cache"
+  prebuilt_url: ""
+
+modules:
+  denylist: []
+  always_load: []
+
+policy:
+  refuse_network: false
+
+agent_hints:
+  preamble: |
+    You are on NERSC Perlmutter (DOE, at Lawrence Berkeley National Lab).
+
+    Scheduling here is by QOS, not by conventional partition names. `--qos`
+    is what bounds your job: `regular` (48 h), `debug` (30 min, max 8 nodes),
+    `interactive` (4 h, salloc), `shared` (fractional node — use it for
+    single-core work so you are not charged for 128), `preempt` (discounted
+    but killable), `premium` (2-4x charge — do not use casually).
+
+    Node types differ and it matters: CPU nodes are 2x AMD EPYC 7763 (128
+    cores, 512 GB); GPU nodes are 1x EPYC (64 cores, 256 GB) with 4x A100,
+    either 40 GB or 80 GB depending on the node.
+
+    Filesystems:
+    - $HOME — small, backed up. Code and configs only.
+    - $PSCRATCH (/pscratch/sd/<x>/<user>) — the large working filesystem, and
+      it is PURGED: any file not ACCESSED within 8 weeks may be deleted.
+      Note that is last-access, not last-modified, so an untouched result
+      from two months ago is at risk.
+    - $CFS (community filesystem) — for data that must persist. Put anything
+      you cannot regenerate here, not on scratch.
+
+    Charging is real on this machine: wall-clock consumes your project's
+    allocation, and `premium` multiplies it. Request what you need.

@@ -1,0 +1,207 @@
+;;
+;; wolfram-sandbox.sb — macOS sandbox profile for wolframscript
+;;
+;; Defense-in-depth layer for the host-side Wolfram proxy. The container
+;; agent is treated as adversarial; the proxy hands its requests to
+;; wolframscript on the host inside this profile so that even when Wolfram's
+;; metaprogramming defeats the string filter and the kernel-init Protect[]
+;; overrides, the operations Wolfram can perform on the host filesystem
+;; are bounded.
+;;
+;; What this profile *does* enforce:
+;;   - File reads: blocks an enumerated set of sensitive paths (SSH/AWS/
+;;     etc. credentials, cloud-app data, sudoers, kerberos config, SSH host
+;;     keys, macOS local DirectoryServices DB, browser data, mail/messages,
+;;     password managers, mounted volumes including network shares,
+;;     persistence/auto-start dirs).
+;;     Note: /etc itself is left readable — libc startup needs /etc/passwd,
+;;     /etc/localtime, /etc/resolv.conf, /etc/ssl/cert.pem. Sensitive files
+;;     within /etc are denied individually.
+;;   - File writes: strict allowlist — writes are denied except to system
+;;     temp dirs and Wolfram's own cache/config. Persistence vectors
+;;     (LaunchAgents, LaunchDaemons, /Applications) cannot be touched
+;;     even where macOS file permissions would otherwise allow it.
+;;
+;; What this profile does *not* enforce:
+;;   - Network egress — Wolfram can call URLFetch/Import["http..."] (those
+;;     are caught by the proxy's string filter; this profile is the layer
+;;     beneath that, not network policy).
+;;   - Process spawn — /bin/sh has to remain reachable because wolframscript
+;;     uses it to start the Wolfram kernel. Run[]/RunProcess[]/etc. are
+;;     blocked by the kernel-init `Protect[]+Locked` overrides, not here.
+;;   - Wolfram's reflection surface itself — `FromCharacterCode`, `Symbol`,
+;;     `ToExpression`, etc. always let a determined adversary reconstruct
+;;     forbidden tokens. No deny-list defeats Wolfram. The right answer is
+;;     v0.0.13+'s "Wolfram-in-container" plugin (see TODO.md). Until that
+;;     ships, this profile is the second-best containment layer.
+;;
+;; Strategy: allow-by-default + deny specific. The inverse (deny-default +
+;; allowlist) is stronger but requires enumerating every system path
+;; Wolfram touches at startup, which drifts with Mathematica versions.
+;;
+
+(version 1)
+
+;; Start permissive, then lock down specific operations
+(allow default)
+
+;; === FILE READS: block known sensitive directories ===
+;; Prevents reading SSH keys, credentials, cloud configs, etc.
+;; even if string filter is bypassed via meta-programming.
+(deny file-read*
+    ;; SSH and GPG keys
+    (regex #"^/Users/[^/]+/\.ssh")
+    (regex #"^/Users/[^/]+/\.gnupg")
+    (regex #"^/Users/[^/]+/\.gpg")
+    ;; Cloud provider credentials
+    (regex #"^/Users/[^/]+/\.aws")
+    (regex #"^/Users/[^/]+/\.azure")
+    (regex #"^/Users/[^/]+/\.gcloud")
+    (regex #"^/Users/[^/]+/\.config/gcloud")
+    (regex #"^/Users/[^/]+/\.kube")
+    (regex #"^/Users/[^/]+/\.docker/config\.json")
+    ;; Auth tokens and credentials
+    (regex #"^/Users/[^/]+/\.claude")
+    (regex #"^/Users/[^/]+/\.anthropic")
+    (regex #"^/Users/[^/]+/\.openai")
+    (regex #"^/Users/[^/]+/\.config/gh")
+    (regex #"^/Users/[^/]+/\.gitcredentials")
+    (regex #"^/Users/[^/]+/\.git-credentials")
+    (regex #"^/Users/[^/]+/\.netrc")
+    (regex #"^/Users/[^/]+/\.npmrc")
+    (regex #"^/Users/[^/]+/\.pypirc")
+    ;; User data directories
+    (regex #"^/Users/[^/]+/Documents")
+    (regex #"^/Users/[^/]+/Desktop")
+    (regex #"^/Users/[^/]+/Downloads")
+    (regex #"^/Users/[^/]+/Dropbox")
+    ;; Corporate Dropbox folders (e.g. "Acme Inc Dropbox", "Yale University Dropbox")
+    (regex #"^/Users/[^/]+/[^/]+ Dropbox")
+    (regex #"^/Users/[^/]+/MyLnk")
+    ;; macOS Keychain
+    (regex #"^/Users/[^/]+/Library/Keychains")
+    ;; Browser data
+    (regex #"^/Users/[^/]+/Library/Application Support/Google/Chrome")
+    (regex #"^/Users/[^/]+/Library/Application Support/Firefox")
+    (regex #"^/Users/[^/]+/Library/Application Support/Arc")
+    (regex #"^/Users/[^/]+/Library/Safari")
+    (regex #"^/Users/[^/]+/Library/Cookies")
+    ;; Password managers
+    (regex #"^/Users/[^/]+/Library/Application Support/1Password")
+    ;; Mail
+    (regex #"^/Users/[^/]+/Library/Mail")
+    (regex #"^/Users/[^/]+/Library/Messages")
+    ;; Container auth (separate from host) — both current and legacy paths.
+    (regex #"^/Users/[^/]+/\.botainer/auth")
+    (regex #"^/Users/[^/]+/\.botainer/wolfram-proxy\.token")
+    (regex #"^/Users/[^/]+/\.my_claude_container/auth")
+    (regex #"^/Users/[^/]+/\.my_claude_container/wolfram-proxy\.token")
+    ;; v0.0.12: system identity stores. Wolfram's `Get` and friends can
+    ;; reach these even after the proxy refuses `-file` — block at the OS
+    ;; layer in case the kernel-init sandbox is bypassed.
+    ;;
+    ;; v0.0.12 (post-delta-review): originally `(subpath "/etc")` here,
+    ;; which broke wolframscript startup — libc's getpwuid reads
+    ;; /etc/passwd, tzset reads /etc/localtime, DNS needs /etc/resolv.conf,
+    ;; TLS needs /etc/ssl/cert.pem. Now denying specific sensitive files
+    ;; only, leaving the rest of /etc readable for startup machinery.
+    (literal "/etc/master.passwd")
+    (literal "/private/etc/master.passwd")
+    (subpath "/etc/sudoers.d")
+    (subpath "/private/etc/sudoers.d")
+    (literal "/etc/sudoers")
+    (literal "/private/etc/sudoers")
+    (literal "/etc/krb5.conf")
+    (literal "/private/etc/krb5.conf")
+    (subpath "/etc/ssh")
+    (subpath "/private/etc/ssh")
+    (subpath "/etc/openldap")
+    (subpath "/private/etc/openldap")
+    ;; macOS user database (DirectoryServices local DB); /var/db itself
+    ;; has timezone data and dyld shared cache that startup may read.
+    (subpath "/var/db/dslocal")
+    (subpath "/private/var/db/dslocal")
+    (subpath "/var/db/sudo")
+    (subpath "/private/var/db/sudo")
+    (subpath "/var/db/krb5kdc")
+    (subpath "/private/var/db/krb5kdc")
+    ;; Other macOS system identity stores.
+    (regex #"^/Library/Application Support/com\.apple\.TCC")
+    (regex #"^/private/var/folders/[^/]+/[^/]+/com\.apple\.LaunchServices")
+
+    ;; v0.0.12 (B1): additional sensitive surfaces. Categories below.
+
+    ;; --- Cloud storage that auto-mounts user data ---
+    (regex #"^/Users/[^/]+/Library/CloudStorage")
+    (subpath "/Volumes")
+    (subpath "/Network")
+
+    ;; --- App-managed data dirs that frequently hold tokens/sessions ---
+    (regex #"^/Users/[^/]+/Library/Application Support/Slack")
+    (regex #"^/Users/[^/]+/Library/Application Support/Code")
+    (regex #"^/Users/[^/]+/Library/Application Support/com\.microsoft\.VSCode")
+    (regex #"^/Users/[^/]+/Library/Application Support/Notion")
+    (regex #"^/Users/[^/]+/Library/Application Support/com\.anthropic")
+    (regex #"^/Users/[^/]+/Library/Application Support/com\.openai")
+    (regex #"^/Users/[^/]+/Library/Group Containers")
+    (regex #"^/Users/[^/]+/Library/Containers")
+
+    ;; --- Persistence / auto-start vectors (read-side: knowing what's
+    ;; installed is a fingerprint; write-side blocked below) ---
+    (regex #"^/Users/[^/]+/Library/LaunchAgents")
+    (subpath "/Library/LaunchAgents")
+    (subpath "/Library/LaunchDaemons")
+    (subpath "/System/Library/LaunchAgents")
+    (subpath "/System/Library/LaunchDaemons")
+
+    ;; --- System-wide keychains and identity stores ---
+    (subpath "/Library/Keychains")
+
+    ;; --- Shell history and saved app state — leaks recent commands / files ---
+    (regex #"^/Users/[^/]+/\.bash_history")
+    (regex #"^/Users/[^/]+/\.zsh_history")
+    (regex #"^/Users/[^/]+/\.zsh_sessions")
+    (regex #"^/Users/[^/]+/\.history")
+    (regex #"^/Users/[^/]+/\.python_history")
+    (regex #"^/Users/[^/]+/\.node_repl_history")
+    (regex #"^/Users/[^/]+/\.irb_history")
+    (regex #"^/Users/[^/]+/\.psql_history")
+    (regex #"^/Users/[^/]+/Library/Saved Application State")
+
+    ;; --- Calendar / contacts ---
+    (regex #"^/Users/[^/]+/Library/Calendars")
+    (regex #"^/Users/[^/]+/Library/Application Support/AddressBook")
+)
+
+;; === FILE WRITES: restrict to temp and Wolfram cache only ===
+;; Allowlist: writes are denied EXCEPT to system temp dirs and Wolfram's own
+;; cache. By construction this also blocks every persistence vector
+;; (~/Library/LaunchAgents, /Library/LaunchAgents, /Library/LaunchDaemons,
+;; /Applications, ~/.zshrc, ~/.bashrc, login scripts, cron jobs, etc.) and
+;; every user-data write target — including ~/Documents, ~/Desktop, every
+;; Dropbox-style folder, and user-managed git repos.
+;;
+;; Adding a new entry to require-any below is a SECURITY-RELEVANT change.
+;; Document why each is needed; prefer subpaths that exist only for Wolfram.
+(deny file-write*
+    (require-not (require-any
+        ;; System temp directories (needed for kernel operation)
+        (subpath "/tmp")
+        (subpath "/private/tmp")
+        (subpath "/private/var/tmp")
+        (subpath "/var/tmp")
+        (subpath "/private/var/folders")
+        (subpath "/dev")
+        ;; Wolfram's own cache, config, and log directories
+        (regex #"^/Users/[^/]+/Library/Mathematica")
+        (regex #"^/Users/[^/]+/Library/Wolfram")
+        (regex #"^/Users/[^/]+/Library/Caches/Wolfram")
+        (regex #"^/Users/[^/]+/Library/Caches/com\.wolfram")
+        (regex #"^/Users/[^/]+/Library/Application Support/Mathematica")
+        (regex #"^/Users/[^/]+/Library/Application Support/Wolfram")
+        (regex #"^/Users/[^/]+/Library/Logs/Wolfram")
+        (regex #"^/Users/[^/]+/Library/Logs/Mathematica")
+        (regex #"^/Users/[^/]+/\.Mathematica")
+        (regex #"^/Users/[^/]+/\.Wolfram")
+    ))
+)

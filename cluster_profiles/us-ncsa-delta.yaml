@@ -1,0 +1,166 @@
+# NCSA Delta (National Center for Supercomputing Applications, UIUC; NSF ACCESS).
+# https://docs.ncsa.illinois.edu/systems/delta/
+#
+# NOT RUN ON HARDWARE. Transcribed from public documentation.
+
+version: cluster-profile-v1
+
+verification:
+  status: from-public-docs
+  last_checked: "2026-07-29"
+  source: >-
+    NCSA's docs.ncsa.illinois.edu domain returned empty content to this
+    session's fetch tool on every attempt (Delta's own "Running Jobs" and
+    "Data Management" pages included), so the partition table, filesystem
+    quotas, and module-system details below were confirmed instead from a
+    full-page fetch of https://wiki.ncsa.illinois.edu/display/DSC/Delta+User+Guide
+    (NCSA's own wiki mirror of the same user guide, fetched twice for
+    consistency) plus web search snippets that quote
+    docs.ncsa.illinois.edu/systems/delta/en/latest/user_guide/ directly for
+    the /scratch purge-policy wording and the Lmod modtree/gpu default.
+    Cross-referenced against https://access-ci.atlassian.net/wiki/spaces/ACCESSdocumentation/pages/919863297/Delta+-+NCSA
+    for the canonical-docs pointer. Per-node core/memory counts for the GPU
+    partitions were consistently reported across sources; NOT independently
+    verified against a live `sinfo` since this session has no access to the
+    cluster.
+
+cluster:
+  name: us-ncsa-delta
+  aliases: ["delta"]   # what $SLURM_CLUSTER_NAME / $LMOD_SYSHOST report
+  hostname_patterns:
+    - "login.delta.ncsa.illinois.edu"
+    - "dt-login*.delta.ncsa.illinois.edu"
+    - "delta*"
+  description: "NCSA Delta (HPE Apollo; AMD EPYC Milan; NVIDIA A100/A40, AMD MI100)"
+
+lmod:
+  # Confirmed Lmod-based ("Spack to produce modules for use via the Lmod
+  # based module system"), with `modtree/gpu` loaded by default at login
+  # (GCC 11.2.0 + OpenMPI w/ CUDA+gdrcopy support) and `modtree/cpu` as the
+  # CPU-only alternative. No init-script path is documented — the login
+  # shell already has `module` available — so left empty rather than guessed.
+  bootstrap: ""
+
+slurm:
+  # Node-SHARING is the default here (unlike many peer systems): a job gets
+  # only the cores/memory/GPUs it asks for and is billed accordingly, unless
+  # `--exclusive --mem=0` is explicitly requested. This is a friendlier
+  # default than Frontera/Anvil, where whole-node billing is easy to trigger
+  # by accident — but it also means `cpu`/`gpu*` here are effectively both
+  # the "shared" and "exclusive" partition depending on what you request.
+  default_partition: cpu
+  default_account: ""
+  default_time_minutes: 240
+  partitions:
+    cpu:
+      max_time_minutes: 2880        # 48h
+      max_cpus: 128
+      max_memory_gb: 256
+    cpu-interactive:
+      max_time_minutes: 30
+      max_cpus: 128
+      max_memory_gb: 256
+    gpuA100x4:
+      max_time_minutes: 2880        # 48h
+      max_cpus: 64
+      max_memory_gb: 256
+      gpu_types: [a100]
+    gpuA100x4-interactive:
+      max_time_minutes: 60
+      max_cpus: 64
+      max_memory_gb: 256
+      gpu_types: [a100]
+    gpuA100x8:
+      max_time_minutes: 2880        # 48h
+      max_cpus: 128
+      max_memory_gb: 2048
+      gpu_types: [a100]
+    gpuA100x8-interactive:
+      max_time_minutes: 60
+      max_cpus: 128
+      max_memory_gb: 2048
+      gpu_types: [a100]
+    gpuA40x4:
+      max_time_minutes: 2880        # 48h
+      max_cpus: 64
+      max_memory_gb: 256
+      gpu_types: [a40]
+    gpuA40x4-interactive:
+      max_time_minutes: 60
+      max_cpus: 64
+      max_memory_gb: 256
+      gpu_types: [a40]
+    gpuMI100x8:
+      max_time_minutes: 2880        # 48h
+      max_cpus: 128
+      max_memory_gb: 2048
+      gpu_types: [mi100]
+    gpuMI100x8-interactive:
+      max_time_minutes: 60
+      max_cpus: 128
+      max_memory_gb: 2048
+      gpu_types: [mi100]
+
+scratch:
+  # /scratch on Delta is SHARED, but the vendor's own file-systems table
+  # marks it "Purged: No" — it is quota-managed (1 TB default, expandable to
+  # up to 100 TB by allocation request), not time-purged. The ONLY thing
+  # purged on Delta is node-local /tmp, and that's "after each job" — the
+  # node-local case this field isn't for either. Per the no-guessing rule: for
+  # this field (a path only for docs-confirmed SHARED+PURGED scratch),
+  # template is left empty and auto_cleanup_days at 0 so nothing here
+  # falsely claims a purge that doesn't happen. The real path/quota is
+  # still documented below in agent_hints, for large-file placement guidance
+  # — it's just not wired into the purge-warning comparison.
+  template: ""
+  auto_cleanup_days: 0
+
+apptainer:
+  # $HOME is small (50 GB) — vendor docs explicitly recommend redirecting
+  # APPTAINER_CACHEDIR to scratch if $HOME quota is a problem.
+  cachedir: "/scratch/${USER}/.apptainer/cache"
+  prebuilt_url: ""
+
+modules:
+  denylist: []
+  always_load: []
+
+policy:
+  refuse_network: false
+
+agent_hints:
+  preamble: |
+    You are on NCSA Delta (NSF ACCESS allocation, University of Illinois).
+
+    Node-sharing is the DEFAULT on Delta: a job is billed only for the
+    cores/memory/GPUs it actually requests, not a whole node, unless you
+    pass `--exclusive --mem=0`. This is friendlier than many peer HPC
+    systems (e.g. Frontera, Anvil) where an easy mistake bills a full node.
+
+    Partition choice:
+    - `cpu` (48h, 128 cores/node, 256 GB) — general CPU batch work.
+      `cpu-interactive` (30 min) for quick interactive testing.
+    - `gpuA100x4` / `gpuA100x8` (48h) — 4 or 8 NVIDIA A100s per node
+      respectively (256 GB / 2 TB RAM). `-interactive` variants of each
+      cap at 1 hour.
+    - `gpuA40x4` (48h) — 4x NVIDIA A40 per node, 256 GB RAM.
+    - `gpuMI100x8` (48h) — 8x AMD MI100 per node, 2 TB RAM. AMD GPUs use
+      ROCm, NOT CUDA — do not assume a CUDA toolchain will work here;
+      verify the software stack targets ROCm before use.
+    - Everything tops out at 48 hours except the `-interactive` variants
+      (30-60 min, for quick testing only, not batch throughput).
+
+    Filesystems:
+    - /u/<user> (HOME) — 50 GB, 600,000 files. Not purged.
+    - /projects (WORK) — 500 GB default, expandable up to 25 TB by
+      allocation request. Not purged. Shared project data.
+    - /scratch (SCRATCH) — 1 TB default, expandable up to 100 TB by
+      allocation request. NOT time-purged (it's quota-managed, not
+      auto-deleted) — but do not treat it as backed up; the docs describe
+      it purely as working space, with no snapshot/backup guarantee.
+    - Node-local /tmp — 0.74 TB (CPU nodes) / 1.5 TB (GPU nodes), deleted
+      after each job. Stage hot data there for I/O-heavy work.
+
+    Use `module avail` / `module spider <name>` to find software. The
+    default environment is `modtree/gpu` (recent GCC + OpenMPI w/ CUDA);
+    switch to `modtree/cpu` for CPU-only work.

@@ -1,0 +1,131 @@
+# First-party plugin: agent-claude-shared (Mode B — shared mount)
+#
+# Mode B of the anthropic auth family. Per AUTH-PRODUCT-PLAN.md §3:
+# selective bind. Per-project state dir (~/.botainer/state/<uuid>/
+# data/agent-claude/profiles/<profile>/) is bound at /home/user/.claude
+# inside the container, holding the per-project history, sessions,
+# claude.json, etc. The credential file (.credentials.json) inside
+# that dir is a SYMLINK to ~/.botainer/shared-auth/agent-claude/
+# .credentials.json (which is bound separately as a directory so
+# atomic-replace works through the symlink).
+#
+# This means: ALL projects share the credential (one Anthropic
+# login), but NONE share history, sessions, project metadata.
+# The contamination surface is just the OAuth token itself.
+#
+# Cross-project risk: a compromised agent in any project can read AND
+# OVERWRITE
+# the shared credential file via the symlink. If you're running
+# untrusted-data work, use Mode A (per-project) or Mode C (proxy)
+# instead.
+
+apiVersion: botainer-plugin-v1
+name: agent-claude-shared
+version: 0.1.0
+description: |
+  Anthropic Claude Code agent with HOST-WIDE SHARED credentials
+  (Mode B). One login per host covers all projects. Per-project
+  history/sessions remain isolated.
+license: Apache-2.0
+maintainer: botainer
+botainer_min_version: 0.1.0a0
+tier: first-party
+kind: agent
+trust_required: hooked
+runtimes:
+  - docker
+  - apptainer
+
+auth_family: anthropic
+auth_mode: shared
+mutually_exclusive_with:
+  - agent-claude
+  - agent-claude-proxy
+
+# Re-uses agent-claude's image. We don't ship a separate image —
+# the binary is the same; only the credential delivery differs.
+# (See depends_on below.)
+depends_on:
+  - agent-claude
+
+commands:
+  - name: login
+    script: hooks/login.py
+    help: |
+      Log in to Anthropic (shared host-wide). Writes to
+      ~/.botainer/shared-auth/agent-claude/.credentials.json.
+      All projects using shared mode will pick up the new credential
+      on next session start.
+  - name: status
+    script: hooks/status.py
+    help: Show shared credential validity + per-host info.
+
+hooks:
+  - when: pre_session
+    script: hooks/pre_session.py
+    timeout_seconds: 20
+  # Runs the SAME credential reconcile at session EXIT. Without it a token
+  # refreshed inside the container only propagates to the shared store the next
+  # time THIS project starts — so a new project inherits a stale token and
+  # reports "login expired" (reported 2026-07-28).
+  - when: post_session
+    script: hooks/post_session.py
+    timeout_seconds: 10
+
+capabilities:
+  - mounts.workspace
+  - mounts.extra
+  - network
+  - env.values
+
+contributes:
+  mount_target_prefixes:
+    - /workspace/.botainer/agent-claude/
+    - /home/agent/.claude
+    - /home/agent/.claude/
+    # Selective-bind target for the shared credential dir (per
+    # AUTH-PRODUCT-PLAN.md §3 and the dir-bind + symlink architecture
+    # in hooks/pre_session.py). The container sees a symlink at
+    # /home/agent/.claude/.credentials.json pointing here.
+    - /shared-auth/agent-claude
+    - /shared-auth/agent-claude/
+
+  # Mirrors agent-claude's entrypoint_wrap. The shared-mode plugin
+  # is mutually-exclusive with agent-claude, so when shared mode is
+  # active, agent-claude is NOT instantiated and its entrypoint_wrap
+  # is NOT contributed. On docker that's silently fine — the image's
+  # ENTRYPOINT directive runs. On apptainer, `exec` requires an
+  # explicit command and the run fails ("requires at least 2 arg(s),
+  # only received 1"). 2026-05-19 real-host failure on Grace.
+  # depends_on metadata doesn't trigger inheritance; we declare the
+  # wrap explicitly. Internal design note DN-036 tracks the architectural followup
+  # to teach the composition layer to inherit from depends_on.
+  entrypoint_wrap:
+    layer: inner
+    command:
+      - /usr/local/bin/agent-claude-entrypoint
+
+  agent_hints_section: |
+    ## Credentials are SHARED across projects
+
+    Your Anthropic credential file at
+    `/home/agent/.claude/.credentials.json` is a symlink to a
+    host-wide shared credential. Other projects on this host share
+    the same Anthropic OAuth token. Per-project conversation
+    history, sessions, and project metadata remain isolated to
+    THIS project; only the credential is shared.
+
+    If you suspect compromise, rotate at anthropic.com immediately,
+    then run `botainer auth login` to re-auth host-wide.
+
+config_schema:
+  type: object
+  properties:
+    profile:
+      type: string
+      default: default
+      description: |
+        Profile name (typically 'default'). Used to allow multiple
+        host-wide credentials (e.g., personal vs work Anthropic
+        accounts). Most users have one profile.
+  additionalProperties: false

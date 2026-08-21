@@ -1,0 +1,126 @@
+# Pawsey Supercomputing Centre — Setonix (Perth, Western Australia).
+# https://pawsey.atlassian.net/wiki/spaces/US/pages/51925434/Setonix+User+Guide
+#
+# NOT RUN ON HARDWARE. Transcribed from public documentation.
+#
+# ACCESS NOTE: Pawsey's Confluence-hosted docs (pawsey.atlassian.net/wiki/...,
+# reached via redirect from support.pawsey.org.au) repeatedly returned
+# "[Content truncated due to length...]" for the pages that hold the actual
+# CPU-partition table and the filesystem/scratch quota-and-purge policy (the
+# page itself states "Table 1. Slurm partitions for production jobs..." and
+# "Table 2. Slurm partitions for debug and development..." exist, but the
+# fetch tool truncated before reaching them, on repeated attempts with
+# narrower prompts). WebSearch was unavailable for this session (budget
+# exhausted by concurrent work). The GPU partition page and the hardware-
+# comparison migration page were short enough to fetch in full and ARE
+# solidly confirmed. CPU-only partition names, the scratch path, and the
+# scratch purge/quota policy could NOT be confirmed and are left blank
+# per this task's "omit rather than guess" rule — see the relevant comments
+# below.
+
+version: cluster-profile-v1
+
+verification:
+  status: from-public-docs
+  last_checked: "2026-07-29"
+  source: >
+    https://pawsey.atlassian.net/wiki/spaces/US/pages/51928618/Setonix+GPU+Partition+Quick+Start
+    (fully fetched: gpu/gpu-dev/gpu-highmem partition names, 4x AMD MI250X per
+    node = 8 GCDs, 64-core AMD Trento CPU, 256 GB RAM standard / 512 GB on 38
+    of 192 highmem nodes, 128 GB per MI250X, ~3575 GB usable NVMe per node,
+    192 total GPU nodes); https://pawsey.atlassian.net/wiki/spaces/US/pages/51926024/Setonix+Migration+Guide
+    (fully fetched: CPU nodes are "64 cores per node on the AMD host CPU",
+    "256 GB of RAM per node in some cases"); https://pawsey.atlassian.net/wiki/spaces/US/pages/51924796/Data+Services
+    (fully fetched: general Pawsey-wide allocation tiers — Project Storage
+    1 TB default, Private Storage 100 GB/user — NOT Setonix-/scratch-specific).
+    NOT CONFIRMED (repeated fetch attempts truncated before reaching content):
+    CPU-only Slurm partition names/limits (the "work"/"debug"/"long"-style
+    table referenced but unreadable); /scratch path, quota, and purge/expiry
+    policy; login node hostname; Lmod bootstrap path. None of these are
+    guessed below.
+
+cluster:
+  name: setonix
+  hostname_patterns:
+    - "setonix*"        # matches the cluster's published name; login-node hostname NOT independently confirmed
+  description: >
+    Pawsey Supercomputing Centre Setonix (HPE Cray EX, Perth, WA). CPU nodes:
+    64-core AMD "Trento" host CPU, 256 GB RAM. GPU nodes (192 total): same
+    64-core AMD Trento CPU + 4x AMD Instinct MI250X (8 GCDs/node), 256 GB RAM
+    standard / 512 GB on a highmem subset.
+
+lmod:
+  bootstrap: ""   # not confirmed from a reachable page; Setonix is HPE Cray EX and likely uses Cray PE modules (Lmod-based) but this was not independently verified
+
+slurm:
+  # Only the GPU partitions could be confirmed with real names/specs (the
+  # CPU-partition table exists per the docs' own table caption but its
+  # content was not reachable through repeated fetch attempts). Run `sinfo`
+  # on the actual login node for the current CPU partition list rather than
+  # trusting a guess here.
+  default_partition: ""
+  default_account: ""
+  default_time_minutes: 60
+  partitions:
+    gpu:
+      max_cpus: 64                  # per node: 64-core AMD Trento
+      max_memory_gb: 256
+      gpu_types: [mi250x]           # 4x AMD Instinct MI250X per node (8 GCDs total)
+    gpu-highmem:
+      max_cpus: 64
+      max_memory_gb: 512            # 38 of the 192 GPU nodes are this highmem variant
+      gpu_types: [mi250x]
+    gpu-dev:
+      max_cpus: 64                  # debug/dev GPU partition; walltime not stated in the reachable content
+      max_memory_gb: 256
+      gpu_types: [mi250x]
+
+scratch:
+  # NOT populated: repeated fetches of Setonix's filesystem/Data-Services
+  # pages truncated before reaching quota or purge-policy text, and the
+  # dedicated "Filesystem Policies" page truncated in the same way on every
+  # attempt. Rather than guess a path or a purge period, this is left empty
+  # so botainer does not emit an invented purge warning (or wrongly suppress
+  # a real one). If you're running here, check the live docs or `pawsey
+  # quota`/site onboarding material for the current /scratch policy.
+  template: ""
+  auto_cleanup_days: 0
+
+apptainer:
+  cachedir: "${HOME}/.apptainer/cache"   # not vendor-specified; generic default, not confirmed for Setonix specifically
+  prebuilt_url: ""
+
+modules:
+  denylist: []
+  always_load: []
+
+policy:
+  refuse_network: false   # not documented either way in the reachable pages
+
+agent_hints:
+  preamble: |
+    You are on Pawsey Setonix (HPE Cray EX, Perth, Western Australia).
+
+    GPUs are AMD Instinct MI250X, not NVIDIA — code written against CUDA
+    needs a ROCm/HIP port (Pawsey publishes a "Porting CUDA Codes to HIP"
+    guide; check for it if you hit a CUDA-only dependency). Each GPU node
+    has 4x MI250X (8 GCDs total, 128 GB HBM per physical GPU), a 64-core AMD
+    "Trento" host CPU, and 256 GB RAM (512 GB on a 38-node highmem subset).
+    Partitions confirmed from docs: `gpu`, `gpu-highmem`, `gpu-dev`.
+
+    CPU-only nodes share the same 64-core AMD Trento CPU family and (per
+    docs) 256 GB RAM "in some cases" — implying some variation you should
+    check for at submit time. This profile could NOT confirm the CPU
+    partition names/walltime limits from a reachable source — run `sinfo`
+    on the login node to see what's actually offered, don't assume names
+    like "work"/"debug" carry over from other HPC sites.
+
+    Filesystems: this profile could NOT confirm Setonix's /scratch path,
+    quota, or purge policy from a reachable source (the docs reference the
+    policy but the page truncated on every fetch attempt here). Do NOT
+    assume scratch is either safe-to-leave-forever or purged on any
+    particular schedule — check the live Pawsey documentation or ask
+    help@pawsey.org.au before relying on it for anything you can't
+    regenerate. Pawsey's general (not confirmed Setonix-specific) allocation
+    tiers include a default 1 TB "Project Storage" and 100 GB/user "Private
+    Storage".

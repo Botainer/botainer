@@ -1,0 +1,142 @@
+# Purdue Anvil (Rosen Center for Advanced Computing / RCAC; NSF ACCESS).
+# https://docs.rcac.purdue.edu/userguides/anvil/
+# (the www.rcac.purdue.edu/knowledge/anvil URL given in the original task
+# 301-redirects here as of 2026-07-29.)
+#
+# NOT RUN ON HARDWARE. Transcribed from public documentation.
+
+version: cluster-profile-v1
+
+verification:
+  status: from-public-docs
+  last_checked: "2026-07-29"
+  source: >-
+    https://docs.rcac.purdue.edu/userguides/anvil/jobs/ (Slurm partition
+    table) + https://docs.rcac.purdue.edu/userguides/anvil/file_management/
+    (filesystem quotas/purge policy) + https://docs.rcac.purdue.edu/userguides/anvil/anvil-software/
+    (Lmod confirmation) + web search snippets quoting
+    https://www.rcac.purdue.edu/knowledge/anvil/run/accounting (SU charging
+    rules for shared/wholenode/highmem/gpu) and RCAC news posts (news/7268,
+    news/7054) confirming the `ai` (NAIRR-funded H100) partition's hardware.
+
+cluster:
+  name: us-purdue-anvil
+  aliases: ["anvil"]   # what $SLURM_CLUSTER_NAME / $LMOD_SYSHOST report
+  hostname_patterns:
+    - "anvil.rcac.purdue.edu"
+    - "login*.anvil.rcac.purdue.edu"
+    - "anvil*"
+  description: "Purdue Anvil (Dell/AMD EPYC Milan; NVIDIA A100, NVIDIA H100 'Anvil AI')"
+
+lmod:
+  # Confirmed: "The Anvil cluster uses Lmod to manage the user environment."
+  # A default compiler (GCC), MPI (OpenMPI), and CUDA (on GPU nodes) are
+  # already loaded at login — no init-script path is documented, so left
+  # empty rather than guessed.
+  bootstrap: ""
+
+slurm:
+  # `shared` is the safe default: `wholenode`/`wide` are EXCLUSIVE and bill
+  # for all 128 cores regardless of what you request, which is the most
+  # expensive mistake to make by accident on this cluster.
+  default_partition: shared
+  default_account: ""
+  default_time_minutes: 240
+  partitions:
+    debug:
+      max_time_minutes: 120         # 2h. SHARED.
+      max_cpus: 128
+      max_memory_gb: 257
+    shared:
+      max_time_minutes: 5760        # 96h (4 days). SHARED — billed by core/mem fraction requested.
+      max_cpus: 128
+      max_memory_gb: 257
+    wholenode:
+      max_time_minutes: 5760        # 96h. EXCLUSIVE — bills all 128 cores even for a 1-core job.
+      max_cpus: 128
+      max_memory_gb: 257
+    wide:
+      max_time_minutes: 720         # 12h. EXCLUSIVE, multi-node — for large MPI jobs.
+      max_cpus: 128
+      max_memory_gb: 257
+    highmem:
+      max_time_minutes: 2880        # 48h. SHARED, but billed at 4x per-core-equivalent rate.
+      max_cpus: 128
+      max_memory_gb: 1031
+    gpu-debug:
+      max_time_minutes: 30
+      max_cpus: 128
+      max_memory_gb: 515
+      gpu_types: [a100]
+    gpu:
+      max_time_minutes: 2880        # 48h. Max 12 GPUs/user, 32 GPUs/allocation in use at once.
+      max_cpus: 128
+      max_memory_gb: 515
+      gpu_types: [a100]
+    ai:
+      # NAIRR-Pilot-funded expansion (21 nodes, added 2025): 4x H100 80GB
+      # SXM per node on newer Dell PowerEdge XE9640 hardware — a different,
+      # faster node generation than the `gpu` partition's A100 nodes.
+      max_time_minutes: 2880        # 48h
+      max_cpus: 96
+      max_memory_gb: 1031
+      gpu_types: [h100]
+
+scratch:
+  # /anvil/scratch: GPFS, 100 TB quota, SHARED, and genuinely PURGED —
+  # this is the one partition-vs-node distinction that matters structurally.
+  template: "/anvil/scratch/${USER}"
+  auto_cleanup_days: 30             # vendor: "Files older than 30-day (access time) will be purged"
+
+apptainer:
+  # Apptainer is installed globally on Anvil (no module load required;
+  # `singularity`/`apptainer` commands are interchangeable). $HOME is small
+  # (25 GB) so redirect the cache to scratch.
+  cachedir: "/anvil/scratch/${USER}/.apptainer/cache"
+  prebuilt_url: ""
+
+modules:
+  denylist: []
+  always_load: []
+
+policy:
+  refuse_network: false
+
+agent_hints:
+  preamble: |
+    You are on Purdue Anvil (NSF ACCESS allocation).
+
+    Partition choice — this is where allocations get burned:
+    - `wholenode` and `wide` are EXCLUSIVE: even a 1-core job is billed for
+      all 128 cores. Never use these for anything that isn't genuinely a
+      whole-node or multi-node job.
+    - `shared` is billed by the actual cores/memory-fraction requested
+      (whichever is larger) — use this for anything single-node and
+      smaller, which is most agent work. 96-hour (4-day) cap.
+    - `highmem` (1031 GB/node) is billed at 4x the per-core rate of
+      `shared`/`wholenode` — only request it if you actually need that
+      much memory.
+    - `gpu` (4x A100, 48h) and `ai` (4x H100, 48h — a newer, faster node
+      generation added via NSF NAIRR funding in 2025) are both SHARED
+      partitions; there's a hard cap of 12 GPUs in use per user and 32 per
+      allocation at any one time. 1 SU is billed per GPU-hour (up to ~120
+      GB of host memory used); requesting more memory than that increases
+      the charge.
+    - `debug` (2h) / `gpu-debug` (30 min) for quick interactive testing only.
+
+    Filesystems:
+    - /home/<user> — 25 GB quota. Not purged; nightly/weekly/monthly
+      snapshots (7 days / 3 weeks / 2 months) for accidental-deletion
+      recovery. Code and configs only.
+    - /anvil/scratch/<user> — 100 TB quota, PURGED: any file whose ACCESS
+      time exceeds 30 days is deleted, and scratch is NOT backed up (no
+      snapshots at all) — a purged or deleted file here is unrecoverable.
+      This is where large working data belongs, but do not park anything
+      here you can't afford to lose to either the purge or a disk fault.
+    - /anvil/projects/<allocation> (Depot) — 5 TB quota. Durable while the
+      allocation is active; removed 90 days after the allocation expires.
+      Same snapshot schedule as home. Put anything you must keep here, not
+      on scratch.
+
+    Software: `module avail` / `module spider <name>` (Lmod). A default
+    GCC/OpenMPI/CUDA environment is already loaded at login.

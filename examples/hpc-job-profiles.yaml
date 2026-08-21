@@ -1,0 +1,176 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Starter HPC job profiles — paste this `job_profiles:` block into your
+# project's `.botainer/config.yaml`, then edit partitions/account for YOUR
+# cluster (run `sinfo` for partitions, use your allocation for `account`).
+#
+# What this gives you: the caged agent in your session can dispatch compute
+# jobs itself with `botainer-job submit <profile> -- <cmd>` — no sbatch scripts,
+# no babysitting. The dispatcher auto-starts.
+#
+# THE MODEL — "fixed by default, opt-in max":
+#   * the scalar fields (cpus/memory/gpus/nodes/time) are the DEFAULT the agent
+#     gets if it doesn't ask for more;
+#   * add a `max_*` (max_cpus/max_memory/max_gpus/max_nodes/max_time) to let the
+#     agent request UP TO that via `botainer-job submit <p> --cpus 16 -- …`;
+#   * a resource with NO `max_*` is FIXED — the agent cannot change it.
+#   * `notes:` is verbal guidance shown to BOTH you (here) and the agent (in
+#     `botainer-job profiles`): say which profile to prefer and where to be
+#     conservative. The agent reads it.
+#
+# The root-owned site policy (/etc/botainer/policy.yaml `jobs:`) is the hard
+# ceiling over ALL of this — a profile can't offer more than the site allows.
+# ─────────────────────────────────────────────────────────────────────────────
+
+job_profiles:
+
+  cpu-small:
+    description: "Short CPU task"
+    partition: "day"          # ← replace with your cluster's CPU partition
+    account: "my_allocation"       # ← replace with your allocation
+    time: "01:00:00"
+    cpus: 4
+    memory: "16G"
+    max_concurrent: 4
+    notes: |
+      Prefer this for quick, single-node CPU work (tests, small scripts,
+      data prep). Cheap and schedules fast. Don't reach for cpu-big unless
+      the job genuinely needs it.
+
+  cpu-big:
+    description: "Larger single-node CPU task (agent may scale up)"
+    partition: "day"
+    account: "my_allocation"
+    time: "04:00:00"
+    cpus: 8                    # default
+    max_cpus: 32              # agent may request up to 32 with `--cpus N`
+    memory: "32G"             # default
+    max_memory: "128G"        # agent may request up to 128G with `--mem 128G`
+    max_time: "1-00:00:00"    # agent may request up to 1 day with `--time …`
+    max_concurrent: 2
+    notes: |
+      Use only when cpu-small is too small. Be conservative: request the
+      cpus/mem you actually need (via --cpus/--mem), not the max — the max is
+      a ceiling, not a target. Long jobs sit in the queue longer.
+
+  gpu:
+    description: "GPU work (1 GPU default, up to 4)"
+    partition: "GPU"          # ← replace with your GPU partition
+    account: "my_allocation"
+    time: "04:00:00"
+    max_time: "08:00:00"
+    cpus: 8
+    max_cpus: 16
+    memory: "48G"
+    max_memory: "96G"
+    gpus: 1                    # default
+    max_gpus: 4              # agent may request up to 4 with `--gpus N`
+    max_concurrent: 2
+    # MODULES (optional): Lmod modules auto-loaded INSIDE the job before your
+    # command (`module load cuda/12.4 …`). Needs the site to expose the cluster
+    # module system to jobs — an admin sets these ONCE in the root-owned
+    # /etc/botainer/policy.yaml (they can't live in user config; they'd be a
+    # self-grant on a shared cluster):
+    #   mounts:
+    #     cluster_software_roots: [/opt/apps, /apps]   # example — replace with your cluster
+    #     cluster_lmod_root: /opt/apps/avx2/lmod/lmod
+    #     cluster_modulepath_roots: [/opt/apps/avx2/lmod/lmod/modulefiles]
+    # With that set, a job sees the software tree (ro) and `module` works inside.
+    # Absent `modules:` = inherit nothing (load none); [] = none; [list] = load.
+    modules: ["cuda/12.4"]     # ← replace with your cluster's module names
+    # WARM POOL (optional): auto-start N persistent caged workers for this profile
+    # at session start, so the agent's `botainer-job submit gpu --hot -- …` runs
+    # instantly (no per-task queue wait). Bounded by max_concurrent + site policy.
+    # A warm worker holds its GPU allocation while up, so keep the idle timeout
+    # short-ish; it self-releases when idle that long. Omit warm_pool_size for no
+    # auto pool (the agent can still `botainer-job pool start gpu` at runtime).
+    warm_pool_size: 2
+    warm_pool_idle_timeout: 600   # seconds; a worker exits after 10 min idle
+    notes: |
+      Be conservative with GPUs — the GPU partition is small and contended.
+      Ask for 1 GPU unless the workload is genuinely multi-GPU. This profile keeps
+      a warm pool of 2 — prefer `--hot` for many quick GPU tasks so they run
+      instantly instead of re-queuing each time.
+
+  mpi:
+    description: "Multi-node MPI job (agent may scale nodes)"
+    partition: "day"
+    account: "my_allocation"
+    time: "02:00:00"
+    cpus: 8
+    nodes: 2                   # default node count
+    max_nodes: 8            # agent may request up to 8 nodes with `--nodes N`
+    ntasks_per_node: 8        # ranks per node (8 nodes × 8 = 64 ranks at max)
+    max_concurrent: 1
+    # ── The ONE line that makes multi-node MPI actually connect ──
+    mpi: pmix                 # wire the cross-node PMIx handshake through the cage
+                              # (use "pmi2" instead if `srun --mpi=list` lacks pmix)
+    notes: |
+      Multi-node MPI. `mpi: pmix` launches each rank as a caged container under
+      `srun --mpi=pmix` and forwards the PMIx handshake through the cage, so the
+      ranks form ONE job across nodes (without it they'd each start as a lone
+      rank-0 — the classic "my MPI job only sees itself" symptom).
+
+      MPI still has to come from SOMEWHERE — the ranks need an MPI library to
+      call — but the STOCK botainer agent image now ships OpenMPI (PMIx-capable),
+      so if you built your image from the bundled recipe you are ALREADY SET:
+      leave `image:` unset (the job uses your session image) and `mpi: pmix` just
+      works. Nothing extra to build.
+
+      Only reach for these if you use a custom image WITHOUT MPI:
+        • CLUSTER MODULE (zero image work): add e.g.
+            modules: ["OpenMPI/4.1.5-GCC-12.2.0"]    # `module avail OpenMPI`
+          botainer binds the cluster software tree (ro) and loads it inside the
+          job. Best when your container base ≈ the cluster OS.
+        • DEDICATED COMPUTE SIF: build examples/mpi-compute.def and set
+            image: "/home/me/images/mpi-compute.sif"
+
+      Smoke-test: the stock image ships `mpicc`, so compile a tiny MPI hello ONCE
+      into the shared /workspace (e.g. ask the agent to write a 12-line
+      MPI_Init/rank/size/hostname `hello.c`, then `mpicc /workspace/hello.c -o
+      /workspace/hello`), and submit the binary:
+          botainer-job submit mpi -- /workspace/hello
+      Expect every rank across both nodes to report the SAME world size. If it
+      only prints "rank 0 of 1", check the image has PMIx
+      (`… ompi_info | grep -i pmix`) and the cluster offers it (`srun --mpi=list`).
+      (`examples/mpi-compute.def` bakes in a ready `mpi-hello` if you want a canned
+      test image. Fast InfiniBand is a perf add-on, not needed to connect — TCP.)
+
+  # ── Pinned hardware: reproducible benchmarking ──────────────────────────
+  # Partitions usually mix CPU generations, so two runs of the same job can
+  # land on different silicon and the timings aren't comparable. `constraint`
+  # is Slurm's `--constraint` (node features): pin the generation and the
+  # comparison holds.
+  #
+  # Find your cluster's feature names with:
+  #     sinfo -o "%20N %10c %25f"        # the %f column IS the feature list
+  #
+  # OPERATOR-FIXED. Unlike cpus/memory/gpus/time, there is no `max_constraint`
+  # and the agent cannot request one — it picks this profile BY NAME and gets
+  # exactly this hardware. That is deliberate: the value lands in an `#SBATCH`
+  # directive, and nothing agent-controlled belongs there.
+  bench-cpu:
+    description: "Fixed CPU generation — use when comparing timings across runs."
+    partition: day
+    time: "01:00:00"
+    cpus: 8
+    memory: "32G"
+    constraint: cascadelake        # e.g. icelake|cascadelake for either
+    max_concurrent: 2
+    notes: |
+      Timings from this profile are comparable to each other because every run
+      lands on the same CPU generation. Do NOT compare them against numbers
+      from `cpu`, which takes whatever the scheduler hands out.
+
+  # GPU model pinning is separate — it goes through --gres, not --constraint:
+  bench-gpu:
+    description: "Fixed GPU model — A100 only."
+    partition: gpu
+    time: "01:00:00"
+    cpus: 8
+    memory: "64G"
+    gpus: 1
+    gpu_type: a100                 # → #SBATCH --gres=gpu:a100:1
+    max_concurrent: 1
+    notes: |
+      Pinned to A100. If the A100 queue is long and you only need *a* GPU,
+      use `gpu` instead — this profile will wait for the specific model.

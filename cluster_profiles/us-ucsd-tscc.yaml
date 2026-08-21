@@ -1,0 +1,135 @@
+# UCSD TSCC (Triton Shared Computing Cluster; SDSC, campus condo/hotel model).
+# DISTINCT from SDSC Expanse (us-sdsc-expanse.yaml) — do not confuse the two.
+# https://www.sdsc.edu/systems/tscc/
+# https://www.sdsc.edu/systems/tscc/user_guide.html
+#
+# NOT RUN ON HARDWARE. Transcribed from public documentation.
+
+version: cluster-profile-v1
+
+verification:
+  status: from-public-docs
+  last_checked: "2026-07-29"
+  source: >
+    https://www.sdsc.edu/systems/tscc/ (overview, condo/hotel models);
+    https://www.sdsc.edu/systems/tscc/user_guide.html (Slurm partition table,
+    login hostname, scratch paths + 90-day purge, home quota, Lmod, GPU
+    types, apptainer bind-mount note, mandatory --account);
+    https://www.sdsc.edu/systems/tscc/hotel_details.html (hotel node types);
+    https://www.sdsc.edu/systems/tscc/condo_details.html (condo preemption:
+    "become preemptible after 8 hours (plus 30 min grace time)").
+    NOT stated anywhere fetched: per-partition max_cpus/max_memory_gb (the
+    partition table gives only name/walltime/QOS — condo hardware varies by
+    what each group purchased, so there is no single cluster-wide cap per
+    partition); any second login hostname or loginN.tscc.sdsc.edu pattern
+    (only "login.tscc.sdsc.edu" is documented); whether compute nodes have
+    outbound internet access.
+
+cluster:
+  name: us-ucsd-tscc
+  aliases: ["tscc"]   # what $SLURM_CLUSTER_NAME / $LMOD_SYSHOST report
+  hostname_patterns:
+    - "login.tscc.sdsc.edu"
+    - "*.tscc.sdsc.edu"
+    - "tscc*"
+  description: "UCSD TSCC (Triton Shared Computing Cluster; SDSC campus condo/hotel model)"
+
+lmod:
+  bootstrap: ""   # docs confirm Lmod (module/module spider/module avail) but no init path
+
+slurm:
+  scheduler: slurm
+  # `hotel` is the pay-as-you-go partition available to anyone with a hotel
+  # allocation, no purchased condo hardware required — the closest thing
+  # TSCC has to a general-access default. Every partition here bills for the
+  # cores/memory a job actually REQUESTS (see the charging formula in the
+  # user guide: cores + 0.2*memory + GPU charges, all * runtime), not a
+  # whole-node reservation, so unlike Expanse there is no `exclusive: true`
+  # partition documented here.
+  default_partition: hotel
+  default_account: ""   # Slurm submission REQUIRES --account=<allocation_name> (-A); no
+                         # default allocation name is documented or knowable in advance.
+  default_time_minutes: 240
+  partitions:
+    hotel:
+      max_time_minutes: 10080   # 7 days; QOS: hotel
+      # max_cpus/max_memory_gb: NOT stated — the partition table gives no
+      # per-partition core/memory cap, only walltime + QOS.
+    gold:
+      max_time_minutes: 20160   # 14 days; QOS: condo, hcg-<project>
+      # Named for its Xeon Gold condo nodes, but condo hardware is purchased
+      # over multiple years with different specs each round (see
+      # condo_details.html pricing table), so no single max_cpus/max_memory_gb
+      # applies cluster-wide — omitted rather than guessed.
+      preemptible: true   # via the shared `condo` QOS: "become preemptible after 8
+                           # hours (plus 30 min grace time)" once past your group's
+                           # guaranteed share. A group's own hcg-<project> QOS is
+                           # guaranteed instead, but that is allocation-specific and
+                           # not something a bundled profile can assume.
+    platinum:
+      max_time_minutes: 20160   # 14 days; QOS: condo, hcp-<project>
+      preemptible: true         # same condo-QOS preemption as gold, above.
+    hotel_gpu:
+      max_time_minutes: 2880    # 48 hours; QOS: hotel-gpu
+      gpu_types: [v100, a100, p100]   # hotel GPU server pool per hotel_details.html
+    rtx3090:
+      max_time_minutes: 10080   # 7 days; QOS: condo-gpu, hca-<project>
+      gpu_types: [rtx3090]
+      preemptible: true   # shared `condo-gpu` QOS, same 8h/30min preemption as condo above.
+    a40:
+      max_time_minutes: 10080   # 7 days; QOS: condo-gpu, hca-<project>
+      gpu_types: [a40]
+      preemptible: true
+
+scratch:
+  template: "/tscc/lustre/ddn/scratch/${USER}"
+  auto_cleanup_days: 90   # vendor: "files older than 90 days, based on the creation date, are purged"
+
+apptainer:
+  cachedir: "/tscc/lustre/ddn/scratch/${USER}/.apptainer/cache"
+  prebuilt_url: ""
+
+modules:
+  denylist: []
+  always_load: []
+
+policy:
+  refuse_network: false
+
+agent_hints:
+  preamble: |
+    You are on UCSD TSCC (Triton Shared Computing Cluster; SDSC), NOT
+    SDSC Expanse — a different machine with a different billing model.
+
+    TSCC is a condo/hotel campus cluster:
+    - `hotel` / `hotel_gpu` — pay-as-you-go, available without owning
+      hardware. `hotel_gpu` caps at 48 hours; `hotel` at 7 days.
+    - `gold` / `platinum` (CPU) and `rtx3090` / `a40` (GPU) — condo
+      partitions on group-purchased nodes. Without your own group's
+      guaranteed QOS (hcg-/hcp-/hca-<project>), jobs here run under the
+      shared `condo`/`condo-gpu` QOS and BECOME PREEMPTIBLE AFTER 8 HOURS
+      (plus 30 min grace) — expect to be killed and requeued, and
+      checkpoint accordingly.
+    - Billing is per-core/per-memory actually requested (plus GPU charges),
+      not whole-node — there is no "exclusive, bills the whole node"
+      partition documented here the way Expanse has `compute`/`gpu`.
+
+    Every job submission MUST pass `--account=<allocation_name>` (`-A`) —
+    there is no default account and Slurm will reject a job without one.
+    Find yours with `sacctmgr show assoc user=$USER format=account,user`.
+
+    Filesystems:
+    - /home/<user> — 100 GB quota. Code and configs only.
+    - /tscc/lustre/ddn/scratch/<user> — 2 PB Lustre scratch, PURGED 90 days
+      from creation date (creation-based, like Expanse's temp_project).
+    - /scratch/<user>/job_$SLURM_JOBID — node-local NVMe (200 GB-2 TB per
+      node), auto-deleted when the job ends. Good for hot I/O, not for
+      anything you need after the job.
+
+    Apptainer/Singularity: Lustre filesystems are NOT auto-mounted inside
+    containers — bind-mount them explicitly, and add `--nv` for GPU jobs.
+
+    Network egress from compute nodes is NOT documented publicly either
+    way — do not assume compute nodes can reach the internet; verify
+    before relying on it (e.g. package installs, API calls) rather than
+    discovering the answer mid-job.

@@ -1,0 +1,202 @@
+# MareNostrum 5 (Barcelona Supercomputing Center, Spain).
+# https://www.bsc.es/supportkc/docs/MareNostrum5/
+#
+# NOT RUN ON HARDWARE. Transcribed from public documentation.
+
+version: cluster-profile-v1
+
+verification:
+  status: from-public-docs
+  last_checked: "2026-07-29"
+  source: >-
+    https://www.bsc.es/supportkc/docs/MareNostrum5/slurm (GPP/ACC QoS table),
+    https://www.bsc.es/supportkc/docs/MareNostrum5/storage (filesystems, quotas),
+    https://www.bsc.es/supportkc/docs/MareNostrum5/overview (node hardware, GPU model),
+    https://www.bsc.es/supportkc/docs/MareNostrum5/environment (module system name only).
+    NOT stated on these pages: any purge/retention schedule for
+    /gpfs/scratch/<GROUP> (storage doc explicitly covers home/projects/tapes
+    retention but is silent on scratch's own policy — left unset rather
+    than guessed); compute-node internet-access policy; and container
+    runtime (Apptainer/Singularity) guidance — none of the fetched pages
+    mentioned container tooling at all. The `gp_bsc*`/`acc_bsc*` QoS family
+    (allocation-class codes tied to which national/BSC resource call a
+    project belongs to, e.g. life sciences vs computer science) is
+    documented but omitted from `slurm.partitions` below because which one
+    applies is account-specific, not a fixed system parameter — see the
+    comment there.
+
+cluster:
+  name: es-bsc-marenostrum5
+  aliases: ["marenostrum5"]   # what $SLURM_CLUSTER_NAME / $LMOD_SYSHOST report
+  hostname_patterns:
+    - "mn5*"
+    - "*.bsc.es"
+    - "glogin*"
+  description: "MareNostrum 5 (BSC): GPP (Intel Sapphire Rapids CPU) + ACC (4x NVIDIA H100 GPU per node)"
+
+lmod:
+  # Docs mention an "Environment Modules package" for the software stack
+  # but do not confirm it is Lmod specifically (vs. classic Tcl
+  # environment-modules), and give no bootstrap/init path either way.
+  bootstrap: ""
+
+slurm:
+  # GPP (General Purpose Partition, CPU-only) and ACC (Accelerated
+  # Partition, GPU) each expose several QoS names acting as the effective
+  # partition. max_cpus below is the per-node core count EXCEPT for the
+  # `*_interactive` QoS, which the docs cap below a full node's cores (32
+  # of 112 on GPP, 40 of 80 on ACC) — that throttle is intentional, not an
+  # error. NOT included: the `gp_bsc{case,cs,es,ls}` / `acc_bsc{...}` QoS
+  # family — these are allocation-class codes gating routine production
+  # work, but which suffix applies depends on the project's granted
+  # resource area, so no fixed entry would be defensible here; day-to-day
+  # allocated work typically runs under one of those, not the QoS below.
+  default_partition: gp_debug
+  default_account: ""
+  default_time_minutes: 120   # gp_debug caps at 2 h; 240 was rejected on first submit
+  partitions:
+    gp_debug:
+      max_time_minutes: 120          # 2 h, max 32 nodes
+      max_cpus: 112
+      max_memory_gb: 256
+    gp_interactive:
+      max_time_minutes: 120          # 2 h, 1 node, THROTTLED to 32 of 112 cores
+      max_cpus: 32
+      max_memory_gb: 256
+    gp_data:
+      max_time_minutes: 4320         # 72 h; GPP-Data pool (only 10 nodes total)
+      max_cpus: 112
+      max_memory_gb: 2048
+    gp_hbm:
+      max_time_minutes: 4320         # 72 h; GPP-HighMem pool (216 of 6,408 nodes)
+      max_cpus: 112
+      max_memory_gb: 1024
+    gp_ehpc:
+      max_time_minutes: 4320         # 72 h; EuroHPC-allocation QoS
+      max_cpus: 112
+      max_memory_gb: 256
+    gp_resa:
+      max_time_minutes: 4320         # 72 h; reservation-class QoS
+      max_cpus: 112
+      max_memory_gb: 256
+    gp_resb:
+      max_time_minutes: 2880         # 48 h; reservation-class QoS
+      max_cpus: 112
+      max_memory_gb: 256
+    gp_resc:
+      max_time_minutes: 1440         # 24 h; reservation-class QoS
+      max_cpus: 112
+      max_memory_gb: 256
+    gp_training:
+      max_time_minutes: 2880         # 48 h; training-course QoS
+      max_cpus: 112
+      max_memory_gb: 256
+    acc_debug:
+      max_time_minutes: 120          # 2 h, max 8 nodes
+      max_cpus: 80
+      max_memory_gb: 512
+      gpu_types: [h100]
+    acc_interactive:
+      max_time_minutes: 120          # 2 h, 1 node, THROTTLED to 40 of 80 cores
+      max_cpus: 40
+      max_memory_gb: 512
+      gpu_types: [h100]
+    acc_ehpc:
+      max_time_minutes: 4320         # 72 h; EuroHPC-allocation QoS
+      max_cpus: 80
+      max_memory_gb: 512
+      gpu_types: [h100]
+    acc_resa:
+      max_time_minutes: 4320         # 72 h; reservation-class QoS
+      max_cpus: 80
+      max_memory_gb: 512
+      gpu_types: [h100]
+    acc_resb:
+      max_time_minutes: 2880         # 48 h; reservation-class QoS
+      max_cpus: 80
+      max_memory_gb: 512
+      gpu_types: [h100]
+    acc_resc:
+      max_time_minutes: 1440         # 24 h; reservation-class QoS
+      max_cpus: 80
+      max_memory_gb: 512
+      gpu_types: [h100]
+    acc_training:
+      max_time_minutes: 2880         # 48 h; training-course QoS
+      max_cpus: 80
+      max_memory_gb: 512
+      gpu_types: [h100]
+
+scratch:
+  # /gpfs/scratch/<GROUP> is the documented shared working filesystem, but
+  # the storage page states quota policy for it and explicitly gives NO
+  # purge/retention schedule (unlike home/projects/tapes, which it does
+  # cover). A wrong guess here would either suppress a real warning or
+  # invent a false one, so this is left empty rather than filled with the
+  # real-but-unretained-per-docs path. There is also a job-local
+  # /scratch/tmp/$SLURM_JOB_ID (auto-removed at job end, not accessible
+  # from login nodes) — not a candidate for this field either, since it
+  # isn't a persistent/shared area an agent would stage work in.
+  template: ""
+  auto_cleanup_days: 0
+
+apptainer:
+  cachedir: ""
+  prebuilt_url: ""
+
+modules:
+  denylist: []
+  always_load: []
+
+policy:
+  # Not documented either way on the pages checked (no statement about
+  # compute-node internet access). Defaulting to false (no site-wide claim
+  # of a hard block was found), but the preamble says explicitly this was
+  # not confirmed, so don't assume network access is reliable without
+  # checking current docs.
+  refuse_network: false
+
+agent_hints:
+  preamble: |
+    You are on MareNostrum 5 (BSC), which has two node types: GPP (General
+    Purpose Partition — Intel Sapphire Rapids CPUs, 112 cores/node) and ACC
+    (Accelerated Partition — 80 CPU cores + 4x NVIDIA H100 64GB per node).
+
+    QoS/partition choice: `gp_debug`/`acc_debug` (2 h, small node counts) are
+    for quick testing and are the only broadly-available QoS not gated by a
+    specific allocation. `gp_interactive`/`acc_interactive` give a 2 h
+    single-node session but are THROTTLED below the node's full core count
+    (32/112 cores on GPP, 40/80 on ACC) — don't expect full-node performance
+    there. Routine production work at BSC normally runs under a
+    `gp_bsc<area>` / `acc_bsc<area>` QoS tied to the project's specific
+    granted resource area (e.g. life sciences, computer science, earth
+    sciences) — which one applies depends on the project, not the cluster,
+    so it isn't enumerated in this profile. `gp_hbm` targets the 216-node
+    high-memory pool (1 TB/node); `gp_data` targets a small 10-node
+    2 TB/node pool. GPU accounting charges 20 CPU-hours per GPU-hour used —
+    factor that into any allocation budget on ACC.
+
+    NETWORK and CONTAINERS: neither compute-node internet access nor
+    Apptainer/Singularity/container support is documented on the pages this
+    profile was built from. Do not assume `pip install` or a container
+    runtime works until you've checked current BSC docs or asked support —
+    this is a real gap in this profile, not a claim that either works or is
+    blocked.
+
+    Filesystems:
+    - /gpfs/home — personal code/data, per-user quota, incrementally backed
+      up (~1 day cadence) but backup is documented as YOUR responsibility
+      to verify, not a guarantee.
+    - /gpfs/projects/<GROUP> — shared group/project storage, per-group
+      quota, incremental backups (3-4 days cadence).
+    - /gpfs/scratch/<GROUP> — the large working area for job I/O. No purge
+      policy is documented for it (unlike the other tiers), which is NOT
+      the same as a promise of permanence — check current docs/support
+      before assuming anything here survives long-term, and don't rely on
+      this profile for a purge warning since none was found to record.
+    - /gpfs/tapes — long-term archive, 400 PB, explicitly NO backup: "the
+      user is responsible for adequately managing" what's stored there.
+    - /scratch/tmp/$SLURM_JOB_ID ($TMPDIR) — node-local, per-job, wiped when
+      the job ends; not reachable from login nodes.
+
+    Check quotas with `bsc_quota`.

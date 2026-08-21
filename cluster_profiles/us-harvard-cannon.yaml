@@ -1,0 +1,128 @@
+# Harvard FASRC Cannon.
+# https://docs.rc.fas.harvard.edu/
+#
+# NOT RUN ON HARDWARE. Transcribed from public documentation.
+
+version: cluster-profile-v1
+
+verification:
+  status: from-public-docs
+  last_checked: "2026-07-29"
+  source: "https://docs.rc.fas.harvard.edu/kb/running-jobs/ (partition table). Storage quotas and scratch retention were NOT stated on that page and are deliberately left unset."
+
+cluster:
+  name: us-harvard-cannon
+  aliases: ["cannon"]   # what $SLURM_CLUSTER_NAME / $LMOD_SYSHOST report
+  hostname_patterns:
+    - "login*.rc.fas.harvard.edu"
+    - "holylogin*.rc.fas.harvard.edu"
+    - "boslogin*.rc.fas.harvard.edu"
+    - "*.rc.fas.harvard.edu"
+  description: "Harvard FASRC Cannon (Intel Sapphire Rapids; NVIDIA A100/H200)"
+
+lmod:
+  bootstrap: ""
+
+slurm:
+  # `shared` is the sensible default: it is the partition intended for
+  # single-node work that does not need a whole 112-core machine.
+  default_partition: shared
+  default_account: ""
+  default_time_minutes: 240
+  partitions:
+    shared:
+      max_time_minutes: 4320        # 3 days
+      max_cpus: 48
+      max_memory_gb: 172
+    sapphire:
+      max_time_minutes: 4320
+      max_cpus: 112
+      max_memory_gb: 990
+    bigmem:
+      max_time_minutes: 4320
+      max_cpus: 112
+      max_memory_gb: 2000
+    bigmem_intermediate:
+      max_time_minutes: 20160       # 14 days
+      max_cpus: 64
+      max_memory_gb: 2000
+    intermediate:
+      max_time_minutes: 20160       # 14 days
+      max_cpus: 112
+      max_memory_gb: 990
+    gpu:
+      max_time_minutes: 4320
+      max_cpus: 64
+      max_memory_gb: 990
+      gpu_types: [a100]
+    gpu_h200:
+      max_time_minutes: 4320
+      max_cpus: 112
+      max_memory_gb: 990
+      gpu_types: [h200]
+    gpu_test:
+      max_time_minutes: 720         # 12 h
+      max_cpus: 64
+      max_memory_gb: 487
+      gpu_types: [a100]             # MIG slices
+    test:
+      max_time_minutes: 720         # 12 h
+      max_cpus: 112
+      max_memory_gb: 990
+    serial_requeue:
+      max_time_minutes: 4320        # PREEMPTIBLE — can be requeued any time
+    gpu_requeue:
+      max_time_minutes: 4320        # PREEMPTIBLE
+    unrestricted:
+      max_time_minutes: 525600      # 365 days
+      max_cpus: 48
+      max_memory_gb: 172
+
+scratch:
+  # NOT SET. The vendor page consulted did not state the shared scratch path
+  # or its retention period, and botainer treats an unset template as
+  # "unknown" — so no purge claim is made anywhere in the UI. That is correct
+  # behaviour: a guessed path here would either suppress a real warning or
+  # invent a false one. Fill it in from the FASRC storage docs, or let
+  # someone read it off the live system with `df -h` / the site docs.
+  template: ""
+  auto_cleanup_days: 0
+
+apptainer:
+  cachedir: "${HOME}/.apptainer/cache"
+  prebuilt_url: ""
+
+modules:
+  denylist: []
+  always_load: []
+
+policy:
+  refuse_network: false
+
+agent_hints:
+  preamble: |
+    You are on Harvard FASRC Cannon.
+
+    Partition choice, shortest useful summary:
+    - `shared` (3 d, 48 cores, 172 GB) — the normal choice for single-node work.
+    - `sapphire` (3 d, 112 cores, 990 GB) — full modern compute nodes.
+    - `intermediate` / `bigmem_intermediate` (14 d) — when you genuinely need
+      longer than three days.
+    - `bigmem` (2 TB) — only if you actually need that much memory.
+    - `gpu` (4x A100) and `gpu_h200` (4x H200), 3 d.
+    - `test` / `gpu_test` (12 h) — for debugging.
+    - `serial_requeue` / `gpu_requeue` — cheaper and usually start sooner, but
+      are PREEMPTIBLE: your job can be killed and requeued at any moment.
+      Only use them for work that checkpoints or is cheap to restart.
+    - `unrestricted` (365 d) — exists, but is rarely the right answer.
+
+    Each node also has substantial local scratch (roughly 68 GB on shared
+    nodes up to ~843 GB on the H200 nodes). Local disk is much faster than the
+    network filesystem for I/O-heavy work; stage data there during the job and
+    copy results back before it ends.
+
+    Storage: this profile does NOT record the shared scratch path or its
+    retention policy, because the documentation consulted did not state them.
+    Do not assume any directory here is either permanent or automatically
+    cleaned — check the FASRC storage documentation before putting anything
+    large or irreplaceable somewhere.

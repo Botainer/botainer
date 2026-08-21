@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <!-- botainer Track B gateway page — MINIMAL by design: no inline script
+         (CSP script-src 'self' needs no nonce), no runtime config fetch, no
+         upstream app/ UI. All behavior lives in app.js; all style in app.css.
+         Served ONLY by the local gateway broker with strict_csp() headers. -->
+    <title>botainer — agent browser viewer (trusted local gateway)</title>
+    <link rel="stylesheet" href="app.css">
+    <script type="module" src="app.js"></script>
+</head>
+<body>
+    <div id="status" class="connecting">connecting&hellip;</div>
+    <div id="screen"></div>
+</body>
+</html>

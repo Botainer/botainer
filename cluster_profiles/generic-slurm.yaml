@@ -1,0 +1,109 @@
+# Generic Slurm cluster profile.
+#
+# Use this if you're on a Slurm cluster that doesn't have a bundled
+# profile yet. After `botainer hpc setup --cluster=generic-slurm`,
+# edit ~/.botainer/cluster.yaml to fill in your cluster's specifics.
+#
+# How to find the right values:
+#
+#   Partitions:  `sinfo --summarize`
+#   Time limits: `sinfo -p <partition> -O 'time'`
+#   Accounts:    `sshare -U $USER`
+#   GPU types:   `sinfo -p gpu -o '%n %G'` (look at the Gres column)
+#   Lmod path:   `command -v module` shows which init script is loaded
+#   Scratch FS:  ask your cluster docs; common patterns are
+#                /scratch/$USER, /scratch/users/$USER, /tmp/$USER
+
+version: cluster-profile-v1
+
+
+# How much should you trust this profile? Surfaced by `botainer hpc setup`
+# and `hpc info` — absence of a claim is reported as UNVERIFIED, never as
+# tested. Re-stamp it once someone has run botainer here and checked the
+# numbers against `sinfo` / `scontrol show partition`.
+verification:
+  status: community-contributed
+  source: "generic fallback; no specific cluster"
+cluster:
+  name: generic-slurm
+  aliases: ["slurm"]   # what $SLURM_CLUSTER_NAME / $LMOD_SYSHOST report
+  # Match nothing by default; the user explicitly chose this profile.
+  # If you want autodetect, add your cluster's hostname pattern(s).
+  hostname_patterns: []
+  description: |
+    Generic Slurm cluster. After applying, edit ~/.botainer/cluster.yaml
+    to fill in your cluster's actual partitions, accounts, GPU types.
+
+lmod:
+  # Common bootstrap paths; comment out if Lmod isn't installed.
+  # Try one of these, in order:
+  #   /etc/profile.d/lmod.sh           # most common
+  #   /usr/share/lmod/lmod/init/bash
+  #   /opt/lmod/lmod/init/bash
+  bootstrap: /etc/profile.d/lmod.sh
+
+slurm:
+  # REQUIRED: set this to a partition you're allowed to submit to.
+  # Leave blank to force the user to pass --partition on every submit.
+  default_partition: ""
+  # REQUIRED on most clusters: set to your group's allocation/account.
+  default_account: ""
+  # 60 minutes is a safe interactive default; adjust for typical job
+  # length on your cluster.
+  default_time_minutes: 60
+  # Fill in your cluster's partitions here. At minimum: a CPU partition
+  # and a GPU partition if you have GPUs.
+  partitions:
+    standard:
+      max_time_minutes: 1440   # 24h; check your cluster's actual cap
+      max_cpus: 32
+      # max_memory_gb: 192     # uncomment if known
+    # gpu:
+    #   max_time_minutes: 1440
+    #   max_cpus: 16
+    #   max_memory_gb: 256
+    #   gpu_types: [a100, v100, h100]   # cluster-specific!
+
+scratch:
+  # Replace ${USER} expansion with your scratch FS layout.
+  # Some clusters use /scratch/$USER, others /scratch/users/$USER,
+  # others a more elaborate hierarchy.
+  # Was ".../${USER}/${SLURM_JOBID}" until 2026-08-03. Two faults:
+  # SLURM_JOBID is unset on a login node (where hpc setup, init and
+  # inspect run) so it never resolved and scratch silently fell back to
+  # the state root; and it is wrong in kind — botainer's /scratch is
+  # per-PROJECT and persists, so a job-scoped path would be empty every
+  # run. botainer appends the project uuid, so the final path is
+  # <this>/<uuid>; the "botainer" component keeps those uuid dirs in one
+  # place the user can identify and delete.
+  template: "/scratch/${USER}/botainer"
+  # How many days before scratch is auto-cleaned. Don't lie about
+  # this — agents may put important state here.
+  auto_cleanup_days: 30
+
+apptainer:
+  cachedir: "${HOME}/.apptainer/cache"
+  prebuilt_url: ""
+
+modules:
+  # If certain modules cause trouble (e.g., conflicting Pythons),
+  # add them here to keep the load_modules plugin from loading them.
+  denylist: []
+  # Modules that should ALWAYS load on session start. Be conservative.
+  always_load: []
+
+policy:
+  # If your cluster forbids outbound network from compute nodes
+  # (some HPCs do), set this to true. The launcher will then refuse
+  # `network.mode: internet` configs unless explicitly overridden.
+  refuse_network: false
+
+agent_hints:
+  preamble: |
+    You're running on an HPC cluster (Slurm).
+    - Working dir is on shared filesystem; expect higher latency than
+      local SSD. Use /scratch for I/O-heavy work.
+    - Wall-clock time is metered against your group's allocation. Be
+      efficient.
+    - The cluster admin's policy may forbid certain things (mining,
+      training models for commercial use, etc.). Respect it.

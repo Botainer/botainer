@@ -1,0 +1,106 @@
+# First-party plugin: nudge
+# Inject text into the agent's prompt as if you typed it. Useful for
+# poking the agent after a rate limit clears, or scheduling reminders
+# via at(1).
+#
+# Per FEATURE-PARTITION-LOCKED.md §A19: this plugin uses a HOST-side
+# `screen` session that wraps the docker/apptainer runtime call. The
+# screen session lives OUTSIDE the container; nudges are delivered via
+# `screen -S botainer-<sid> -X stuff "<text>\n"` from any shell on
+# the same host (Docker) or compute node (Apptainer+Slurm via
+# `srun --overlap` from the login node).
+#
+# TRADEOFF DOCUMENTED:
+#   screen changes the user's terminal behavior somewhat (Ctrl-A is
+#   screen's command prefix, mouse selection requires a `defmousemode`
+#   tweak). The user's window title is set to the project name so
+#   multiple sessions are visually distinct. This is the cost of
+#   getting actually-working nudges. Disable this plugin and you
+#   don't get nudge.
+#
+# Design: see plugins/nudge/README.md
+
+apiVersion: botainer-plugin-v1
+name: nudge
+version: 0.1.0
+description: |
+  screen-based input injection into a running agent session. Use
+  `botainer nudge "<text>"` from another shell to send text + Enter
+  to the agent, as if you typed it. Works on Docker (laptop) and
+  Apptainer + Slurm (HPC). Screen runs on the host outside the
+  container by project policy.
+license: Apache-2.0
+maintainer: botainer
+botainer_min_version: 0.1.0a0
+tier: first-party
+kind: policy-overlay
+trust_required: declarative
+
+runtimes:
+  - docker
+  - apptainer
+
+# Host requirement: `screen` on PATH. macOS ships built-in;
+# Linux/BSD: `apt install screen` or equivalent. The image inside
+# the container has NO screen/tmux requirement (screen is on the HOST).
+
+capabilities:
+  - mounts.extra
+
+contributes:
+  agent_hints_section: |
+    ## You may receive `nudges` from the user
+
+    This session is wrapped in a host-side `screen` session. The user
+    can inject text into your prompt from another shell using:
+
+    ```
+        botainer nudge "<their message>"
+    ```
+
+    Nudged text appears as if the user typed it followed by Enter.
+    Common nudges:
+    - `"continue"` after a rate limit clears, to ask you to resume
+    - `"switch to the test file now"` as a mid-session redirect
+    - `"go to lunch; checkpoint your work"`
+
+    Treat them as ordinary user input — there's no special syntax.
+
+  capability_summary_block: |
+    ⚠ nudge: host-side screen session (`screen -X stuff`); anyone with
+      shell access to this host can inject input into the agent's prompt.
+
+  # Per FEATURE-PARTITION-LOCKED.md §A19: no entrypoint_wrap.
+  # The host-side `screen -dmS botainer-<sid>` wrap is added by the
+  # launcher (botainer/core/composition.py launch() path) when the
+  # nudge plugin is enabled — NOT as a plugin contribution. Reason:
+  # the screen invocation lives on the HOST, not as an in-container
+  # entrypoint wrap; the plugin manifest's entrypoint_wrap slot is
+  # the wrong layer.
+
+  # No mount_target_prefixes: nudge needs nothing inside the container.
+
+hooks: []
+  # Per FEATURE-PARTITION-LOCKED.md §A19: the prior pre_session /
+  # post_session hooks (prepare_socket.py / cleanup_socket.py) were
+  # for the retired in-container tmux socket design. Host-side screen
+  # is created by the launcher in composition.launch() and torn down
+  # by the launcher in post_session. The plugin needs no hooks.
+
+config_schema:
+  type: object
+  properties:
+    show_status_line:
+      type: boolean
+      default: true
+      description: |
+        Show a status line at the bottom of the terminal with project
+        name and session ID. Helps disambiguate multiple botainer
+        sessions in different terminals.
+    log_sent_nudges:
+      type: boolean
+      default: true
+      description: |
+        Append every sent nudge to ${state_dir}/sessions/<sid>/nudges-sent.jsonl
+        for the user's audit trail.
+  additionalProperties: false

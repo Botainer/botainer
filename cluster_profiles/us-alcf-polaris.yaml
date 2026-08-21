@@ -1,0 +1,187 @@
+# ALCF Polaris (Argonne Leadership Computing Facility; DOE).
+# https://docs.alcf.anl.gov/polaris/getting-started/
+# https://docs.alcf.anl.gov/polaris/running-jobs/
+#
+# SCHEDULER: PBS Pro, NOT Slurm. Job submission is `qsub`, monitoring is
+# `qstat`/`qdel` — there is no sbatch/srun on this machine. The `slurm:`
+# key below is only this schema's structural slot for "the scheduler map";
+# every name under `partitions:` is a PBS QUEUE, not a Slurm partition.
+#
+# NOT RUN ON HARDWARE. Transcribed from public documentation — see
+# `verification` below, including what direct fetches could NOT confirm.
+
+version: cluster-profile-v1
+
+verification:
+  status: from-public-docs
+  last_checked: "2026-07-29"
+  source: >
+    Primary docs at docs.alcf.anl.gov and alcf.anl.gov returned HTTP 403 to
+    every direct-fetch attempt (including via web.archive.org and a
+    reader-proxy), so this was built from search-engine snippets of those
+    pages rather than a full page read. URLs referenced:
+    https://docs.alcf.anl.gov/polaris/getting-started/ (login hostnames,
+    module bootstrap, node spec), https://docs.alcf.anl.gov/polaris/running-jobs/
+    and https://docs.alcf.anl.gov/policies/queue-scheduling/ (queue names,
+    walltimes, submission limits), https://docs.alcf.anl.gov/polaris/containers/containers/
+    (apptainer module load + cache/tmpdir env vars),
+    https://docs.alcf.anl.gov/data-management/filesystem-and-storage/ and
+    .../disk-quota/ and https://docs.alcf.anl.gov/policies/data-and-software-policies/data-policy/
+    (filesystems, quota, purge policy), https://www.alcf.anl.gov/sites/default/files/2024-08/ALCF-Polaris-FactSheet_2024.pdf
+    and https://github.com/argonne-lcf/ALCFBeginnersGuide/blob/master/polaris/README.md
+    (node hardware, corroborating). Things the sources did NOT let me
+    confirm with confidence (see comments at point of use): current max
+    walltime for debug/debug-scaling/demand queues (only the 5-minute
+    MINIMUM is solidly documented); the exact node-count boundaries between
+    the prod queue's small/medium/large execution tiers (one source said
+    large starts at 50 nodes, another said the threshold was raised to
+    100); and the home-directory quota (one source said 50 GB, another said
+    1 TB — contradictory, so omitted rather than guessed).
+
+cluster:
+  name: us-alcf-polaris
+  aliases: ["polaris"]   # what $SLURM_CLUSTER_NAME / $LMOD_SYSHOST report
+  hostname_patterns:
+    - "polaris.alcf.anl.gov"
+    - "polaris-login-*.hsn.cm.polaris.alcf.anl.gov"
+    - "polaris-login-*"
+  description: "ALCF Polaris (HPE Apollo 6500 Gen10+; AMD EPYC Milan + NVIDIA A100)"
+
+lmod:
+  # No separate "source this init script" path documented — modules are
+  # already available at login (the NVIDIA HPC environment is loaded by
+  # default). Getting ALCF-built software requires adding a MODULEPATH
+  # entry (`module use /soft/modulefiles`), which is a runtime command, not
+  # a bootstrap script path, so it belongs in agent_hints below instead.
+  bootstrap: ""
+
+slurm:
+  # NOT Slurm — this site runs PBS. The `slurm:` key is this
+  # schema's generic scheduler-map slot (see the header). Declaring it here
+  # is what makes botainer REFUSE to submit rather than emit sbatch at a
+  # PBS cluster; the field defaults to "slurm" if omitted.
+  scheduler: pbs
+  # Every node on Polaris is the SAME hardware (no separate CPU-only / big-
+  # memory / shared-node queue like Expanse or Perlmutter have), so
+  # max_cpus/max_memory_gb/gpu_types repeat identically across queues below:
+  # 1x AMD EPYC "Milan" 7543P (32 cores / 64 threads), 512 GB DDR4,
+  # 4x NVIDIA A100 (40 GB HBM2 each) per node, all allocated as WHOLE nodes
+  # (no documented fractional/shared-node queue).
+  default_partition: prod
+  default_account: ""
+  default_time_minutes: 60          # conservative: under every ceiling found, incl. the uncertain ones
+  partitions:
+    prod:
+      # "prod" is actually a ROUTING queue: PBS auto-assigns the job to an
+      # internal execution tier by node count. Two independent search
+      # summaries agreed: small (reported as 10-24 nodes) caps at 6h,
+      # medium at 12h, large at 24h — but the exact node-count boundaries
+      # (esp. where "large" starts: 50 vs 100 nodes in different sources)
+      # could not be pinned down, so only the walltime ceiling is recorded
+      # here, as the largest tier's cap.
+      max_time_minutes: 1440        # 24h — ceiling of the largest prod tier; smaller jobs may be capped lower (6h/12h)
+      max_cpus: 32
+      max_memory_gb: 512
+      gpu_types: [a100]
+    debug:
+      # Max walltime NOT confirmed current (older material said ~1h; the
+      # only recent, clearly-dated fact found is that the MINIMUM walltime
+      # was changed to 5 minutes — that's a floor, not a ceiling, so
+      # max_time_minutes is omitted rather than guessed). Only 1 job at a
+      # time may be queued/running here per user (submission limit, not a
+      # schema field).
+      max_cpus: 32
+      max_memory_gb: 512
+      gpu_types: [a100]
+    debug-scaling:
+      # Separate queue for scaling/multi-node debug runs; no max walltime
+      # found in the sources available.
+      max_cpus: 32
+      max_memory_gb: 512
+      gpu_types: [a100]
+    preemptable:
+      max_time_minutes: 4320        # 72h, per ALCF facility-update material
+      max_cpus: 32
+      max_memory_gb: 512
+      gpu_types: [a100]
+    demand:
+      # On-demand/priority queue: jobs here PREEMPT (kill without warning)
+      # jobs in `preemptable`. No walltime or charge-multiplier figure was
+      # found in the sources available, so max_time_minutes is omitted.
+      max_cpus: 32
+      max_memory_gb: 512
+      gpu_types: [a100]
+
+scratch:
+  # No documented SHARED, rolling-purged scratch filesystem (the
+  # NERSC/Expanse sense of "old files get swept after N days"). Polaris has
+  # two documented storage classes and neither matches:
+  #   - /local/scratch/ — per-node local SSD (1.6 TB RAID0), NOT shared
+  #     across nodes and not persistent past the job.
+  #   - /lus/eagle/projects/<project> and /lus/grand/projects/<project> —
+  #     shared Lustre project space, but its documented purge trigger is
+  #     "~6 months after PROJECT completion" (tied to the allocation
+  #     lifecycle), not a fixed per-file-age purge. Treating that as
+  #     auto_cleanup_days would misrepresent a variable, allocation-tied
+  #     event as a fixed daily countdown.
+  template: ""
+  auto_cleanup_days: 0              # see comment above — no rolling-purge scratch documented
+
+apptainer:
+  # Documented in the "Containers on Polaris" guide: BASE_SCRATCH_DIR=/local/scratch/,
+  # APPTAINER_CACHEDIR=$BASE_SCRATCH_DIR/apptainer-cachedir. This is the
+  # same per-node local SSD noted above — fine for a build/pull cache, but
+  # it does NOT persist across jobs or nodes.
+  cachedir: "/local/scratch/apptainer-cachedir"
+  prebuilt_url: ""
+
+modules:
+  denylist: []
+  always_load: []
+
+policy:
+  refuse_network: false
+
+agent_hints:
+  preamble: |
+    You are on ALCF Polaris (DOE, Argonne National Laboratory).
+
+    SCHEDULER: this is PBS Pro, NOT Slurm. Submit with `qsub`, check status
+    with `qstat`, cancel with `qdel`. There is no sbatch/srun here — do not
+    try it.
+
+    Queues (PBS): `prod` is the standard production queue and is actually a
+    router — PBS assigns your job to an internal small/medium/large tier by
+    node count, with walltime ceilings that get shorter for smaller node
+    counts (up to 24h for the largest tier; smaller jobs may be capped at
+    6-12h). `debug` and `debug-scaling` are for short interactive/scaling
+    tests (only 1 job at a time allowed in `debug` per user). `preemptable`
+    allows longer runs (up to ~72h) at lower priority/cost but jobs there
+    can be KILLED WITHOUT WARNING if `demand`-queue jobs need the nodes.
+    `demand` is a priority queue that does that preempting. Every queue
+    allocates WHOLE nodes — there is no shared/fractional-node queue here:
+    each node is 1x AMD EPYC "Milan" CPU (32 cores/64 threads), 512 GB RAM,
+    and 4x NVIDIA A100 GPUs (40 GB HBM2 each).
+
+    Modules: the NVIDIA HPC environment is loaded by default at login.
+    ALCF-built software needs an extra MODULEPATH entry first:
+    `module use /soft/modulefiles` (or `export MODULEPATH=$MODULEPATH:/soft/modulefiles`),
+    then `module load <name>`. For Apptainer specifically:
+    `module use /soft/modulefiles && module load spack-pe-base && module load apptainer`.
+
+    Filesystems:
+    - /home/<user> — small quota (documented amount is inconsistent across
+      sources; check `myquota` rather than assuming a number).
+    - /lus/eagle/projects/<project> or /lus/grand/projects/<project> — the
+      large shared Lustre project space; durable for the life of the
+      allocation (purged roughly 6 months after the PROJECT ends, not on a
+      rolling per-file basis). Quota is per-project, shared by everyone on
+      the project, not per-user.
+    - /local/scratch/ — per-node local SSD (1.6 TB), fast, but NOT shared
+      across nodes and gone at job end. Good for staging hot I/O and for
+      Apptainer's build cache/tmpdir; copy anything you need back to /lus
+      before the job ends.
+
+    Network: compute nodes are NOT open to the internet directly — set
+    `HTTP_PROXY`/`HTTPS_PROXY` (and lowercase variants) to
+    `http://proxy.alcf.anl.gov:3128` to reach it at all.

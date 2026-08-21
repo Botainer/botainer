@@ -1,0 +1,43 @@
+# Daily-dev config — convenient defaults for everyday coding.
+#
+# Features:
+# - Internet enabled (so the agent can pip/npm install)
+# - nudge enabled (poke the agent from another shell)
+# - web-ports forwards Jupyter (8888) and Gradio (7860)
+#
+# Trade-offs:
+# - Internet mode = agent can exfiltrate data via HTTP. Lock down for
+#   sensitive work with `secure.yaml` instead.
+# - nudge wraps the agent in screen, which changes terminal copy/paste.
+
+version: config-v1
+
+agent: claude
+runtime: auto
+
+network:
+  mode: internet
+
+resources:
+  cpu: null
+  memory_mb: null
+
+caps:
+  kernel:
+    keep: []
+
+env: {}
+
+plugins_enabled:
+  - agent-claude
+  - git
+  - nudge
+  - web-ports
+
+plugins:
+  git:
+    mode: guarded
+  web-ports:
+    ports:
+      - 8888                # Jupyter Lab
+      - {container: 7860, host: 7860, label: "gradio"}

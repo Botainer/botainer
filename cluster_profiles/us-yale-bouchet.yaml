@@ -1,0 +1,195 @@
+# Yale Bouchet cluster profile.
+# https://docs.ycrc.yale.edu/clusters/bouchet/
+#
+# Bouchet (named for Edward Bouchet, the first self-identified African American
+# to earn a doctorate from an American university — PhD in physics, Yale 1876)
+# is YCRC's newest cluster: production since 2025-01, open to all Yale
+# researchers since 2025-07. It is the planned SUCCESSOR to Grace and McCleary,
+# deployed at MGHPCC (Massachusetts Green High Performance Computing Center).
+#
+# Edit `~/.botainer/cluster.yaml` to override anything here for your
+# personal preferences (e.g. default account).
+#
+# last verified: 2026-06-13 against https://docs.ycrc.yale.edu/clusters/bouchet/
+# and bouchet_getting_started. Two values could NOT be verified from the public
+# docs and require a Yale user with shell access to confirm:
+#   - lmod.bootstrap        : the absolute path to Lmod's `init/bash` on Bouchet
+#                             (autodetect is left to fall through to
+#                             `_detect_bootstrap` in plugins/hpc-modules at
+#                             v0.1; set explicitly in your ~/.botainer/cluster.yaml
+#                             once you find it via `echo $LMOD_PKG/init/bash`).
+#   - apptainer availability: whether apptainer lives on the LOGIN node or only
+#                             on COMPUTE nodes. Follow the install-hpc.sh login
+#                             flow (auto-defers the image build on login nodes).
+
+version: cluster-profile-v1
+
+
+# How much should you trust this profile? Surfaced by `botainer hpc setup`
+# and `hpc info` — absence of a claim is reported as UNVERIFIED, never as
+# tested. Re-stamp it once someone has run botainer here and checked the
+# numbers against `sinfo` / `scontrol show partition`.
+verification:
+  status: from-public-docs
+  last_checked: "2026-06-13"
+  source: "https://docs.ycrc.yale.edu/clusters/bouchet/"
+cluster:
+  name: us-yale-bouchet
+  aliases: ["bouchet"]   # what $SLURM_CLUSTER_NAME / $LMOD_SYSHOST report
+  hostname_patterns:
+    - "bouchet*.ycrc.yale.edu"
+    - "bouchet-login*"
+    - "*.bouchet.cluster.yale.edu"
+  description: "Yale Bouchet HPC cluster (YCRC at MGHPCC; successor to Grace/McCleary)"
+
+lmod:
+  # NOT verified from public docs; auto-detect falls back to scanning
+  # canonical locations. Set this in ~/.botainer/cluster.yaml if your
+  # site uses a non-standard path:
+  #     lmod:
+  #       bootstrap: /path/to/lmod/init/bash
+  bootstrap: ""
+
+slurm:
+  # `scavenge` is the documented preemptible no-charge partition (matches the
+  # Grace pattern). Override per-project with `plugins.hpc-launcher.partition`.
+  default_partition: scavenge
+  # ⚠ EMPTY by design: Bouchet (like every YCRC cluster) requires a per-user
+  # group account `pi_<your-PI-netid>`. Find it with:
+  #     sacctmgr -nP show assoc user=$USER format=account
+  # then set it with:
+  #     botainer config set plugins.hpc-launcher.account pi_<group>
+  # (Future enhancement, cluster-ease roadmap B1+A3+C1: `hpc setup` prompts /
+  # probes for this so first-submit doesn't fail with "missing account".)
+  default_account: ""
+  default_time_minutes: 240
+  partitions:
+    # Time caps verified from docs (D-HH:MM:SS → minutes); CPU + memory caps
+    # are the per-USER caps documented at /clusters/bouchet/ — informational,
+    # not enforced by botainer at v0.1.
+    scavenge:
+      max_time_minutes: 1440        # 1d, preemptible, no charge
+    scavenge_gpu:
+      max_time_minutes: 1440        # 1d, preemptible GPU
+      gpu_types: [h200, rtx_5000_ada, l40s]
+    devel:
+      max_time_minutes: 360         # 6h, interactive
+      max_cpus: 4
+      max_memory_gb: 60
+    day:
+      max_time_minutes: 1440        # 1d, charged
+      max_cpus: 768
+      max_memory_gb: 11520
+    day_amd:
+      max_time_minutes: 1440        # 1d, AMD nodes
+      max_cpus: 768
+      max_memory_gb: 11520
+    week:
+      max_time_minutes: 10080       # 7d, long jobs
+      max_cpus: 64
+      max_memory_gb: 1024
+    bigmem:
+      max_time_minutes: 1440        # 1d, large memory
+      max_cpus: 128
+      max_memory_gb: 8000
+    mpi:
+      max_time_minutes: 2880        # 2d, tightly-coupled MPI (Bouchet's
+                                    # main differentiator vs other YCRC clusters)
+    gpu:
+      max_time_minutes: 2880        # 2d
+      gpu_types: [rtx_5000_ada]
+    gpu_rtx6000:
+      max_time_minutes: 2880        # 2d
+      gpu_types: [rtx_pro_6000_blackwell]
+    gpu_h200:
+      max_time_minutes: 2880        # 2d
+      gpu_types: [h200]
+    gpu_b200:
+      max_time_minutes: 2880        # 2d
+      gpu_types: [b200]
+    gpu_devel:
+      max_time_minutes: 360         # 6h, interactive GPU
+      max_memory_gb: 120
+      gpu_types: [h200, rtx_5000_ada]
+
+scratch:
+  # Cluster scratch is per-GROUP at `/nfs/roberts/scratch/<group>/`; the
+  # documented user-facing shortcut is `~/scratch_pi_<netid>`. We use the
+  # group-agnostic NFS root + $USER as an illustrative template — adjust to
+  # `~/scratch_pi_<your-pi-netid>` in your ~/.botainer/cluster.yaml once you
+  # know your PI group. (Display-only at v0.1 — informs the MY_BOTAINER hint
+  # at setup; the actual /scratch bind is from the state-dir subtree.)
+  # Was ".../${USER}/${SLURM_JOBID}" until 2026-08-03. Two faults:
+  # SLURM_JOBID is unset on a login node (where hpc setup, init and
+  # inspect run) so it never resolved and scratch silently fell back to
+  # the state root; and it is wrong in kind — botainer's /scratch is
+  # per-PROJECT and persists, so a job-scoped path would be empty every
+  # run. botainer appends the project uuid, so the final path is
+  # <this>/<uuid>; the "botainer" component keeps those uuid dirs in one
+  # place the user can identify and delete.
+  template: "/nfs/roberts/scratch/${USER}/botainer"
+  auto_cleanup_days: 60             # YCRC purges scratch after 60 days
+
+apptainer:
+  cachedir: "${HOME}/.apptainer/cache"
+  prebuilt_url: ""                  # display-only at v0.1 (roadmap B5)
+
+modules:
+  denylist: []
+  always_load: []
+
+policy:
+  refuse_network: false
+
+agent_hints:
+  preamble: |
+    You're running on Yale Bouchet HPC (YCRC at MGHPCC). Bouchet is YCRC's
+    newest cluster and the planned successor to Grace and McCleary; H200/B200
+    GPUs live here. The user is on this cluster because the laptop wouldn't cut
+    it — typically big data, GPU, MPI, or long-running jobs. Tailor accordingly.
+
+    Filesystems and quotas (all under /nfs/roberts/):
+    - /nfs/roberts/home — 125 GiB per user. Code + small configs only.
+      Don't put data, conda envs, or model weights here.
+    - /nfs/roberts/project — 4 TiB per GROUP. Long-lived data, shared
+      datasets, code repos. User-facing shortcut: ~/project_pi_<your-pi-netid>.
+    - /nfs/roberts/scratch — 10 TiB per group, AUTO-PURGED after ~60 days
+      of no access. The right place for outputs, intermediate files, working
+      copies. User-facing shortcut: ~/scratch_pi_<your-pi-netid>.
+    - $SLURM_TMPDIR (compute-node-local) — fastest, but DISAPPEARS at job
+      end. Stage hot data there at the start of a job, copy results back
+      to scratch before exit.
+
+    Slurm / job submission:
+    - The account is `pi_<your-PI-netid>` (find yours:
+      `sacctmgr -nP show assoc user=$USER format=account`). On Bouchet your
+      PRIMARY group is your NetID and `pi_<netid>` is a SECONDARY group
+      (different from Grace/McCleary). Set the submit account with
+      `botainer config set plugins.hpc-launcher.account pi_<group>`.
+    - Partitions worth knowing:
+        scavenge / scavenge_gpu — preemptible, no charge, 1-day max.
+            Right default for risk-tolerant work.
+        devel / gpu_devel — interactive, 6h max. Use `salloc -p devel`.
+        day, day_amd — 1-day charged, big CPU/memory caps.
+        week — 7-day, narrower (64 cpus / 1 TB RAM).
+        bigmem — up to 8 TB memory.
+        mpi — tightly-coupled parallel; Bouchet's main differentiator.
+        gpu / gpu_rtx6000 / gpu_h200 / gpu_b200 — different GPU SKUs;
+            H200 and B200 are the newest, RTX 5000 Ada / RTX PRO 6000
+            Blackwell are alternatives.
+    - For MANY independent tasks (parameter sweeps, per-file processing),
+      prefer a **dSQ job array** (`dsq --job-file commands.txt`) over N
+      separate `hpc submit`s.
+
+    Network and credentials:
+    - Network is unrestricted on Bouchet compute nodes — `pip install`,
+      `git clone`, API calls all work directly.
+    - For interactive/GUI work (Jupyter, RStudio), YCRC provides Open
+      OnDemand at https://ood-bouchet.ycrc.yale.edu — the cluster's blessed
+      path for browser-based work.
+
+    Misc:
+    - Use `module avail` to discover software; `module spider <name>` to find
+      load lines. The hpc-modules plugin captures whatever you load on the host
+      into the container env.
+    - Documentation: https://docs.ycrc.yale.edu/clusters/bouchet/

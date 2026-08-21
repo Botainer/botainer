@@ -1,0 +1,161 @@
+"""Every hook a plugin declares must actually be runnable.
+
+Observed on a Slurm cluster,:
+
+    $ botainer start --agent codex
+    refused: plugin-hook-failed: hook script not executable:
+        .../plugins/agent-codex-broker/hooks/start_broker.py
+
+Three hook scripts were committed without the executable bit —
+agent-codex-broker's start_broker.py and stop_broker.py, and
+agent-codex-shared's login.py. agent-claude-broker's equivalents had it, so
+CODEX BROKER MODE HAD NEVER WORKED ANYWHERE, on any platform, since the day it
+was written. Nothing noticed, because no test ever tried to run a hook and the
+mode only became reachable when `auth use broker` started offering it.
+
+WHY THIS TEST EXISTS RATHER THAN JUST A CHMOD. This was the third mechanical
+defect in one day that the user discovered by running the real product on a real
+cluster — after the login container's missing --entrypoint and the .def's
+missing /packages routing. Each cost a round trip: run, fail, paste, fix,
+rebuild, run again. The defects were all statically checkable and none of them
+were statically checked.
+
+So the class gets swept here instead of one at a time:
+
+  - the file a manifest names must EXIST      (typo / rename / never written)
+  - it must be EXECUTABLE                     (the Grace failure)
+  - it must have a SHEBANG                    (exec'd directly, so no shebang
+                                               means exec fails or, worse,
+                                               runs under whatever /bin/sh is)
+  - it must not be EMPTY                      (a placeholder that passes every
+                                               other check)
+
+Checked against the MANIFEST rather than a glob, because what matters is what
+the launcher will try to run — a stray .py in hooks/ that nothing declares is
+not a failure, and a declared script that does not exist very much is.
+"""
+from __future__ import annotations
+
+import os
+from fnmatch import fnmatch
+from pathlib import Path
+
+import pytest
+import yaml
+
+_REPO = Path(__file__).resolve().parents[2]
+_PLUGINS = _REPO / "plugins"
+
+
+def _declared_hooks() -> list[tuple[str, str, Path]]:
+    """(plugin, when, absolute script path) for every hook every plugin declares."""
+    out: list[tuple[str, str, Path]] = []
+    for manifest in sorted(_PLUGINS.glob("*/botainer-plugin.yaml")):
+        try:
+            data = yaml.safe_load(manifest.read_text()) or {}
+        except yaml.YAMLError as exc:                      # pragma: no cover
+            pytest.fail(f"{manifest}: unparseable manifest: {exc}")
+        for hook in data.get("hooks") or []:
+            script = hook.get("script")
+            if not script:
+                continue
+            out.append((manifest.parent.name, hook.get("when", "?"),
+                        manifest.parent / script))
+    return out
+
+
+HOOKS = _declared_hooks()
+
+
+def test_there_are_hooks_to_check() -> None:
+    """Guard the guard: if the manifest schema changes shape, every test below
+    would silently pass over an empty list and prove nothing."""
+    assert len(HOOKS) > 10, f"only found {len(HOOKS)} declared hooks — parser broken?"
+
+
+@pytest.mark.parametrize("plugin,when,script", HOOKS,
+                         ids=[f"{p}:{w}" for p, w, _ in HOOKS])
+def test_declared_hook_exists(plugin, when, script) -> None:
+    assert script.is_file(), (
+        f"{plugin} declares {when} -> {script.name}, which does not exist. "
+        f"The launcher refuses at session start, after the user has already "
+        f"configured everything.")
+
+
+def _git_modes() -> dict[str, str]:
+    """Mode bits as GIT records them, which is what reaches another machine."""
+    import subprocess
+    out = subprocess.run(["git", "ls-files", "-s", "plugins/"],
+                         cwd=_REPO, capture_output=True, text=True, check=True)
+    modes: dict[str, str] = {}
+    for line in out.stdout.splitlines():
+        meta, _, path = line.partition("\t")
+        modes[path] = meta.split()[0]
+    return modes
+
+
+GIT_MODES = _git_modes()
+
+
+@pytest.mark.parametrize("plugin,when,script", HOOKS,
+                         ids=[f"{p}:{w}" for p, w, _ in HOOKS])
+def test_declared_hook_is_executable_IN_GIT(plugin, when, script) -> None:
+    """THE Grace regression — asserted on the git index, not the filesystem.
+
+    The launcher execs hook scripts directly, so a missing +x is a hard refusal
+    at session start. It survives commit, review and the whole suite, because
+    nothing else ever tries to run them.
+
+    ASSERTED VIA GIT ON PURPOSE. The obvious check, `os.access(script, X_OK)`,
+    is WORTHLESS in this dev container: the bind mount reports mode 644 and
+    still answers True to X_OK. So a filesystem check passes here and fails on
+    Grace — the exact platform-divergent blindness that let this ship. The git
+    index mode is what a clone or `rsync -a` actually carries to the cluster,
+    which makes it the thing worth asserting.
+    """
+    rel = str(script.relative_to(_REPO))
+    mode = GIT_MODES.get(rel)
+    assert mode is not None, f"{rel} is not tracked by git; it cannot deploy"
+    assert mode == "100755", (
+        f"{plugin}'s {when} hook is mode {mode} in git (needs 100755): {rel}\n"
+        f"    fix: chmod +x {rel} && git update-index --chmod=+x {rel}\n"
+        f"This is what refused `start --agent codex` on Grace. codex broker "
+        f"mode had never worked on any platform since the day it was written, "
+        f"because its two hooks shipped non-executable and nothing ran them.")
+
+
+@pytest.mark.parametrize("plugin,when,script", HOOKS,
+                         ids=[f"{p}:{w}" for p, w, _ in HOOKS])
+def test_declared_hook_has_a_shebang(plugin, when, script) -> None:
+    """Executed directly, so the kernel needs a shebang to pick an interpreter.
+
+    Without one the exec either fails outright or — worse on some systems —
+    the file is handed to /bin/sh, which will run a python script as shell
+    until it hits something that happens to be a valid command.
+    """
+    first = script.read_bytes().split(b"\n", 1)[0]
+    assert first.startswith(b"#!"), (
+        f"{plugin}'s {when} hook has no shebang (starts {first[:40]!r}); it is "
+        f"exec'd directly, not passed to an interpreter.")
+    assert b"python" in first, (
+        f"{plugin}'s {when} hook shebang is {first!r}; every hook here is "
+        f"python.")
+
+
+@pytest.mark.parametrize("plugin,when,script", HOOKS,
+                         ids=[f"{p}:{w}" for p, w, _ in HOOKS])
+def test_declared_hook_is_not_a_stub(plugin, when, script) -> None:
+    """A file that exists, is executable, and does nothing passes every check
+    above while failing in the only way that matters."""
+    body = [ln for ln in script.read_text().splitlines()[1:]
+            if ln.strip() and not ln.strip().startswith("#")]
+    assert len(body) > 3, (
+        f"{plugin}'s {when} hook has {len(body)} substantive lines — a stub?")
+
+
+# ── the review gate must SEE every hook ──
+
+# test_every_hook_file_is_on_the_security_surface moved to a maintainer-side
+# suite that does not ship: it reads tools/dev/security-surface-files.txt,
+# absent from every distribution, so here it made the EXPORTED tree fail its
+# own suite.

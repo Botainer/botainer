@@ -1,0 +1,113 @@
+# SDSC Expanse (San Diego Supercomputer Center; NSF ACCESS).
+# https://www.sdsc.edu/systems/expanse/user_guide.html
+#
+# NOT RUN ON HARDWARE. Transcribed from public documentation.
+
+version: cluster-profile-v1
+
+verification:
+  status: from-public-docs
+  last_checked: "2026-07-29"
+  source: "https://www.sdsc.edu/systems/expanse/user_guide.html (partition table, 90-day scratch purge, 100 GB home)"
+
+cluster:
+  name: us-sdsc-expanse
+  aliases: ["expanse"]   # what $SLURM_CLUSTER_NAME / $LMOD_SYSHOST report
+  hostname_patterns:
+    - "login*.expanse.sdsc.edu"
+    - "expanse*"
+    # NOT a bare "exp-*": four characters of prefix is not a site name, and it
+    # would match unrelated hosts. Compute nodes are covered by the domain.
+    - "*.expanse.sdsc.edu"
+  description: "SDSC Expanse (AMD EPYC 7742; NVIDIA V100 and H100)"
+
+lmod:
+  bootstrap: ""
+
+slurm:
+  # Expanse distinguishes exclusive from shared partitions, and picking the
+  # wrong one is the most expensive mistake here: `compute` allocates a WHOLE
+  # 128-core node and charges for it. `shared` is right for anything
+  # single-node and smaller, which is most agent work.
+  default_partition: shared
+  default_account: ""
+  default_time_minutes: 240
+  partitions:
+    compute:
+      max_time_minutes: 2880        # 48 h — EXCLUSIVE, charges the full node
+      max_cpus: 128
+      max_memory_gb: 256
+    shared:
+      max_time_minutes: 2880
+      max_cpus: 128
+      max_memory_gb: 256
+    gpu:
+      max_time_minutes: 2880        # exclusive: all 4 GPUs
+      max_cpus: 40
+      max_memory_gb: 384
+      gpu_types: [v100]
+    gpu-shared:
+      max_time_minutes: 2880        # fewer than 4 GPUs
+      max_cpus: 40
+      max_memory_gb: 384
+      gpu_types: [v100]
+    large-shared:
+      max_time_minutes: 2880
+      max_cpus: 128
+      max_memory_gb: 2048
+    debug:
+      max_time_minutes: 30
+      max_cpus: 128
+      max_memory_gb: 256
+    gpu-debug:
+      max_time_minutes: 30
+      max_cpus: 40
+      max_memory_gb: 384
+      gpu_types: [v100]
+    nairr-gpu:
+      max_time_minutes: 2880
+      max_cpus: 72
+      max_memory_gb: 1024
+      gpu_types: [h100]
+    nairr-gpu-shared:
+      max_time_minutes: 2880
+      max_cpus: 72
+      max_memory_gb: 1024
+      gpu_types: [h100]
+
+scratch:
+  template: "/expanse/lustre/scratch/${USER}/temp_project"
+  auto_cleanup_days: 90             # vendor: "90 days from creation date"
+
+apptainer:
+  cachedir: "/expanse/lustre/scratch/${USER}/temp_project/.apptainer/cache"
+  prebuilt_url: ""
+
+modules:
+  denylist: []
+  always_load: []
+
+policy:
+  refuse_network: false
+
+agent_hints:
+  preamble: |
+    You are on SDSC Expanse (NSF ACCESS allocation).
+
+    Choose the partition carefully — this is where allocations get burned.
+    `compute` and `gpu` are EXCLUSIVE: they allocate an entire node (128
+    cores, or all 4 GPUs) and charge for all of it even if you use one core.
+    For anything single-node, use `shared` or `gpu-shared` and request only
+    what you need. `debug` and `gpu-debug` cap at 30 minutes.
+
+    Everything tops out at 48 hours except the debug partitions.
+
+    Filesystems:
+    - /home/<user> — 100 GB quota. Code and configs.
+    - /expanse/lustre/scratch/<user>/temp_project — the large working area,
+      PURGED 90 days from creation date. Note it is creation-based, so a file
+      you keep touching still expires.
+    - /expanse/lustre/projects/<allocation> — durable project space; put
+      anything you cannot regenerate here.
+    - Node-local NVMe is available and is much faster for I/O-heavy work;
+      stage hot data there at job start and copy results back before exit.

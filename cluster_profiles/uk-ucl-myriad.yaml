@@ -1,0 +1,244 @@
+# =============================================================================
+# UCL MYRIAD USES GRID ENGINE (SGE — Sun/Univa/Altair Grid Engine derivative),
+# ****NOT SLURM****.
+#
+# Submission commands are `qsub` / `qstat` / `qdel` / `qrsh` — there is
+# NO `sbatch`, `squeue`, `sinfo`, or `srun` on this cluster. If you see
+# generated scripts or hints using Slurm commands for this profile, that is
+# a bug: fix the adapter, don't trust the output.
+#
+# The `slurm:` section below is NOT a claim that Myriad runs Slurm — it is
+# this schema's fixed key name (botainer/state/cluster_profile.py reads
+# `d["slurm"]` unconditionally regardless of scheduler). Myriad's real Grid
+# Engine node-type/resource data has been mapped into that key's fields,
+# with "partition" read as "node-type resource class" (see comments below —
+# Myriad has no named `-q` queue that users select; node type is chosen by
+# resource request flags: `-l gpu=`, `-ac allow=`, `-l mem=`, `-pe smp`).
+# =============================================================================
+#
+# UCL Myriad (UCL Research Computing, general-purpose HPC cluster).
+# Canonical docs fetched 2026-07-29:
+#   https://www.rc.ucl.ac.uk/docs/Clusters/Myriad
+#   https://www.rc.ucl.ac.uk/docs/Supplementary/GPU_Nodes
+#   https://www.rc.ucl.ac.uk/docs/Software_Guides/Singularity
+#   https://www.rc.ucl.ac.uk/docs/Experienced_Users
+#   https://www.rc.ucl.ac.uk/docs/howto
+#   https://www.rc.ucl.ac.uk/docs/Interactive_Jobs
+#   https://www.rc.ucl.ac.uk/docs/Paid-For_Resources/Purchasing_in_Myriad
+#
+# NOT RUN ON HARDWARE. Transcribed from public documentation only.
+
+version: cluster-profile-v1
+
+verification:
+  status: from-public-docs
+  last_checked: "2026-07-29"
+  source: >-
+    https://www.rc.ucl.ac.uk/docs/Clusters/Myriad (node-type table, per-core-count
+    walltime limits, home/scratch quota, login hostnames, GPU node specs,
+    "-ac allow=" node-type flags);
+    https://www.rc.ucl.ac.uk/docs/Supplementary/GPU_Nodes (GPU request syntax,
+    defers to the Myriad page for hardware specifics);
+    https://www.rc.ucl.ac.uk/docs/Software_Guides/Singularity (module name is
+    "apptainer", "singularity" kept as a compat symlink, $HOME auto-bound into
+    containers);
+    https://www.rc.ucl.ac.uk/docs/Experienced_Users (qsub/qstat/qdel/qrsh,
+    generic "module" command, tmpfs request flag);
+    https://www.rc.ucl.ac.uk/docs/howto (data-transfer methods, outbound FTP
+    via the inetutils module, quota-check commands);
+    https://www.rc.ucl.ac.uk/docs/Interactive_Jobs (qrsh examples; confirms
+    there is no named "-q" queue flag in any example);
+    https://www.rc.ucl.ac.uk/docs/Paid-For_Resources/Purchasing_in_Myriad
+    (purchased priority/dedicated nodes exist; no project/account code shown
+    as required for standard jobs).
+    NOT stated by any of these pages, so left unset/false below rather than
+    guessed: an automatic scratch-purge policy or day-count (home doubles as
+    scratch and is quota-enforced only — no deletion policy was found);
+    whether compute nodes have restricted/no outbound internet (no firewall
+    statement found in either direction — the howto page's "connect out to an
+    FTP server" entry is weak positive evidence of some outbound path, not a
+    confirmation for arbitrary egress); whether the module system is
+    specifically Lmod (docs consistently say just "the module command",
+    never "Lmod").
+
+cluster:
+  name: myriad
+  hostname_patterns:
+    - "login*.myriad.rc.ucl.ac.uk"
+    - "myriad.rc.ucl.ac.uk"
+    - "*.myriad.rc.ucl.ac.uk"   # broadest; the two above are for clarity/docs
+  description: >-
+    UCL Myriad — general-purpose Grid Engine (SGE) HPC cluster at UCL
+    Research Computing. 36-core Skylake nodes (some high-memory), plus
+    V100 and A100 (40G/80G) GPU nodes. NOT Slurm — see the header comment.
+
+lmod:
+  # UCL RC's docs only ever say "the module command" / "environment
+  # modules" — never "Lmod" by name, and no init/bootstrap script path is
+  # published. Per the no-guessing rule: for this file: undocumented means
+  # leave blank, not guess a common default.
+  bootstrap: ""
+
+slurm:
+  # NOT Slurm — this site runs SGE. The `slurm:` key is this
+  # schema's generic scheduler-map slot (see the header). Declaring it here
+  # is what makes botainer REFUSE to submit rather than emit sbatch at a
+  # SGE cluster; the field defaults to "slurm" if omitted.
+  scheduler: sge
+  # Myriad has NO named Grid Engine queue that users select with "-q" — the
+  # Interactive_Jobs examples confirm this (no "-q" flag appears anywhere).
+  # Node type is instead chosen by the resource request itself: core count,
+  # `-l mem=`, `-l gpu=`, and `-ac allow=<letters>` for GPU node type. So
+  # there is no real queue name to default to.
+  default_partition: ""
+  # Always blank: accounts/allocations are per-user, never checked into a
+  # shared profile. (Also: no docs page found that shows a project/account
+  # code being required for a standard Myriad job.)
+  default_account: ""
+  # Conservative interactive default: comfortably under BOTH walltime
+  # ceilings below (72h single-core / 48h multi-core), so it never gets
+  # rejected regardless of how many cores the job ends up requesting.
+  default_time_minutes: 60
+  # NOTE on the table below: Myriad's actual wallclock rule is keyed by CORE
+  # COUNT, not by node type: 1 core -> 72h; >1 core -> 48h (this applies
+  # even on the T-type 64-core and U/V-type 48-core nodes). The schema only
+  # has one max_time_minutes per entry, so each entry below uses 48h (2880),
+  # the binding limit for any multi-core job — the realistic case for
+  # agent work. A single-core job can in fact run up to 72h (4320); that's
+  # a *more* generous ceiling than stated here, never a violated one.
+  partitions:
+    general:
+      # D-type nodes: standard compute, no GPU. 342 nodes — the bulk of
+      # the cluster, so this is the node type with the shortest queue wait.
+      max_time_minutes: 2880
+      max_cpus: 36
+      max_memory_gb: 160   # docs: "160GB (or 36 cores at 4.4G per core)" usable
+    highmem:
+      # I,B-type nodes: same 36 cores, much more RAM. Only 17 nodes.
+      max_time_minutes: 2880
+      max_cpus: 36
+      max_memory_gb: 1483   # docs: "1483GB (or 36 cores at 41.1G per core)" usable
+    himem-t:
+      # T-type nodes: 64 cores, no GPU. Only 6 nodes.
+      max_time_minutes: 2880
+      max_cpus: 64
+      max_memory_gb: 755   # docs: "755GB (or 64 cores at 11.7G per core)" usable
+    gpu-v100:
+      # E,F-type nodes: request with `#$ -ac allow=EF`. 2x V100 per node,
+      # 19 nodes total.
+      max_time_minutes: 2880
+      max_cpus: 36
+      max_memory_gb: 160
+      gpu_types: [v100]
+    gpu-a100-40g:
+      # L-type nodes: request with `#$ -ac allow=L`. 4x A100 40GB per node,
+      # only 6 nodes total — expect queue contention.
+      max_time_minutes: 2880
+      max_cpus: 36
+      max_memory_gb: 160
+      gpu_types: [a100]
+    gpu-a100-80g:
+      # U,V-type nodes: 4x A100 80GB per node. Extremely scarce — 1 U-type
+      # node + 2 V-type nodes, 3 nodes total in the whole cluster. The
+      # fetched docs showed the `-ac allow=` flag for E/F and L explicitly
+      # but not for U/V; by the same pattern it is very likely
+      # `-ac allow=UV`, but that exact flag was NOT directly confirmed in
+      # the fetched excerpts, so verify with `qhost`/`man qsub` before
+      # relying on it.
+      max_time_minutes: 2880
+      max_cpus: 48
+      max_memory_gb: 223   # docs: "223GB (or 48 cores at 4.6G per core)" usable
+      gpu_types: [a100]
+
+scratch:
+  # Myriad has NO separate purged scratch filesystem. Docs state plainly:
+  # "The default quota on Myriad is 1TB for home (which is also considered
+  # scratch)." — i.e. $HOME *is* your scratch area, capped by a 1TB quota,
+  # not by an age-based purge. (The Singularity/Apptainer page's aside that
+  # "on clusters OTHER than Myriad, your Scratch directory is also bound"
+  # confirms Myriad specifically lacks a distinct Scratch mount.) No purge
+  # policy of any kind was found. Per the no-guessing rule: since there is no
+  # documented purge, template/auto_cleanup_days stay empty/zero rather
+  # than pointing at a path with an invented retention story.
+  template: ""
+  auto_cleanup_days: 0
+
+apptainer:
+  # No dedicated scratch filesystem exists to redirect the cache to (see
+  # above), so this falls back to $HOME — the only persistent area
+  # documented. Be aware this shares the same 1TB home quota; a large
+  # image cache can eat into it.
+  cachedir: "${HOME}/.apptainer/cache"
+  prebuilt_url: ""
+
+modules:
+  denylist: []
+  always_load: []
+
+policy:
+  # No page found states compute nodes are firewalled off from the
+  # internet, and the howto page documents an outbound path ("connect out
+  # to an FTP server" via the inetutils module) — weak evidence some
+  # egress is possible. But this was never confirmed for general internet
+  # access (git/pip/https). Left false (permissive) rather than inventing
+  # a restriction; agent_hints below tells the agent to verify before
+  # relying on it for anything important.
+  refuse_network: false
+
+agent_hints:
+  preamble: |
+    UCL MYRIAD USES GRID ENGINE (SGE), NOT SLURM.
+    Use `qsub` / `qstat` / `qdel` / `qrsh` — there is no `sbatch`, `squeue`,
+    `sinfo`, or `srun` here. Any instinct to reach for Slurm syntax is wrong
+    on this cluster.
+
+    Queues vs. node types: Myriad has no named queue you select with `-q`.
+    Instead you request resources directly and Grid Engine places you on a
+    matching node type:
+      - plain `-l mem=<X> -pe smp <N>` -> general-purpose D-type nodes
+        (36 cores, 192GB RAM; 342 of these — the least contended type)
+      - `#$ -ac allow=EF` + `-l gpu=1` or `-l gpu=2` -> V100 GPU nodes
+        (19 nodes, 2x V100 each)
+      - `#$ -ac allow=L` + `-l gpu=<n>` -> A100 40GB GPU nodes (only 6
+        nodes — expect queue wait)
+      - A100 80GB nodes exist (1 U-type + 2 V-type node, 4 GPUs each) but
+        are extremely scarce (3 nodes cluster-wide) and the exact
+        `-ac allow=` flag for them was not confirmed in fetched docs —
+        check `man qsub` / `qhost` before assuming `UV`.
+      - High-memory (I,B-type, 1.5TB RAM) and high-core (T-type, 64 cores)
+        nodes exist in small numbers (17 and 6 nodes respectively) for jobs
+        that specifically need them.
+
+    Walltime: 1-core jobs may run up to 72 hours; ANY job using more than 1
+    core is capped at 48 hours, on every node type including the 64-core
+    and 48-core ones. There is no way to request longer.
+
+    Storage — read this carefully, it is the sharpest edge on this cluster:
+    Myriad has NO separate scratch filesystem. $HOME *is* your working
+    area, and it is capped at a 1TB quota — there is no age-based purge
+    documented anywhere. That cuts both ways: going over quota fails your
+    jobs (not silently loses files), but there is also no "it'll get
+    cleaned up eventually" safety net — anything you don't want to keep,
+    delete yourself, and anything precious, copy off Myriad (RDS/other
+    storage) rather than assuming permanence. Node-local disk is available
+    per-job via `-l tmpfs=<size>` (accessed through `$TMPDIR`) and disappears
+    when the job ends — use it for scratch I/O within a single job, not for
+    anything that needs to survive to the next job.
+
+    Network: no docs confirm or deny general internet egress from compute
+    nodes. There is a documented path for outbound FTP (`module load
+    inetutils`), which is weak evidence SOME egress works, but that is not
+    a confirmation that arbitrary internet access (git clone, pip install,
+    pulling containers) works from a running job. If your workflow depends
+    on network access, test it in a short interactive `qrsh` session first
+    rather than assuming it and discovering otherwise mid-job.
+
+    Containers: Apptainer is available (`module load apptainer`); the
+    `singularity` command is kept as a compatibility symlink to it. Your
+    $HOME is bound automatically into containers; there is no separate
+    Scratch to also bind (see Storage above).
+
+    No project/account code was found to be required for standard jobs
+    (leave account fields blank). Some groups have purchased dedicated or
+    priority-access nodes — if queue wait looks unusually long or short
+    for no reason you can see, that may be why.

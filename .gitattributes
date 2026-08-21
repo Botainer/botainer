@@ -1,0 +1,41 @@
+# Line endings are NEVER converted in this repository.
+#
+# WHY: several published facts are sha256 digests of files in this tree, and a
+# digest is a statement about bytes. Git's `core.autocrlf` rewrites LF to CRLF
+# on checkout — it is the INSTALLER DEFAULT on Windows — which changes those
+# bytes and therefore every one of those digests, on a machine where nobody
+# involved did anything wrong.
+#
+# Observed, not reasoned about. Cloning this repo with `core.autocrlf=true`:
+#
+#   CLA.md                    0dd37a0a…  ->  0b9ece2b…
+#   LICENSE                   cfc7749b…  ->  3ddf9be5…
+#   plugins/*                 14 of 14 trust-lock entries mismatch
+#
+# What each of those costs:
+#
+#   CLA.md      CONTRIBUTING.md asks a contributor to post a sentence naming
+#               the digest. It is the only thing tying an acceptance to
+#               specific text. A contributor who checks it would find it wrong
+#               and be right to conclude the agreement had been changed.
+#
+#   LICENSE     pyproject.toml states the Apache-2.0 text is verbatim "so
+#               anyone can confirm it was not tampered with" — an explicit
+#               invitation to verify. Whoever accepts the invitation on
+#               Windows is told we tampered with it.
+#
+#   plugins/    trusted_plugins.lock hashes each bundled plugin's source. A
+#               CRLF checkout fails ALL FOURTEEN, so botainer refuses to load
+#               its own bundled plugins. This one is a functional break, not a
+#               documentation one.
+#
+# `-text` disables end-of-line conversion entirely: working-tree bytes equal
+# committed bytes on every platform, so the mismatch is IMPOSSIBLE rather than
+# something a contributor has to be warned about. Applied to `*` rather than to
+# the three known cases, because the next file whose hash we publish should be
+# covered before anyone remembers it needs to be — this project's most-repeated
+# defect is the fix that reached one sibling and not the other.
+#
+# tests/unit/test_line_endings_are_never_converted.py asks git itself to
+# resolve the attribute and fails if this file stops taking effect.
+* -text

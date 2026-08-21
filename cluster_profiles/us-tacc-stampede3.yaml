@@ -1,0 +1,171 @@
+# TACC Stampede3 (Texas Advanced Computing Center, UT Austin).
+# https://docs.tacc.utexas.edu/hpc/stampede3/
+#
+# NOT RUN ON HARDWARE. Transcribed from public documentation.
+
+version: cluster-profile-v1
+
+verification:
+  status: from-public-docs
+  last_checked: "2026-07-29"
+  source: >
+    https://docs.tacc.utexas.edu/hpc/stampede3/ (scheduler, queue table,
+    per-node core/RAM specs, file-system quotas, 10-day scratch purge,
+    login hostnames) + https://containers-at-tacc.readthedocs.io/en/latest/
+    singularity/01.singularity_basics.html (tacc-apptainer module name;
+    this is TACC's general container guide, not a Stampede3-specific page,
+    but the Lmod/module infrastructure it describes is TACC-wide).
+    Docs did NOT state: a literal filesystem path for $SCRATCH/$WORK/$HOME
+    (only the env-var names + quotas); any max_cpus for a "shared"/fractional
+    queue (there isn't one — every queue here is whole-node); any Lmod
+    bootstrap script (module command appears available by default in the
+    login shell).
+
+cluster:
+  name: us-tacc-stampede3
+  aliases: ["stampede3"]   # what $SLURM_CLUSTER_NAME / $LMOD_SYSHOST report
+  hostname_patterns:
+    - "stampede3.tacc.utexas.edu"
+    - "login*.stampede3.tacc.utexas.edu"
+    - "stampede3*"
+  description: "TACC Stampede3 (Dell/Intel; Skylake, Ice Lake, Sapphire Rapids CPUs; NVIDIA H100 + Intel Ponte Vecchio GPUs)"
+
+lmod:
+  # Stampede3's own guide describes Lmod as available by default in the
+  # login shell ("module load [package]" / "module avail") and states no
+  # separate init/bootstrap script. Left "" deliberately rather than guessed.
+  bootstrap: ""
+
+slurm:
+  # Every queue on Stampede3 allocates WHOLE nodes and charges per node-hour
+  # — unlike e.g. SDSC Expanse there is no "shared"/fractional-node queue, so
+  # there is no cheap way to run a small single-core job without paying for
+  # an entire node. `skx` is the largest, cheapest (1 SU/node-hr), most
+  # available general-purpose CPU queue, so it's the default; `skx-dev` is
+  # for quick interactive testing (2 h cap).
+  default_partition: skx
+  default_account: ""
+  default_time_minutes: 240
+  partitions:
+    skx:
+      max_time_minutes: 2880        # 48 h
+      max_cpus: 48                  # cores/node (Skylake, 2 sockets x 24)
+      max_memory_gb: 192
+    skx-dev:
+      max_time_minutes: 120         # 2 h, 16-node cap — development/testing only
+      max_cpus: 48
+      max_memory_gb: 192
+    icx:
+      max_time_minutes: 2880
+      max_cpus: 80                  # Ice Lake, 2 sockets x 40
+      max_memory_gb: 256
+    spr:
+      max_time_minutes: 2880
+      max_cpus: 112                 # Sapphire Rapids, 2 sockets x 56
+      max_memory_gb: 128            # entire node memory is 128GB HBM2e — high
+                                     # bandwidth, NOT high capacity; smaller
+                                     # than icx/skx despite more cores
+    nvdimm:
+      max_time_minutes: 2880        # only 3 nodes cluster-wide; 1-node cap/job
+      max_cpus: 80                  # Ice Lake large-memory variant
+      max_memory_gb: 4096           # 4 TB NVDIMM
+    h100:
+      max_time_minutes: 2880        # 4-node cap/job; 4 SUs/node-hr (priciest)
+      max_cpus: 96
+      max_memory_gb: 1024
+      gpu_types: [h100]             # 4x NVIDIA H100 SXM5 per node
+    pvc:
+      max_time_minutes: 2880        # 4-node cap/job; 3 SUs/node-hr
+      max_cpus: 96
+      max_memory_gb: 1024
+      # Intel Data Center GPU Max 1550 ("Ponte Vecchio"), 4/node, 124 GB each.
+      # Not NVIDIA/CUDA — oneAPI/SYCL stack. Not in botainer's standard
+      # gpu_types vocabulary (a100/v100/h100/mi250x/mi300a/gh200); using the
+      # cluster's own queue name rather than forcing a wrong fit.
+      gpu_types: [pvc]
+
+scratch:
+  # Docs describe $SCRATCH as shared across all nodes, no quota (~10 PB), and
+  # purged: "Files that have not been accessed in ten days are subject to
+  # purge" (access-time based, not modify-time — reading/executing a file on
+  # a compute node counts as access). That is a real, documented, shared +
+  # purged scratch, so a template belongs here.
+  #
+  # BUT: the docs give only the env-var name, never a literal underlying path
+  # (no "/scratch/<id>/<user>"-style example was found) — inventing one would
+  # be a guess wearing the costume of a fact. "${SCRATCH}" is itself the
+  # literal, correct, documented reference (the login shell sets it), but
+  # because it starts with "$" it does not give botainer's purge-prefix
+  # comparison (botainer/inspect/agent_hints.py:cluster_purge_prefix) any
+  # literal directory prefix to match against — that comparison will treat
+  # this profile the same as "unknown" until a real path is confirmed
+  # on-cluster. The display-only fields below (`hpc info`, `hpc setup`
+  # guidance) are still correct and useful in the meantime.
+  # CLEARED 2026-07-29. The site documents scratch only as `${SCRATCH}`,
+  # never as a literal path. botainer compares this value as a PATH
+  # PREFIX against the real /scratch bind source to decide whether to
+  # warn about purging; an env-var token has no literal prefix, so it
+  # silently disables that warning while LOOKING like configuration.
+  # Leave it absent rather than guess a token.
+  #
+  # The purge is REAL — Stampede3 deletes files after ~10 days — and
+  # that fact is stated in agent_hints below so it is not lost. Restore
+  # both fields once the literal path is confirmed on the cluster
+  # (`echo $${SCRATCH}` on a login node answers it in one command).
+  template: ""
+  auto_cleanup_days: 0             # vendor: "not accessed in ten days"
+
+apptainer:
+  cachedir: "${SCRATCH}/.apptainer/cache"
+  prebuilt_url: ""
+
+modules:
+  denylist: []
+  always_load:
+    # Per containers-at-tacc docs: "module load tacc-apptainer" — the
+    # Apptainer module is only available on compute nodes at TACC, not login
+    # nodes, so this must be loaded inside the job (e.g. via idev or an
+    # sbatch script), not at login.
+    - tacc-apptainer
+
+policy:
+  refuse_network: false
+
+agent_hints:
+  preamble: |
+    You are on TACC Stampede3 (Texas Advanced Computing Center, UT Austin).
+    Scheduler is Slurm.
+
+    Every queue here allocates WHOLE nodes and charges per node-hour — there
+    is no shared/fractional-node queue like some other sites have. Picking a
+    queue means picking a node type, not a slice of one:
+
+    - `skx` (Skylake, 48 cores/node, 192 GB) — general-purpose CPU, cheapest
+      (1 SU/node-hr), most available (256 nodes/job cap). Default here.
+    - `skx-dev` — same hardware, but capped at 2 hours: use it for quick
+      interactive testing, not production runs.
+    - `icx` (Ice Lake, 80 cores/node, 256 GB) — 1.5 SUs/node-hr.
+    - `spr` (Sapphire Rapids, 112 cores/node) — 2 SUs/node-hr. Its 128 GB is
+      HBM2e: high memory BANDWIDTH, not high capacity — smaller than icx/skx
+      despite more cores. Good for bandwidth-bound work, not big-memory jobs.
+    - `nvdimm` — 1 node only, 4 TB, for jobs that need genuinely huge memory.
+      Only 3 nodes exist cluster-wide.
+    - `h100` — 4x NVIDIA H100 SXM5/node, 4 SUs/node-hr (priciest queue).
+    - `pvc` — 4x Intel Data Center GPU Max 1550 ("Ponte Vecchio")/node, 3
+      SUs/node-hr. This is Intel's own accelerator (oneAPI/SYCL), NOT
+      NVIDIA/CUDA — most CUDA-only software will not run here unmodified.
+
+    All queues cap at 48 hours except `skx-dev` (2 hours).
+
+    Apptainer is only available on compute nodes, not login nodes — the
+    launcher's `module load tacc-apptainer` must run inside the job, never
+    at login.
+
+    Filesystems:
+    - $HOME — 15 GB / 300,000 files, backed up. Code and configs only.
+    - $WORK — 1 TB / 3,000,000 files, shared across ALL TACC systems (the
+      quota is global, not per-cluster). Not backed up.
+    - $SCRATCH — no quota (~10 PB), not backed up, PURGED: any file not
+      ACCESSED in the last 10 days is subject to deletion. That is
+      last-access, not last-modified — reading a file on a compute node
+      counts as access, but an untouched result from last week is at risk.

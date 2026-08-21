@@ -1,0 +1,160 @@
+# University of Chicago Research Computing Center (RCC), Midway3 cluster.
+# Public docs consulted (2026-07-29), all fetched directly:
+#   https://docs.rcc.uchicago.edu/slurm/partitions/
+#   https://docs.rcc.uchicago.edu/storage/main/
+#   https://docs.rcc.uchicago.edu/software/
+#   https://docs.rcc.uchicago.edu/connection/ssh/main/
+# (The task's given rcc.uchicago.edu/documentation URL redirects/has moved;
+# the user-guide now lives at docs.rcc.uchicago.edu — used throughout.)
+#
+# NOT RUN ON HARDWARE. Transcribed from public documentation (see above).
+
+version: cluster-profile-v1
+
+verification:
+  status: from-public-docs
+  last_checked: "2026-07-29"
+  source: >-
+    docs.rcc.uchicago.edu/{slurm/partitions, storage/main, software,
+    connection/ssh/main}/. Did NOT find: any documented low-priority /
+    preemptible partition or QoS on Midway3 (unlike Savio's savio_lowprio —
+    this may simply mean RCC doesn't offer one, not that this profile missed
+    it); an age-based auto-purge policy for /scratch/midway3 (the docs
+    document a QUOTA with a 30-day grace period for exceeding the SOFT
+    quota, which is a different mechanism than files aging out — see the
+    scratch comment below); a wall-time limit or QoS entry for the `amd-hm`
+    partition (it's listed in the hardware table but not in the "SharedMidway3
+    QoS" limits table); an Apptainer/Singularity cache-directory
+    recommendation (that page 404'd for every path tried); or an explicit
+    name for the module system implementation (docs say "Environment
+    Modules" and show Lmod-style `module load`/`module avail` commands, but
+    don't confirm which one it is or give a bootstrap script path).
+
+cluster:
+  name: us-uchicago-midway3
+  aliases: ["midway3"]   # what $SLURM_CLUSTER_NAME / $LMOD_SYSHOST report
+  hostname_patterns:
+    - "midway3.rcc.uchicago.edu"       # login
+    - "midway3-amd.rcc.uchicago.edu"   # login node recommended for the AMD partitions
+    - "midway3-*"                       # compute nodes (e.g. midway3-0317, midway3-0541)
+  description: "University of Chicago RCC Midway3 (Cascade Lake caslake/bigmem/gpu; AMD EPYC amd/amd-hm; A100/V100/RTX6000 GPUs)"
+
+lmod:
+  bootstrap: ""   # see verification.source note: implementation/bootstrap path not documented
+
+slurm:
+  # Vendor: "Slurm will use the default partition caslake if you do not
+  # specify it on Midway3."
+  default_partition: caslake
+  # Vendor: on Midway3 you must always specify --account explicitly (no
+  # default account, unlike some other RCC-documented behavior for Midway2).
+  default_account: ""
+  default_time_minutes: 60   # botainer's conservative default; every partition below caps at 36h (2160 min)
+  partitions:
+    # This is the "Midway3 - Shared" resource pool (the docs' partitions page
+    # also lists DaLI, Beagle3, MidwaySSD, and KICP hardware on the same
+    # page/table set, but those are described as SEPARATE dedicated/private
+    # resources with their own accounts — deliberately excluded here so this
+    # profile doesn't claim access to hardware a Midway3 account may not
+    # reach).
+    #
+    # Walltime: the "SharedMidway3 QoS" table gives a flat 36-hour
+    # (2160 min) Max Wall Time for caslake, bigmem, amd, and gpu — the QoS
+    # table doesn't list per-partition exclusive-vs-shared scheduling mode,
+    # only per-user CPU/node/job caps (a fair-share limit, not necessarily
+    # evidence either way about node exclusivity) — not asserted here.
+    caslake:
+      max_time_minutes: 2160
+      max_cpus: 48
+      max_memory_gb: 192
+    bigmem:
+      # 2 nodes total: one at 768 GB, one at 1536 GB. 1536 (the max) is used
+      # here — a job landing on the smaller node gets less than this.
+      max_time_minutes: 2160
+      max_cpus: 48
+      max_memory_gb: 1536
+    amd:
+      max_time_minutes: 2160
+      max_cpus: 128
+      max_memory_gb: 256
+    amd-hm:
+      # Single node (AMD EPYC 7702, 128 cores, 2048 GB). NOT listed in the
+      # QoS limits table alongside caslake/bigmem/amd/gpu, so no wall-time
+      # ceiling is asserted here — omitted rather than assumed equal to
+      # `amd`'s 36h.
+      max_cpus: 128
+      max_memory_gb: 2048
+    gpu:
+      # Heterogeneous: 1 node has 4x A100 (384 GB RAM), 5 nodes have 4x V100
+      # (192 GB RAM), 5 nodes have 4x RTX6000 (192 GB RAM) — all 48 cores.
+      # 384 GB (the max) is used for max_memory_gb; a job landing on a
+      # V100/RTX6000 node gets 192 GB instead.
+      max_time_minutes: 2160
+      max_cpus: 48
+      max_memory_gb: 384
+      gpu_types: [a100, v100, rtx6000]
+
+scratch:
+  # /scratch/midway3/${USER} is real, shared (GPFS), and quota-controlled
+  # (100 GB soft / 5 TB hard) — but the ONLY time-based number the docs give
+  # is a 30-DAY GRACE PERIOD for exceeding the SOFT quota before writes start
+  # failing. That is a quota-enforcement mechanism, not an age-based purge of
+  # old files, and conflating the two would be exactly the kind of wrong
+  # claim this schema exists to avoid. There IS a real job-end wipe, but it's
+  # for a DIFFERENT filesystem — node-local scratch at
+  # /tmp/jobs/${SLURM_JOB_ID} ($TMPDIR/$SLURM_TMPDIR), which the docs say is
+  # "purged once the job is completed or crashed" (i.e. at job end, not on a
+  # days-based schedule — same shape as NIH Biowulf's /lscratch, see that
+  # profile's comment). Neither shape matches this field, so it's left empty.
+  template: ""
+  auto_cleanup_days: 0
+
+apptainer:
+  cachedir: ""   # not documented (see verification.source); left unset rather than guessed
+  prebuilt_url: ""
+
+modules:
+  denylist: []
+  always_load: []
+
+policy:
+  refuse_network: false
+
+agent_hints:
+  preamble: |
+    You are on University of Chicago RCC Midway3.
+
+    `caslake` (Cascade Lake, 48 cores/192 GB) is the default partition and
+    covers most CPU work. `bigmem` gives up to 1.5 TB RAM (one of its two
+    nodes is capped at 768 GB instead — you don't control which). `amd`
+    (EPYC, 128 cores/256 GB) and the single-node `amd-hm` (128 cores/2048 GB)
+    cover AMD workloads — RCC recommends logging into
+    midway3-amd.rcc.uchicago.edu specifically to use the AMD partitions.
+    `gpu` is heterogeneous: request a specific GPU type with
+    `--constraint=<type>` (a100, v100, or rtx6000) since the nodes differ in
+    both GPU and RAM (384 GB on the A100 node, 192 GB on the others).
+
+    Every job must pass `--account=<account>` explicitly — there is no
+    cluster-wide default account on Midway3.
+
+    Walltime: 36 hours (2160 min) is the documented ceiling on every general
+    partition above. No low-priority/preemptible partition or QoS is
+    documented for Midway3 in the pages checked for this profile (contrast
+    with Savio's `savio_lowprio`) — don't assume one exists.
+
+    Filesystems:
+    - /home/<CNetID> — 30 GB soft / 35 GB hard quota. Personal, non-shared
+      data only (mode 0700).
+    - /scratch/midway3/<CNetID> — the shared working area for active jobs.
+      100 GB soft / 5 TB hard quota, with a 30-day GRACE PERIOD if you go
+      over the SOFT quota (after which new files are refused) — this is a
+      QUOTA rule, not an age-based purge; nothing here automatically deletes
+      old files, but scratch is explicitly NOT backed up or snapshotted, so
+      treat it as temporary regardless.
+    - /project/<PI_CNetID> — durable, shared group storage (must be a member
+      of the pi-<PI_CNetID> group); this is where anything that needs to
+      outlive a job, or be shared with the group, belongs.
+    - Node-local scratch ($TMPDIR / $SLURM_TMPDIR, backed by
+      /tmp/jobs/<job-id>) is fast for many-small-file I/O on a single node,
+      but is WIPED THE MOMENT THE JOB ENDS OR CRASHES — copy anything you
+      need out before the job finishes, not after.

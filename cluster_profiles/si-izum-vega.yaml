@@ -1,0 +1,102 @@
+# Vega (EuroHPC JU petascale system, hosted by IZUM, Maribor, Slovenia).
+#
+# NOT RUN ON HARDWARE. Public documentation for this cluster could NOT be
+# reached from this session: the confirmed official user-docs domain,
+# doc.vega.izum.si (and its Slovenian mirror si-doc.vega.izum.si), failed
+# every fetch attempt with a TLS certificate-chain validation error
+# ("unable to verify the first certificate") — a fetch-tool/CA-bundle
+# problem on THIS session's end, not evidence the docs don't exist or are
+# wrong. A normal browser or a different environment may well reach them.
+# Per the task's explicit instruction for this cluster: when authoritative
+# docs can't be reached, leave fields empty rather than guess. This profile
+# is therefore much thinner than its siblings — treat it as a hardware-only
+# stub, not a verified operational profile.
+
+version: cluster-profile-v1
+
+verification:
+  status: from-public-docs
+  last_checked: "2026-07-29"
+  source: >-
+    https://eurohpc-ju.europa.eu/supercomputers/our-supercomputers_en (EuroHPC
+    JU's own hardware summary for Vega — CPU/GPU counts, per-node memory).
+    ATTEMPTED BUT UNREACHABLE (TLS cert-chain error, not a 404):
+    https://doc.vega.izum.si/ , https://doc.vega.izum.si/general-spec/ ,
+    https://si-doc.vega.izum.si/ — these are the confirmed-to-exist official
+    user-documentation URLs (found via a working link on izum.si), but
+    could not be fetched. NOT stated by anything reachable: Slurm
+    partition/QOS names as actually configured (only informal "CPU
+    partition" / "GPU partition" hardware-pool descriptions were found, and
+    inventing a literal Slurm partition string like `cpu`/`gpu` from that
+    would be exactly the kind of guess this task forbids); scratch/storage
+    paths and purge policy; module system; container/Apptainer guidance;
+    compute-node internet access policy; login node hostnames.
+
+cluster:
+  name: si-izum-vega
+  aliases: ["vega"]   # what $SLURM_CLUSTER_NAME / $LMOD_SYSHOST report
+  hostname_patterns:
+    - "vega*.izum.si"
+    - "login*.vega.izum.si"
+  description: "Vega (EuroHPC JU, IZUM, Slovenia) — AMD EPYC 7H12 CPU nodes + NVIDIA A100 40GB GPU nodes"
+
+lmod:
+  bootstrap: ""
+
+slurm:
+  # Deliberately empty. EuroHPC JU's hardware summary describes a "CPU
+  # partition" (960 nodes, 2x AMD EPYC 7H12 128 cores total/node, 256 GB
+  # RAM, ~20% of nodes with 1 TB) and a "GPU partition" (60 nodes, 2 CPUs,
+  # 512 GB RAM, 4x NVIDIA A100 40GB/node) — but these are informal hardware
+  # descriptions, not confirmed Slurm partition names. Guessing a literal
+  # partition string (e.g. "cpu"/"gpu") that turns out wrong would send a
+  # job straight to a submission error, so nothing is recorded here. Run
+  # `sinfo` on the cluster (or reach doc.vega.izum.si yourself) to get the
+  # real partition names before submitting.
+  default_partition: ""
+  default_account: ""
+  default_time_minutes: 240
+  partitions: {}
+
+scratch:
+  # Not found from any reachable source. Left empty rather than guessed —
+  # see verification.source.
+  template: ""
+  auto_cleanup_days: 0
+
+apptainer:
+  cachedir: ""
+  prebuilt_url: ""
+
+modules:
+  denylist: []
+  always_load: []
+
+policy:
+  # Not documented from any reachable source; defaulting to false rather
+  # than asserting a block that wasn't confirmed. Verify before assuming
+  # network access works.
+  refuse_network: false
+
+agent_hints:
+  preamble: |
+    You are on Vega (EuroHPC JU, hosted by IZUM, Slovenia).
+
+    IMPORTANT: this profile is based on very limited public documentation.
+    The official user-documentation site (doc.vega.izum.si) could not be
+    reached when this profile was built (a TLS certificate error on the
+    fetching side, not proof the docs are wrong or gone) — you may well be
+    able to reach it yourself; try that first for anything specific.
+
+    Confirmed hardware only (from EuroHPC JU's own hardware summary, not
+    Vega's own docs): a CPU node pool (960 nodes, 2x AMD EPYC 7H12 — 128
+    cores/node total — 256 GB RAM per node, with roughly 20% of nodes
+    configured with 1 TB instead) and a GPU node pool (60 nodes, 4x NVIDIA
+    A100 40GB per node, 512 GB RAM per node).
+
+    UNKNOWN — verify before relying on any of these: actual Slurm partition
+    names (run `sinfo` first — do not guess "cpu"/"gpu", they may not match),
+    walltime limits, scratch/storage paths and purge policy, whether
+    compute nodes have internet access, module system, and whether
+    Apptainer/Singularity is the supported container runtime. Treat
+    anything not listed above as unverified until you've checked directly.

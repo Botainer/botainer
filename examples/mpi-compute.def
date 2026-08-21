@@ -1,0 +1,80 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# A minimal, PMIx-capable MPI compute image for botainer multi-node MPI jobs.
+#
+# This is NOT the agent image (that runs Claude/Codex). This is the COMPUTE
+# image your dispatched jobs run in — point a job profile's `image:` at the
+# built .sif and set `mpi: pmix` (see examples/hpc-job-profiles.yaml).
+#
+# BUILD (once, on a machine where you can build — laptop or a build node):
+#     apptainer build mpi-compute.sif examples/mpi-compute.def
+#     # on a laptop you'll usually need:  apptainer build --fakeroot …
+# Then copy it to the cluster:
+#     rsync -avP mpi-compute.sif you@cluster:/home/you/images/
+#
+# WHY THIS WORKS: it installs the distro OpenMPI, which on Debian bookworm is
+# built against the system PMIx (libpmix2) and with Slurm support — exactly what
+# `srun --mpi=pmix` needs to hand the ranks their handshake. PMIx >= 2.1.1 is
+# cross-version compatible, so this image's PMIx does NOT need to match the
+# cluster's version.
+#
+# ADD YOUR APP: replace/extend the mpicc step below with your own sources, or
+# `apt-get install` / `pip install` what you need. Anything you compile with the
+# `mpicc`/`mpif90` from here is linked against this PMIx-capable OpenMPI.
+# ─────────────────────────────────────────────────────────────────────────────
+Bootstrap: docker
+From: debian:bookworm-slim
+
+%post
+    set -eux
+    export DEBIAN_FRONTEND=noninteractive
+
+    apt-get update
+    # openmpi-bin + libopenmpi-dev: the MPI runtime + compilers (mpicc/mpif90).
+    # libpmix2: the PMIx client OpenMPI talks through to the cluster's slurmstepd.
+    # gcc/libc6-dev: to compile the smoke-test (and your own C/C++ MPI code).
+    apt-get install -y --no-install-recommends \
+        openmpi-bin libopenmpi-dev libpmix2 \
+        gcc gfortran libc6-dev ca-certificates
+
+    # ── OPTIONAL: fast InterConnect (InfiniBand/RoCE). Uncomment for the fast
+    # data path; without it MPI still runs, just over TCP. You also need the
+    # matching profile bind of /dev/infiniband (a deferred botainer perf knob):
+    #   apt-get install -y libucx0 ucx-utils libibverbs1 librdmacm1
+
+    # A tiny MPI hello-world so you can prove multi-node connectivity end-to-end:
+    #   botainer-job submit mpi -- mpi-hello
+    # (heredoc + terminator are unindented so the shell reads them correctly)
+cat > /tmp/mpi_hello.c <<'EOF'
+#include <mpi.h>
+#include <stdio.h>
+#include <unistd.h>
+int main(int argc, char **argv) {
+    MPI_Init(&argc, &argv);
+    int rank, size;
+    char host[256];
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    gethostname(host, sizeof host);
+    printf("rank %d of %d on %s\n", rank, size, host);
+    fflush(stdout);
+    MPI_Finalize();
+    return 0;
+}
+EOF
+    mpicc /tmp/mpi_hello.c -o /usr/local/bin/mpi-hello
+    rm -f /tmp/mpi_hello.c
+
+    apt-get clean
+    rm -rf /var/lib/apt/lists/*
+
+%test
+    # Printed at the end of `apptainer build`. Should list a PMIx version — if it
+    # says nothing, this image can't do multi-node MPI.
+    ompi_info | grep -i pmix || echo "WARNING: no PMIx in this OpenMPI build"
+
+%runscript
+    exec "$@"
+
+%labels
+    Purpose botainer multi-node MPI compute image (PMIx-capable)
+    MPI OpenMPI (Debian bookworm, external PMIx + Slurm support)

@@ -1,0 +1,158 @@
+# OLCF Summit (Oak Ridge Leadership Computing Facility; DOE / ORNL).
+# https://docs.olcf.ornl.gov/systems/summit_user_guide.html
+#
+# *** SCHEDULER: IBM Spectrum LSF, NOT Slurm. ***
+# Job submission uses `bsub`/`jsrun`/`bjobs`/`bkill`, NOT sbatch/srun/squeue.
+# The `slurm:` key below is this schema's generic "scheduler map" slot — it
+# is reused here to hold Summit's LSF QUEUES, not actual Slurm partitions.
+# Do not run sbatch on this machine.
+#
+# *** SYSTEM STATUS: DECOMMISSIONED 2026-07-29 verification found that
+# Summit "was decommissioned on November 15, 2024 and is no longer online.
+# Information here is presented as an archive and is no longer updated."
+# (docs.olcf.ornl.gov/systems/summit_user_guide.html, fetched as archived
+# content). This profile is a historical/reference transcription of that
+# archive — there is no live system to run on. Its Alpine2 scratch
+# filesystem was also switched read-only for Summit on 2024-11-19 and later
+# repurposed as nearline storage for other OLCF systems, per
+# https://www.olcf.ornl.gov/2024/09/17/retiring-and-shredding-the-alpine-storage-system/ .
+#
+# NOT RUN ON HARDWARE (and could not be — see decommission note above).
+# Transcribed from public/archived documentation.
+
+version: cluster-profile-v1
+
+verification:
+  status: from-public-docs
+  last_checked: "2026-07-29"
+  source: "https://docs.olcf.ornl.gov/systems/summit_user_guide.html (ARCHIVED — system decommissioned 2024-11-15; node arch, LSF bins/queues, login hostname); https://raw.githubusercontent.com/olcf/olcf-user-docs/master/systems/summit_user_guide.rst (same doc, raw source, used to confirm queue-bin table and module/scratch-path text); https://docs.olcf.ornl.gov/data/index.html (home/Alpine2 quotas and 90-day purge); https://www.olcf.ornl.gov/2024/09/17/retiring-and-shredding-the-alpine-storage-system/ (Alpine2 retirement timeline). NOT stated in any fetched doc: per-partition max_cpus (LSF schedules whole nodes via -nnodes, not a core/CPU count the way Slurm partitions cap it); a project-home vs. project-work distinction beyond what's quoted; any documented denylist/always-load module set; compute-node outbound network policy (searched, not found — left at schema default)."
+
+cluster:
+  name: us-olcf-summit
+  aliases: ["summit"]   # what $SLURM_CLUSTER_NAME / $LMOD_SYSHOST report
+  hostname_patterns:
+    - "summit.olcf.ornl.gov"
+  description: "OLCF Summit — IBM AC922; dual IBM POWER9 + 6x NVIDIA V100 per node. DECOMMISSIONED 2024-11-15."
+
+lmod:
+  bootstrap: ""   # docs say Lmod is active by login and describe `module load`
+                  # usage, but no init/bootstrap script path is documented.
+
+slurm:
+  # NOT Slurm — this site runs LSF. The `slurm:` key is this
+  # schema's generic scheduler-map slot (see the header). Declaring it here
+  # is what makes botainer REFUSE to submit rather than emit sbatch at a
+  # LSF cluster; the field defaults to "slurm" if omitted.
+  scheduler: lsf
+  # LSF, not Slurm — see banner comment at top of file. Summit's LSF used a
+  # node-count PRIORITY BIN table (not separate named queues) layered under
+  # a small number of actual queues. Recorded here as four "partitions":
+  # the two real production queues (batch, batch-hm), debug, and the
+  # preemptible killable queue. `max_time_minutes` below is each queue's
+  # documented CEILING; `batch` in particular is NOT a flat 24h in
+  # practice — see the per-bin note under `batch`.
+  default_partition: batch
+  default_account: ""          # no default project var documented; every
+                                # bsub must pass `-P <project>` explicitly.
+  default_time_minutes: 240
+  partitions:
+    batch:
+      # Default production queue. Job priority (not a separate queue) is
+      # bucketed by requested NODE COUNT into 5 bins, each with its own
+      # walltime ceiling and "aging boost" (queue-wait credit):
+      #   bin 1: 2765-4608 nodes, max 24h, +15d aging boost
+      #   bin 2:  922-2764 nodes, max 24h, +10d aging boost
+      #   bin 3:   92-921  nodes, max 12h,  no aging boost
+      #   bin 4:   46-91   nodes, max  6h,  no aging boost
+      #   bin 5:    1-45   nodes, max  2h,  no aging boost
+      # max_time_minutes below is the queue's overall ceiling (bins 1-2);
+      # a small job (bin 5, <=45 nodes — the overwhelmingly common case for
+      # agent-scale work) is actually capped at 2h, not 24h.
+      # Limits: 4 eligible-to-run jobs/user, 100 queued jobs total.
+      max_time_minutes: 1440     # 24h ceiling; see per-bin note above
+      max_memory_gb: 512          # "512 GB DDR4 memory per standard node"
+      gpu_types: [v100]           # "6 NVIDIA V100 GPUs" per standard node
+      # max_cpus intentionally omitted: LSF schedules whole nodes via
+      # -nnodes, not a CPU count. Per node: 2x POWER9, 1 core/socket
+      # reserved for overhead -> 42 usable cores, SMT-4 -> 168 hw threads.
+    batch-hm:
+      # High-memory nodes (2TB DDR4 vs 512GB standard) — only 54 exist
+      # system-wide. Limits: 4 eligible-to-run jobs/user, 25 queued jobs.
+      max_time_minutes: 1440     # 24h, documented directly for this queue
+      max_memory_gb: 2048         # 2TB high-memory nodes
+      gpu_types: [v100]           # same 6x V100 per node as standard nodes
+    debug:
+      # Short debugging queue. Strict limit: 1 job per user in ANY state.
+      max_time_minutes: 120       # 2h documented ceiling
+      max_memory_gb: 512
+      gpu_types: [v100]
+    killable:
+      # PREEMPTIBLE queue for smaller jobs. Can REQUEST up to 24h, but is
+      # only GUARANTEED a runtime window before possible preemption: 6h for
+      # <=91 nodes (bin 4), 2h for <=45 nodes (bin 5). Treat 24h as an
+      # optimistic ceiling, not a guarantee — the job can be killed early.
+      max_time_minutes: 1440
+      max_memory_gb: 512
+      gpu_types: [v100]
+
+scratch:
+  # Alpine2 (GPFS/Spectrum Scale). Documented as per-project "Member Work":
+  # /gpfs/alpine2/scratch/<userid>/<projid>, also reachable via the
+  # $MEMBERWORK/<projid> env var. Purge: "90 days" (not-accessed). NOTE:
+  # per the decommission banner at top of file, Alpine2 was made read-only
+  # for Summit on 2024-11-19 and later repurposed — this path is historical.
+  template: "/gpfs/alpine2/scratch/${USER}/${PROJECT}"
+  auto_cleanup_days: 90
+
+apptainer:
+  cachedir: "/gpfs/alpine2/scratch/${USER}/${PROJECT}/.apptainer/cache"
+  prebuilt_url: ""
+
+modules:
+  denylist: []
+  always_load: []
+
+policy:
+  refuse_network: false   # not documented either way for Summit compute
+                          # nodes (searched; found nothing) — left at
+                          # schema default rather than guessed.
+
+agent_hints:
+  preamble: |
+    You are on OLCF Summit (DOE, Oak Ridge National Laboratory).
+
+    *** THIS SYSTEM IS DECOMMISSIONED (2024-11-15) AND NO LONGER ONLINE. ***
+    If you are seeing this, either you're doing historical/offline work
+    against archived docs, or something is very wrong — Summit cannot
+    actually be reached.
+
+    *** SCHEDULER IS IBM Spectrum LSF, NOT SLURM. ***
+    Submit with `bsub script.lsf`, launch compute-node work with `jsrun`
+    (only valid inside a running LSF job), inspect with `bjobs`, cancel
+    with `bkill`. Do NOT use sbatch/srun — they do not exist here.
+    Every job must pass `-P <project>` explicitly; there is no default
+    project.
+
+    Queue choice: `batch` is the default production queue, but its walltime
+    ceiling depends on how many nodes you request (a small, e.g. single- or
+    few-node, job is capped at 2h, not 24h — see the per-bin comment in
+    this file's `slurm.partitions.batch`). `batch-hm` is for the 54
+    high-memory (2TB) nodes only. `debug` is capped at 2h with a 1-job/user
+    limit. `killable` is preemptible: it can request up to 24h but is only
+    GUARANTEED a much shorter window (6h or 2h depending on size) before it
+    may be killed for higher-priority work.
+
+    Each standard node: 2x IBM POWER9 (42 usable cores total, SMT-4 -> 168
+    hardware threads), 512 GB DDR4, 6x NVIDIA V100 GPUs. High-memory nodes
+    swap in 2 TB DDR4 for the same 6x V100 GPUs.
+
+    Filesystems:
+    - Home (NFS) — 50 GB quota, backed up (not purged).
+    - Alpine2 Member Work ($MEMBERWORK/<project>,
+      /gpfs/alpine2/scratch/<user>/<project>) — 50 TB, PURGED 90 days from
+      last access. This is where large/working data goes.
+    - Alpine2 Project Work / World Work — same 90-day purge; shared with a
+      project team.
+    - Project Home — 50 GB, NOT purged, snapshotted.
+    Modules load via Lmod; the XL compiler suite and Spectrum MPI load by
+    default at login.
