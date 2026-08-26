@@ -26,7 +26,10 @@ from __future__ import annotations
 
 import fnmatch
 import re
-import tomllib
+try:                       # pragma: no cover - version-dependent
+    import tomllib             # Python 3.11+
+except ModuleNotFoundError:    # Python 3.10, which pyproject still supports
+    import tomli as tomllib    # provided by the `dev` extra
 from pathlib import Path
 
 import sys

@@ -4414,3 +4414,4 @@ in the contract sections themselves.
 - **§4dn** — Four user-visible defects a clean install found (surface-NEUTRAL)
 - **§4do** — PyPI page metadata: subtitle, urls, classifiers (surface-NEUTRAL)
 - **§4dp** — Published digests were platform-dependent (autocrlf)
+- **§4dq** — Python 3.10 was never actually run (surface-NEUTRAL)

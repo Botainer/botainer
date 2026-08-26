@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import shutil
+import subprocess
+
 import pytest
 
 from botainer.adapters.apptainer import ApptainerAdapter
@@ -182,6 +185,43 @@ def _patch_binaries(monkeypatch, *, screen: bool, docker: bool, apptainer: bool)
     )
 
 
+def _stub_image_present(monkeypatch) -> None:
+    """Make the `docker image inspect` preflight answer "present".
+
+    THE cause of the CI failure. `DockerAdapter.launch` calls
+    `_preflight_local_image(spec.image)` BEFORE the screen check, and that
+    probe runs the REAL `docker` binary through `subprocess.run` — a route
+    `shutil.which` stubbing does not touch. So on any machine that HAS Docker
+    (every GitHub runner, every laptop with Docker Desktop) the launch refuses
+    at `docker.py:105` with "image ... is not on this machine" and never
+    reaches the branch under test.
+
+    REPRODUCED locally, contrary to the earlier note: put any `docker` on PATH
+    that exits non-zero and this test fails on the category. `screen` presence
+    is irrelevant — `shutil.which` IS stubbed. And RUNTIME_LAUNCH_FAILED has
+    SIX raise sites in `botainer/adapters/docker.py`, two of them (93, 105)
+    inside the preflight that runs first.
+
+    So this test's green in the dev container was a property of the container:
+    Docker is ABSENT here, `subprocess.run` raised FileNotFoundError, and the
+    probe's deliberately broad `except Exception: return` swallowed it. The
+    three sibling launch tests escape the same probe BY ACCIDENT — they patch
+    `subprocess.Popen` for an unrelated reason, `subprocess.run` is built on
+    `Popen`, and the TypeError lands in that same `except`.
+
+    Narrow deliberately: only the docker-inspect argv is intercepted, so
+    anything else a test shells out to still runs for real.
+    """
+    real_run = subprocess.run
+
+    def _fake_run(argv, *a, **kw):
+        if list(argv)[:3] == ["docker", "image", "inspect"]:
+            return subprocess.CompletedProcess(list(argv), 0, "", "")
+        return real_run(argv, *a, **kw)
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+
+
 class _FakePopen:
     """Stand-in for subprocess.Popen — records argv, fakes a fast exit."""
     last_argv: list[str] | None = None
@@ -222,10 +262,35 @@ def test_docker_launch_does_not_wrap_when_nudge_disabled(monkeypatch) -> None:
 
 def test_docker_launch_refuses_if_screen_missing_with_nudge(monkeypatch) -> None:
     _patch_binaries(monkeypatch, screen=False, docker=True, apptainer=False)
+    _stub_image_present(monkeypatch)
     spec = _spec("docker").model_copy(update={"plugins_enabled": ("nudge",)})
+
+    # SELF-DIAGNOSING, deliberately — and the diagnostics are what settled it.
+    # This passed in the dev container and FAILED on a GitHub runner with
+    # RUNTIME_LAUNCH_FAILED. The captured state below REFUTED both of the first
+    # two theories in one run: which(screen) was None, so the monkeypatch DID
+    # take effect, and plugins_enabled was ('nudge',), so model_copy DID apply.
+    # The real cause is the image preflight that runs before the screen check —
+    # see _stub_image_present. Keep the capture: it is what makes the next
+    # surprise cost one run instead of a round trip.
+    observed = {
+        "which(screen)": shutil.which("screen"),
+        "which(docker)": shutil.which("docker"),
+        "plugins_enabled": spec.plugins_enabled,
+    }
+
     with pytest.raises(Refused) as exc:
         DockerAdapter().launch(spec)
-    assert exc.value.category == RefusalCategory.RUNTIME_NOT_AVAILABLE
+    assert exc.value.category == RefusalCategory.RUNTIME_NOT_AVAILABLE, (
+        f"expected the screen pre-check to refuse, got {exc.value.category}.\n"
+        f"  state at call time: {observed}\n"
+        f"  refusal message: {exc.value}\n"
+        "  'image ... is not on this machine' -> _preflight_local_image ran the\n"
+        "     REAL docker before the screen check; _stub_image_present is not\n"
+        "     covering the argv it now uses.\n"
+        "  which(screen) truthy -> the shutil.which monkeypatch did not apply;\n"
+        "  plugins_enabled without 'nudge' -> model_copy(update=...) did not apply."
+    )
     assert "screen" in str(exc.value)
 
 

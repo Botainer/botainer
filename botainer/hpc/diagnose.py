@@ -73,9 +73,13 @@ def diagnose(project_root: Path) -> tuple[bool, list[str]]:
         out.append(f"hpc-launcher plugin:             {plugin_dir}")
         botjob = plugin_dir / "agent_helper" / "botainer-job"
         botjob_ok = botjob.exists()
-        out.append(f"  {'✓' if botjob_ok else '✗'} agent_helper/botainer-job:  "
-                   f"{'present' if botjob_ok else 'MISSING (stale plugin — this '
-                   'copy predates job dispatch)'}")
+        # Built outside the f-string on purpose. A replacement field that spans
+        # lines is PEP 701 (Python 3.12+); this package declares >=3.10, where
+        # it is a SyntaxError that makes the whole module unimportable.
+        mark = "✓" if botjob_ok else "✗"
+        state = ("present" if botjob_ok
+                 else "MISSING (stale plugin — this copy predates job dispatch)")
+        out.append(f"  {mark} agent_helper/botainer-job:  {state}")
         if not botjob_ok:
             out.append("    FIX: refresh this plugin — `botainer setup` (copy "
                        "install) or sync the source (editable install).")

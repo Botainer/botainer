@@ -1,6 +1,8 @@
 """#54 P1: caged child-job compose + never-bare-job chokepoint (INV-2)."""
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from botainer.core.refusal import Refused
@@ -93,10 +95,30 @@ def test_child_refuses_credential_or_home_bind_target(target) -> None:
         jobs.compose_child_job_argv(IMG, ("bash",), (_bind("/host/x", target),))
 
 
-@pytest.mark.parametrize("source", ["/", "/etc/shadow", "/home/user"])
-def test_child_refuses_denied_bind_source(source) -> None:
+@pytest.mark.parametrize("source", ["/", "/etc/shadow", None])
+def test_child_refuses_denied_bind_source(source, monkeypatch, tmp_path) -> None:
     """The (ancestor-aware) source denylist applies to child binds too —
-    source=/ can't smuggle /etc/shadow, etc."""
+    source=/ can't smuggle /etc/shadow, etc.
+
+    The home case is the CALLER'S OWN home, computed at run time. It used to be
+    the literal "/home/user", which is this dev container's HOME — so the test
+    passed here and failed on any machine with a different one, while appearing
+    to assert something much broader.
+
+    Note what this does NOT assert, because the code does not do it: ANOTHER
+    user's home is not denied. `/home/alice/.ssh` is an allowed bind source on a
+    shared login node — the denylist is built from expanduser("~") alone. That
+    gap is tracked as #168; do not widen this test to paper over it,
+    and do not narrow it either."""
+    if source is None:
+        # A home that is NOT already in the hard denylist. Under HOME=/root
+        # (normal for container CI and for `sudo pytest`) the literal home
+        # case is caught by DENYLISTED_SOURCES instead, so the
+        # home-ancestor rule this test names would never execute and the
+        # test would pass for the wrong reason.
+        monkeypatch.setenv("HOME", str(tmp_path))
+        source = str(tmp_path)
+
     with pytest.raises(Refused):
         jobs.compose_child_job_argv(IMG, ("bash",), (_bind(source, "/data"),))
 

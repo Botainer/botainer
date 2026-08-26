@@ -81,6 +81,8 @@ dev = [
   "ruff>=0.5",
   "types-pyyaml",
   "types-jsonschema",
+  # tests read pyproject; tomllib is 3.11+, and this package supports 3.10.
+  "tomli; python_version < '3.11'",
 ]
 
 [project.scripts]

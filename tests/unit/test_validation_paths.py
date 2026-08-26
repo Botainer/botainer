@@ -21,6 +21,11 @@ from click.testing import CliRunner
 # ─────────── F1: dotted-set refuses non-dict intermediate ───────────
 
 
+# Same reason as test_auth_family: /workspace is this container, not the
+# world. CI checks out to /home/runner/work/<repo>/<repo>.
+_REPO = Path(__file__).resolve().parents[2]
+
+
 def test_dotted_set_refuses_non_dict_intermediate(tmp_path, monkeypatch) -> None:
     from botainer.cli.config_cmd import config
     proj = tmp_path / "proj"
@@ -191,7 +196,7 @@ def test_start_accepts_valid_auth_profile(monkeypatch) -> None:
 def test_hpc_submit_refuses_zero_time() -> None:
     """argparse should refuse --time 0 (sbatch may treat as site cap)."""
     import sys
-    plugins_dir = "/workspace/plugins/hpc-launcher/host_helper"
+    plugins_dir = str(_REPO / "plugins" / "hpc-launcher" / "host_helper")
     sys.path.insert(0, plugins_dir)
     try:
         if "submit" in sys.modules:
@@ -205,7 +210,7 @@ def test_hpc_submit_refuses_zero_time() -> None:
 
 def test_hpc_submit_refuses_negative_gpus() -> None:
     import sys
-    plugins_dir = "/workspace/plugins/hpc-launcher/host_helper"
+    plugins_dir = str(_REPO / "plugins" / "hpc-launcher" / "host_helper")
     sys.path.insert(0, plugins_dir)
     try:
         if "submit" in sys.modules:
@@ -219,7 +224,7 @@ def test_hpc_submit_refuses_negative_gpus() -> None:
 
 def test_hpc_submit_refuses_newline_in_partition() -> None:
     import sys
-    plugins_dir = "/workspace/plugins/hpc-launcher/host_helper"
+    plugins_dir = str(_REPO / "plugins" / "hpc-launcher" / "host_helper")
     sys.path.insert(0, plugins_dir)
     try:
         if "submit" in sys.modules:
@@ -237,7 +242,7 @@ def test_hpc_render_sbatch_script_validates_account() -> None:
     """Defense-in-depth: render_sbatch_script re-validates even if
     parse_args was bypassed (e.g. config file sets a bad partition)."""
     import sys
-    plugins_dir = "/workspace/plugins/hpc-launcher/host_helper"
+    plugins_dir = str(_REPO / "plugins" / "hpc-launcher" / "host_helper")
     sys.path.insert(0, plugins_dir)
     try:
         if "_common" in sys.modules:
@@ -283,7 +288,7 @@ def test_auth_family_mutex_enforced_when_two_variants_enabled() -> None:
 
     from botainer.plugins.manifest import load_manifest
     for name in ("agent-claude", "agent-claude-shared", "agent-claude-proxy"):
-        m = load_manifest(Path(f"/workspace/plugins/{name}"))
+        m = load_manifest(_REPO / "plugins" / name)
         assert m.auth_family == "anthropic"
         # Each lists the OTHER two in mutex.
         siblings = set(m.mutually_exclusive_with)

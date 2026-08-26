@@ -190,3 +190,118 @@ def test_a_copy_is_reported_even_when_the_checkout_won_the_import() -> None:
     assert f.severity == "err"
     assert "site-packages" in f.detail
     assert "depending on where you stand" in f.detail
+
+
+# --------------------------------------------------------------------------
+# The PROBE, not the decision. `install_findings` above is pure and was always
+# testable; `collect_install_findings` reads the real environment, and that is
+# the half where the shadow check went wrong — it called a `botainer/`
+# directory in site-packages a shadowing COPY, which is what this project's own
+# `pip install -e .` leaves behind. Every fresh editable install therefore got
+# `botainer doctor` exit 1 and `botainer setup` ABORT (exit 2), on the install
+# command README.md, both GETTING_STARTED files and DEPLOY.md all give.
+#
+# The five setup/doctor tests elsewhere in the suite DO catch a revert — but
+# only where the packaging actually produces that directory. OBSERVED: with the
+# fix reverted and the directory removed (this dev container's install shape,
+# dated before force-include landed), all 39 of them pass. That is exactly how
+# the defect shipped. These two drive the real collector against a constructed
+# site-packages, so they discriminate on every machine.
+# --------------------------------------------------------------------------
+
+def _fake_site_packages(root: Path, *, importable: bool) -> Path:
+    """A site-packages holding what `pip install -e .` REALLY leaves.
+
+    Not a minimal directory — this is the observed content after
+    `pip install -e .` into a fresh venv:
+    `_builtin_plugins/`, `cluster_profiles/`, `licenses/`,
+    `THIRD-PARTY-LICENSES.md`, and NO `__init__.py`. It exists because
+    `[tool.hatch.build.targets.wheel.force-include]` maps those trees under
+    `botainer/` and a .pth cannot redirect data files.
+
+    `importable=True` adds the `__init__.py` that makes it a real package —
+    the shape that DOES shadow, and the one the check exists for.
+    """
+    sp = root / "site-packages"
+    pkg = sp / "botainer"
+    (pkg / "_builtin_plugins" / "agent-claude").mkdir(parents=True)
+    (pkg / "_builtin_plugins" / "agent-claude" / "botainer-plugin.yaml").write_text(
+        "name: agent-claude\n")
+    (pkg / "cluster_profiles").mkdir()
+    (pkg / "cluster_profiles" / "generic-slurm.yaml").write_text("name: x\n")
+    (pkg / "licenses").mkdir()
+    (pkg / "licenses" / "MPL-2.0.txt").write_text("license text\n")
+    (pkg / "THIRD-PARTY-LICENSES.md").write_text("attribution\n")
+    if importable:
+        (pkg / "__init__.py").write_text('__version__ = "0.1.0a4"\n')
+        (pkg / "cli").mkdir()
+        (pkg / "cli" / "__init__.py").write_text("")
+    return sp
+
+
+def _collect_against(monkeypatch, site_packages: Path):
+    """Run the REAL collector with site-packages and the pip metadata faked.
+
+    Driving `collect_install_findings` rather than a helper is the point: the
+    bug was in the environment probe, and a test of the pure decision function
+    could not see it (four such tests were green throughout).
+    """
+    import site as _site
+    import sysconfig as _sysconfig
+    import importlib.metadata as _md
+    import json as _json
+    import botainer as _pkg
+
+    checkout = Path(_pkg.__file__).resolve().parent.parent
+    sp = str(site_packages)
+    monkeypatch.setattr(_sysconfig, "get_paths",
+                        lambda *a, **k: {"purelib": sp, "platlib": sp})
+    monkeypatch.setattr(_site, "getsitepackages", lambda: [sp])
+    monkeypatch.setattr(_site, "getusersitepackages", lambda: sp)
+
+    class _Dist:
+        def read_text(self, name):
+            if name != "direct_url.json":
+                return None
+            return _json.dumps({"dir_info": {"editable": True},
+                                "url": checkout.as_uri()})
+
+    monkeypatch.setattr(_md, "distribution", lambda _name: _Dist())
+    from botainer.cli.doctor import collect_install_findings
+    return collect_install_findings()
+
+
+def test_the_data_tree_every_editable_install_leaves_is_not_a_copy(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """THE regression guard for the onboarding block.
+
+    A `site-packages/botainer/` holding force-included DATA and no
+    `__init__.py` cannot win `import botainer` — a directory without one is
+    only a namespace portion, and the checkout's regular package, added later
+    by the .pth, beats it. OBSERVED both ways in a fresh venv. So it is not a
+    shadowing copy and doctor must say nothing.
+    """
+    sp = _fake_site_packages(tmp_path, importable=False)
+    assert (sp / "botainer").is_dir(), "fixture must be a real dir, as pip leaves it"
+    findings = _collect_against(monkeypatch, sp)
+    assert _by_check(findings, "install.shadowed") is None, (
+        "the data tree pip leaves for a NORMAL editable install was reported "
+        "as a shadowing copy — `botainer setup` aborts with exit 2 for every "
+        "new user, and the remediation it prints recreates the same state")
+
+
+def test_an_importable_copy_beside_the_editable_install_is_still_reported(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """And the guard must still bite. With `__init__.py` present the directory
+    DOES win the import (OBSERVED: planting one made `import botainer` resolve
+    to site-packages instead of the checkout), which is the seven-weeks-stale
+    install this check was built for."""
+    sp = _fake_site_packages(tmp_path, importable=True)
+    findings = _collect_against(monkeypatch, sp)
+    f = _by_check(findings, "install.shadowed")
+    assert f is not None, (
+        "an importable installed copy sat beside the editable install and "
+        "doctor said nothing")
+    assert f.severity == "err"

@@ -82,11 +82,33 @@ def test_declared_hook_exists(plugin, when, script) -> None:
         f"configured everything.")
 
 
-def _git_modes() -> dict[str, str]:
-    """Mode bits as GIT records them, which is what reaches another machine."""
+def _git_modes() -> dict[str, str] | None:
+    """Mode bits as GIT records them, which is what reaches another machine.
+
+    `None` when git cannot answer, which is not exotic: `pyproject.toml`'s
+    sdist ships `tests/integration/**` and carries no `.git`; `git` may not be
+    installed; and git exits 128 ("detected dubious ownership") whenever the
+    checkout is owned by a different uid — the normal case when the suite runs
+    inside a container over a bind-mounted clone, i.e. how this project is
+    developed.
+
+    This ran at MODULE level with `check=True`. OBSERVED on a copy of the tree
+    with no `.git`, and again with `git` off PATH:
+
+        !!! Interrupted: 1 error during collection !!!
+        no tests collected, 1 error
+
+    The WHOLE suite ran zero tests, and the message named a
+    `CalledProcessError` rather than a missing prerequisite. A module-level
+    probe that raises does not fail one file — it fails everything.
+    """
     import subprocess
-    out = subprocess.run(["git", "ls-files", "-s", "plugins/"],
-                         cwd=_REPO, capture_output=True, text=True, check=True)
+    try:
+        out = subprocess.run(["git", "ls-files", "-s", "plugins/"],
+                             cwd=_REPO, capture_output=True, text=True,
+                             check=True)
+    except (OSError, subprocess.SubprocessError):
+        return None
     modes: dict[str, str] = {}
     for line in out.stdout.splitlines():
         meta, _, path = line.partition("\t")
@@ -113,6 +135,14 @@ def test_declared_hook_is_executable_IN_GIT(plugin, when, script) -> None:
     index mode is what a clone or `rsync -a` actually carries to the cluster,
     which makes it the thing worth asserting.
     """
+    if GIT_MODES is None:
+        pytest.skip(
+            "git cannot report index modes for this tree (no .git, no git on "
+            "PATH, or refused ownership). The FILESYSTEM mode is NOT a "
+            "substitute and this test does not fall back to one: a bind mount "
+            "in this project's own dev container reports 644 and still answers "
+            "True to os.access(X_OK), which is precisely the blindness that "
+            "let a non-executable hook ship. Run from a git checkout.")
     rel = str(script.relative_to(_REPO))
     mode = GIT_MODES.get(rel)
     assert mode is not None, f"{rel} is not tracked by git; it cannot deploy"

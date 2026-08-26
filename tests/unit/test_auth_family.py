@@ -14,6 +14,12 @@ import pytest
 from botainer.plugins.manifest import PluginManifest
 
 
+# Derived from __file__, never hardcoded: /workspace is this dev
+# container's checkout path. On CI (and any contributor's machine) the
+# repo lives elsewhere, and the absolute form failed there — 5 tests.
+_PLUGINS = Path(__file__).resolve().parents[2] / "plugins"
+
+
 def test_manifest_auth_family_defaults_empty() -> None:
     m = PluginManifest(name="x", version="0.1.0")
     assert m.auth_family == ""
@@ -42,7 +48,7 @@ def test_bundled_agent_claude_declares_family() -> None:
     """The bundled agent-claude plugin must declare auth_family=anthropic
     + auth_mode=isolated + mutually_exclusive_with the two siblings."""
     from botainer.plugins.manifest import load_manifest
-    m = load_manifest(Path("/workspace/plugins/agent-claude"))
+    m = load_manifest(_PLUGINS / "agent-claude")
     assert m.auth_family == "anthropic"
     assert m.auth_mode == "isolated"
     assert "agent-claude-shared" in m.mutually_exclusive_with
@@ -51,7 +57,7 @@ def test_bundled_agent_claude_declares_family() -> None:
 
 def test_bundled_agent_claude_shared_declares_family() -> None:
     from botainer.plugins.manifest import load_manifest
-    m = load_manifest(Path("/workspace/plugins/agent-claude-shared"))
+    m = load_manifest(_PLUGINS / "agent-claude-shared")
     assert m.auth_family == "anthropic"
     assert m.auth_mode == "shared"
     assert "agent-claude" in m.mutually_exclusive_with
@@ -60,7 +66,7 @@ def test_bundled_agent_claude_shared_declares_family() -> None:
 
 def test_bundled_agent_claude_proxy_declares_family() -> None:
     from botainer.plugins.manifest import load_manifest
-    m = load_manifest(Path("/workspace/plugins/agent-claude-proxy"))
+    m = load_manifest(_PLUGINS / "agent-claude-proxy")
     assert m.auth_family == "anthropic"
     assert m.auth_mode == "proxy"
     assert "agent-claude" in m.mutually_exclusive_with
@@ -69,7 +75,7 @@ def test_bundled_agent_claude_proxy_declares_family() -> None:
 
 def test_bundled_agent_codex_declares_family() -> None:
     from botainer.plugins.manifest import load_manifest
-    m = load_manifest(Path("/workspace/plugins/agent-codex"))
+    m = load_manifest(_PLUGINS / "agent-codex")
     assert m.auth_family == "openai"
     assert m.auth_mode == "isolated"
 

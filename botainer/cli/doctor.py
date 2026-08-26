@@ -822,9 +822,28 @@ def collect_install_findings() -> list[Finding]:
             pass
         for base in filter(None, candidates):
             pkg = Path(base) / "botainer"
-            # A real directory here is a COPY. An editable install leaves only
-            # a .pth/finder shim, never a package directory.
-            if pkg.is_dir() and not pkg.is_symlink():
+            # A real directory here is a COPY *only if it is importable*.
+            #
+            # The old comment claimed "an editable install leaves only a
+            # .pth/finder shim, never a package directory". That is untrue for
+            # THIS package: pyproject force-includes plugins/, cluster_profiles/
+            # and the licence files into botainer/, and hatchling materialises
+            # them as a real site-packages/botainer/ directory even for
+            # `pip install -e .`. It holds four data entries and NO __init__.py.
+            #
+            # Python cannot import a directory with no __init__.py as `botainer`
+            # (there is no namespace-package ambiguity here — the checkout's
+            # regular package wins outright), so it cannot shadow anything. The
+            # old check saw the directory, cried shadowing, and made
+            # `botainer doctor` exit 1 and `botainer setup` ABORT on every
+            # correct editable install — while advising a
+            # `pip uninstall && pip install -e .` that recreates the same state.
+            #
+            # Asking "is there a competing IMPORTABLE package" instead of "does
+            # a directory exist" is the actual question, so a false positive
+            # here is not possible rather than merely unlikely.
+            if (pkg.is_dir() and not pkg.is_symlink()
+                    and (pkg / "__init__.py").exists()):
                 resolved = pkg.resolve()
                 if not resolved.is_relative_to(editable_target) \
                         and resolved not in foreign:
