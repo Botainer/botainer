@@ -53,6 +53,7 @@ slurm:
     shared:
       max_time_minutes: 2880        # fractional-node charging
     preempt:
+      preemptible: true
       max_time_minutes: 2880        # discounted; 2 h minimum, can be killed
     premium:
       max_time_minutes: 2880        # 2-4x charge multiplier

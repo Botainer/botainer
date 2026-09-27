@@ -14,7 +14,8 @@ from pathlib import Path
 
 import click
 
-from botainer.auth_modes import AUTH_MODES, choice_help
+from botainer.auth_modes import (AUTH_MODES, ONE_SHOT_AXIS_HELP,
+                                  choice_help)
 
 from botainer.cli._refusal_handler import handle_refusals
 from botainer.core import composition
@@ -127,6 +128,20 @@ def _maybe_prompt_login(project_root: Path) -> None:
             )
 
 
+def _shared_auth_family(spec) -> str | None:
+    """Which agent family this session uses in SHARED mode, or None.
+
+    Returns the family ("claude", "codex"), not a bool, because the caller has
+    to know WHICH credential is at stake. The old bool made every caller treat
+    shared auth as one global thing, and the concurrency prompt then warned a
+    codex launch about a live Claude session (reported 2026-09-04).
+    """
+    for p in getattr(spec, "plugins_enabled", []) or []:
+        if isinstance(p, str) and p.startswith("agent-") and p.endswith("-shared"):
+            return p[len("agent-"):-len("-shared")]
+    return None
+
+
 def _uses_shared_auth(spec) -> bool:
     """True when the COMPOSED session enabled a shared auth variant.
 
@@ -138,6 +153,36 @@ def _uses_shared_auth(spec) -> bool:
         isinstance(p, str) and p.startswith("agent-") and p.endswith("-shared")
         for p in getattr(spec, "plugins_enabled", []) or []
     )
+
+
+def shared_mode_banner() -> list[str]:
+    """The shared-mode warning, as data.
+
+    A PURE FUNCTION rather than two inline `click.secho` calls, because the
+    only test of this text used to read the source of `start.callback` and
+    grep it — while its own docstring claimed "Asserted on the emitted string,
+    not on source text". It was not, and the docstring would have satisfied the
+    assertion on its own. Returning the lines makes the real thing testable,
+    which is a better answer than a cleverer grep.
+
+    WHAT IT LEADS WITH, and why. "One login, used by every shared-mode project"
+    was the old first sentence, and it sold the mode on the one thing it cannot
+    do. ONE SESSION AT A TIME is the defining constraint and it appeared on NO
+    forward-facing surface — not here, not `auth use`, not `init`, not a single
+    doc. Only `auth doctor` said it, after the user was already broken.
+    """
+    return [
+        "⚠ Auth mode: SHARED — ONE SESSION AT A TIME, across all "
+        "shared-mode projects on this machine. Starting a second one "
+        "logs the first out: refreshing mints a new token and revokes "
+        "the old, so whichever refreshes first wins. For projects you "
+        "run side by side, use `botainer auth use isolated` in each.",
+        "  Also: one credential shared by every project means a "
+        "compromised agent in ANY of them can read AND OVERWRITE it — "
+        "overwriting changes which account they all run as. (Write "
+        "access is required so the agent can save its refreshed "
+        "token.)",
+    ]
 
 
 @click.command("start")
@@ -213,10 +258,9 @@ def _uses_shared_auth(spec) -> bool:
     type=click.Choice(AUTH_MODES),
     default=None,
     help=choice_help(
-        "One-shot override of auth mode for this session only. Switches "
-        "the enabled auth-family plugin variant via in-memory composition "
-        "(does NOT modify .botainer/config.yaml). For a persistent change, "
-        "use `botainer auth use <mode>`. Modes:"
+        "One-shot override of auth mode. Switches the enabled auth-family "
+        "plugin variant via in-memory composition. "
+        + ONE_SHOT_AXIS_HELP + " Modes:"
     ),
 )
 @click.option(
@@ -233,24 +277,28 @@ def _uses_shared_auth(spec) -> bool:
     "--auth-profile",
     default=None,
     help=(
-        "One-shot override of auth profile for this session. Reads "
-        "credentials from <creds-dir>/profiles/<name>/ instead of "
-        "<creds-dir>/profiles/default/. Persistent change: edit "
-        "`profile:` in .botainer/config.yaml."
+        "One-shot override of auth profile — reads "
+        "<creds-dir>/profiles/<name>/ instead of .../default/. "
+        + ONE_SHOT_AXIS_HELP
     ),
 )
 @click.option(
     "--preflight",
     is_flag=True,
     help=(
-        "Compose the session + render the runtime argv + verify "
-        "capability-surface invariants, but DO NOT launch. Pre-merge "
-        "gate for security-surface changes: prints every bind, every "
-        "env var, every entrypoint wrap that WOULD be applied. Exit "
-        "code 0 iff the surface matches docs/CAPABILITY-SURFACE.md "
-        "expectations (no forbidden binds, no unexpected env). Safe "
-        "to run anywhere — never touches the network or starts a "
-        "container."
+        "Compose the session + verify capability-surface invariants, but DO "
+        "NOT launch. Pre-merge gate for security-surface changes: prints "
+        "every bind, env var and entrypoint wrap the COMPOSED session has — "
+        "pre_session hooks have not run, so binds THEY add at launch are not "
+        "shown (`dry-run --include-hooks` shows those). Exit 0 iff the "
+        "surface matches docs/CAPABILITY-SURFACE.md expectations (no "
+        "forbidden binds, no unexpected env). Needs no container runtime "
+        "installed: nothing is started and the network is never touched. "
+        "With no --runtime it checks BOTH the docker and the apptainer plan; "
+        "a plan it could not compose here is named and exits 3 — NOT a pass — "
+        "unless the project has no such plan at all (e.g. an apptainer-only "
+        "plugin has no docker plan). The apptainer plan needs the .sif it "
+        "names to exist. With --runtime X it checks X only."
     ),
 )
 @handle_refusals
@@ -333,7 +381,7 @@ def start(
             # gets EOF) and its output is hidden — the auto-onboard silently
             # aborted. subprocess.run inherits this process's stdio → real TTY.
             rc = subprocess.run(
-                [sys.executable, "-m", "botainer.cli.main",
+                [sys.executable, "-I", "-B", "-m", "botainer.cli.main",
                  "setup", "--interactive"],
                 # Suppress the child's tip footer so the parent shows exactly one
                 # (Fable-5 M1: self-invocations inherit the TTY → double footer).
@@ -392,20 +440,117 @@ def start(
     # suppresses this prompt.
     if project_root is not None and can_prompt and not dry_run:
         _maybe_prompt_login(project_root)
-    spec = composition.compose_session(
-        project_root,
-        runtime_choice=runtime,
+    # #192: a HAND-EDIT of config.yaml moves the agent's history and, until
+    # now, carried nothing — `auth use` and `config set` both offer the carry;
+    # editing the file and running `start` did not, and that is the route
+    # botainer's own --auth-profile help recommends for a persistent change.
+    #
+    # BEFORE compose, so the question is asked before anything is launched, and
+    # never on dry-run/preflight: those render a plan, and neither prompting
+    # nor recording "what config said at the last start" is part of rendering.
+    if project_root is not None and not dry_run and not preflight:
+        from botainer.cli._history_prompt import (
+            offer_carry_for_declared_change,
+        )
+        offer_carry_for_declared_change(
+            project_root, assume_yes=auto_yes, can_prompt=can_prompt)
+        # A ONE-SESSION override reads a different history dir and carries
+        # nothing — correctly, since a flag must not move history permanently.
+        # Name both directories so an empty overridden session is not mistaken
+        # for lost transcripts in the configured history directory.
+        from botainer.cli._history_prompt import warn_override_moves_history
+        warn_override_moves_history(
+            project_root,
+            auth_mode_override=auth_mode,
+            auth_profile_override=auth_profile,
+            agent_override=agent_override,
+        )
+    # ONE set of compose arguments, shared by the launch below and by
+    # `--preflight`'s per-runtime composes. Not tidiness: `inspect`/`dry-run`
+    # drifting from what `start` actually composes is a defect this project
+    # has already had (11 of start's 13 options never reached the preview),
+    # and a gate that composes with different arguments than the launch is
+    # the same bug wearing the word "gate". Adding a parameter to the call
+    # below now reaches the checks by construction.
+    _compose_kwargs = dict(
         identity_accept=accept_identity_change,
         fork=fork,
         auth_mode_override=auth_mode,
-        auth_profile_override=auth_profile if auth_profile != "default" else None,
+        # The option is `default=None`, so any value here was TYPED. The old
+        # `if auth_profile != "default" else None` therefore discarded exactly
+        # one thing: an explicit `--auth-profile default`. That is a real
+        # request whenever the project config says something else, and `inspect`
+        # (inspect.py:82) honoured it — so preview and launch disagreed,
+        # silently, about which credential and history directory to use. (#222)
+        auth_profile_override=auth_profile,
         agent_override=agent_override,
+        # #227: the masking-dir reset belongs to `start`, not to `inspect` or
+        # `dry-run`, which must not mutate anything. `--preflight` shares this
+        # dict and therefore also resets — true before this dict existed too
+        # (it shared the one compose call), and idempotent, so a second
+        # runtime's compose re-resets an already-empty anchor dir. Worth
+        # knowing rather than assuming: a preflight is not a pure read.
+        reset_null_anchor=True,
     )
+    # --preflight: verify capability-surface invariants without launching.
+    # Pre-merge gate for security-surface changes: the project's own review
+    # protocol requires exit 0 before a commit touching the surface is pushed.
+    #
+    # BEFORE the launch compose, and that placement is the fix rather than a
+    # style choice. The launch compose resolves the runtime by PATH discovery
+    # and falls back to `mock`, whose image resolution takes the docker-shaped
+    # branch — so on a host with no docker (every cluster login node, this dev
+    # container) a project holding a built `.sif` and no docker image was
+    # refused `config-missing: no recorded image` and exited 2, and the
+    # apptainer plan the developer wanted checked was never composed. That is
+    # the same defect as the `runtime-not-available` exit 3 below: a
+    # LAUNCH-shaped precondition stopping a check that launches nothing.
+    # `run_all` composes each REAL runtime's plan itself and never consults the
+    # mock fallback.
+    if preflight:
+        from botainer.inspect import preflight as preflight_mod
+
+        # The shared-mode banner lives below the launch compose, which a
+        # preflight no longer reaches — and it was the ONLY place a preflight
+        # said "this session shares one credential with your other projects"
+        # (the /shared-auth bind itself is a hook contribution, so it is not in
+        # the compose-time plan the gate prints). Said once, here, for the
+        # first plan that composes: a disclosure the gate used to make and
+        # stopped making is a regression even when nothing else changed.
+        _said = {"shared": False}
+
+        def _compose_for_preflight(rt: str):
+            spec = composition.compose_session(
+                project_root, runtime_choice=rt, **_compose_kwargs)
+            if (not as_json and not quiet and not _said["shared"]
+                    and _uses_shared_auth(spec)):
+                _said["shared"] = True
+                for _line in shared_mode_banner():
+                    click.secho(_line, fg="yellow", err=True)
+            return spec
+
+        rc = preflight_mod.run_all(
+            _compose_for_preflight,
+            requested_runtime=runtime,
+            # Which plan a clean verdict is OBLIGED to cover. `init --runtime
+            # apptainer` writes `runtime: apptainer`, and for such a project
+            # the apptainer plan is the session — a verdict that skipped it and
+            # passed on docker would be a false all-clear.
+            targeted_runtime=composition.targeted_runtime(project_root, runtime),
+        )
+        sys.exit(rc)
+
+    spec = composition.compose_session(
+        project_root, runtime_choice=runtime, **_compose_kwargs)
 
     # Insecure-defaults H4: refuse mock runtime for `start` (it's fine for
     # dry-run / inspect / access where no real container is launched). If
     # composition fell back to mock because no docker/apptainer was found,
     # surface that as a real refusal rather than silently proceeding.
+    # `--preflight` is not in this condition because it has already returned
+    # above; it used to reach here and exit 3 on exactly the hosts its own
+    # help called safe, offering `dry-run` and `inspect` — which check
+    # nothing — as the remedies.
     if spec.runtime == "mock" and not dry_run:
         click.secho(
             "refused: runtime-not-available: no docker or apptainer found.",
@@ -437,51 +582,26 @@ def start(
             for p in spec.plugins_enabled
         )
         if _shared_variant:
-            # "One login, used by every shared-mode project" was the old first
-            # sentence, and it sold the mode on the one thing it cannot do.
-            # ONE SESSION AT A TIME is the defining constraint and it appeared
-            # on NO forward-facing surface — not here, not `auth use`, not
-            # `init`, not a single doc. Only `auth doctor` said it, after the
-            # user was already broken. Lead with it.
-            click.secho(
-                "⚠ Auth mode: SHARED — ONE SESSION AT A TIME, across all "
-                "shared-mode projects on this machine. Starting a second one "
-                "logs the first out: refreshing mints a new token and revokes "
-                "the old, so whichever refreshes first wins. For projects you "
-                "run side by side, use `botainer auth use isolated` in each.",
-                fg="yellow", err=True,
-            )
-            click.secho(
-                "  Also: one credential shared by every project means a "
-                "compromised agent in ANY of them can read AND OVERWRITE it — "
-                "overwriting changes which account they all run as. (Write "
-                "access is required so the agent can save its refreshed "
-                "token.)",
-                fg="yellow", err=True,
-            )
+            for _line in shared_mode_banner():
+                click.secho(_line, fg="yellow", err=True)
 
     # THE ENFORCEMENT, not another paragraph. Prose about "one session at a
     # time" is what was missing for months AND would not have helped: the
     # person who wrote the mode did not know the constraint. So ask the
     # bookkeeping instead of the user's memory — a live shared-mode session in
     # another project is a fact the launcher already records.
-    if not dry_run and not preflight and _uses_shared_auth(spec):
+    _shared_family = None if (dry_run or preflight) else _shared_auth_family(spec)
+    if _shared_family:
         from botainer.cli import _common as _c_shared
         _c_shared.confirm_no_other_shared_session(
-            project_root, as_json=as_json, assume_yes=auto_yes)
+            project_root, agent_family=_shared_family,
+            as_json=as_json, assume_yes=auto_yes)
 
     if dry_run:
         from botainer.cli import dry_run as dry_run_cli  # avoid circular at import
 
         dry_run_cli.print_dry_run(spec)
         return
-
-    # --preflight: compose + verify capability-surface invariants without
-    # launching. Pre-merge gate for security-surface changes.
-    if preflight:
-        from botainer.inspect import preflight as preflight_mod
-        rc = preflight_mod.run(spec)
-        sys.exit(rc)
 
     # Task #145: hooks-then-confirm order. Was the inverse -- user saw the
     # capability summary, said YES, then plugin pre_session hooks added
@@ -500,10 +620,47 @@ def start(
 
     # Capability summary + confirmation gate (sharp-edges F6) -- now
     # accurate because spec includes all hook contributions.
+    # #215: is something ELSE on this host already able to redeem this login?
+    # A refresh token can be redeemed once; shared mode refreshes inside the
+    # container under no lock, so a shared session running beside another
+    # shared session or beside a broker will log one of them out with an
+    # `invalid_grant` that names no cause. Computed here, where the state tree
+    # is readable, and printed as part of the block the user is deciding on.
+    #
+    # DETECTION, NOT A FIX. Concurrent shared sessions still do not work; #110
+    # is that decision. Saying so in the warning matters — "we warn about it
+    # now" reads like a resolution and is not one.
+    from botainer.core import credential_holders
     proceed = capability_summary.print_and_maybe_confirm(
-        spec, quiet=quiet, as_json=as_json, auto_yes=auto_yes
+        spec, quiet=quiet, as_json=as_json,
+        # `start` runs at a terminal; `--yes` is a real pre-authorisation.
+        pre_authorised=auto_yes, interactive=True,
+        extra_warnings=credential_holders.warning_lines_for_spec(spec),
+        # Not the sbatch path: this IS `start`, so broker mode is reachable
+        # and the credential paragraph may say so.
+        on_sbatch_path=False,
     )
     if not proceed:
+        # TEAR DOWN WHAT COMPOSE STARTED. Consent is asked AFTER compose,
+        # because it shows the composed capability summary — that is the point
+        # of asking it there. But compose has by then run this project's
+        # pre_session hooks, and a hook may have started a HOST PROCESS
+        # (wolfram-sidecar Popens a helper; the broker hooks start a daemon).
+        # Declining left that running: the only `run_post_session_hooks` on this
+        # path was inside the launch `finally`, which a decline never reaches.
+        #
+        # Measured by a refuting review with a probe plugin: `n` at the prompt,
+        # and the helper was still alive afterwards. This is the same rule the
+        # sbatch launcher applies to its non-launching exits — anything that
+        # composes and does not launch tears down — and `start` is the path
+        # where the two named examples can actually run, since broker mode is
+        # refused on the sbatch path and socket binds are refused cross-node.
+        try:
+            composition.run_post_session_hooks(spec)
+        except Exception as exc:      # best-effort, exactly like compose's
+            click.secho(
+                f"post_session cleanup after a declined launch reported: {exc}",
+                fg="yellow", err=True)
         click.secho("Aborted by user.", fg="yellow", err=True)
         sys.exit(0)
 

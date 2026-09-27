@@ -213,7 +213,7 @@ def test_route_hot_task_refuses_path_shaped_id(tmp_path) -> None:
         mb, "w-deadbeef",
         {"id": "./../../../../../../tmp/pwned", "command": ["echo"]},
         job_id="0123456789abcdef")
-    assert (_pool.worker_in_dir(mb, "w-deadbeef") / "0123456789abcdef.json").exists()
+    assert (_pool.worker_in_dir(mb, "w-deadbeef") / "0123456789abcdef.task.json").exists()
     assert not (tmp_path.parent / "pwned.json").exists()
     # and the caller cannot pass a path-shaped id either (belt-and-braces)
     with pytest.raises(Refused):
@@ -251,12 +251,17 @@ def test_worker_sbatch_sends_output_to_host_private_dir(tmp_path) -> None:
     wid = "w-abc123"
     script = _pool.render_worker_sbatch(
         wid, JobProfile(partition="GPU"), "/proj", 300,
-        quote=shlex.quote, out_dir=_pool.worker_dir(mb, wid))
+        quote=shlex.quote, mb=mb)
     assert "#SBATCH --output=" in script and "#SBATCH --error=" in script
     # and both must land under the host-private run/ tree, never the project root
     for line in script.splitlines():
         if line.startswith(("#SBATCH --output=", "#SBATCH --error=")):
             assert str(mb.run_dir) in line, line
+    # EXACTLY the file `worker_diagnosis` reads back, not merely somewhere under
+    # run/: "its own last words" is read from worker_stderr_path, so a renderer
+    # that wrote the stream anywhere else would leave that diagnosis permanently
+    # blank while this test stayed green (found by a refuting review).
+    assert f"#SBATCH --error={_pool.worker_stderr_path(mb, wid)}" in script, script
 
 
 def test_dispatcher_error_path_does_not_reread_inbox(tmp_path) -> None:
@@ -297,5 +302,5 @@ def test_warm_worker_carries_the_profile_constraint(tmp_path) -> None:
     wid = "w-con123"
     script = _pool.render_worker_sbatch(
         wid, JobProfile(partition="day", constraint="cascadelake"),
-        "/proj", 300, quote=shlex.quote, out_dir=_pool.worker_dir(mb, wid))
+        "/proj", 300, quote=shlex.quote, mb=mb)
     assert "#SBATCH --constraint=cascadelake" in script

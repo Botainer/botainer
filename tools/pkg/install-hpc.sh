@@ -133,10 +133,7 @@ fi
 # missing — bailing out NOW saves the user from running the cheap
 # parts (venv, pip install, setup, alias) and then discovering the
 # image didn't build at the bottom of a wall of preflight output.
-#
-# That confusion bit us on 2026-05-19; the script reported "WARNING"
-# at the end and the user reasonably believed the install had
-# succeeded. Refusing upfront is the fix.
+# Report an unavailable build prerequisite before making installation changes.
 if [[ "$SKIP_IMAGE_BUILD" -ne 1 ]]; then
   if ! command -v apptainer >/dev/null 2>&1 \
      && ! command -v singularity >/dev/null 2>&1; then
@@ -151,15 +148,9 @@ if [[ "$SKIP_IMAGE_BUILD" -ne 1 ]]; then
       echo "  not installed on this site at all. Resolve, then re-run." >&2
       exit 7
     fi
-    # LOGIN NODE + no apptainer (the common case on Yale Grace + many others
-    # where apptainer is compute-node-only). Cluster-ease roadmap B6
-    # (2026-06-13): the cheap parts of this script (venv, pip, setup, plugins)
-    # work fine on a login node — refusing the WHOLE install because the
-    # LAST step needs apptainer makes the first user action fail when most of
-    # it could have succeeded. AUTO-DEFER the image build instead and print
-    # the next-step prominently. Original behavior was "refuse upfront"
-    # because the 2026-05-19 incident was a SILENT failure at the end of the
-    # script; the fix is to be LOUD now AND at the end, not to refuse.
+    # On sites where Apptainer is compute-node-only, login-node installation
+    # can complete the environment and plugin steps. Defer the image build
+    # and prominently report the remaining step both here and at the end.
     echo "================================================================" >&2
     echo " HPC LOGIN NODE detected (no Slurm allocation, no apptainer on PATH)." >&2
     echo " On clusters like Yale Grace, apptainer is on compute nodes only." >&2
@@ -216,7 +207,7 @@ if [[ $WRITE_RC -eq 1 ]] && [[ -n "$ALIAS_NAME" ]]; then
   # whether ~/.zshrc exists. Many users have a stale ~/.zshrc from a
   # one-time experiment but actually run bash — writing the alias to
   # .zshrc in that case makes it invisible from their interactive
-  # shell, which bit us on 2026-05-19.
+  # shell.
   SHELL_NAME="$(basename "${SHELL:-/bin/bash}")"
   case "$SHELL_NAME" in
     zsh)   RC="$HOME/.zshrc" ;;

@@ -17,6 +17,7 @@ from pathlib import Path
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from botainer.core import agent_permissions
 from botainer.core.refusal import RefusalCategory, Refused
 from botainer.state import dir as state_dir
 
@@ -42,7 +43,7 @@ class MountsPolicy(BaseModel):
     # AUTHORITATIVE trust anchor for module binds and is taken from the
     # root-owned SitePolicy ONLY (see intersect) — NOT the user-writable
     # cluster.yaml/user policy, since on a multi-tenant cluster that would be a
-    # self-grant (DESIGN-160-module-binds.md).
+    # self-grant (internal design note DN-002).
     cluster_software_roots: list[str] = Field(default_factory=list)
     # caps.modules_inner_load: the Lmod install tree that will be
     # bound RO into the container so the agent can run `module load` INSIDE.
@@ -135,22 +136,41 @@ class JobPolicy(BaseModel):
 class AgentPolicy(BaseModel):
     model_config = ConfigDict(extra="forbid")
     # #53 / T0-2: max_permissions is a CEILING — the MOST-AUTONOMOUS in-cage
-    # permission posture the SITE allows. Ordering (most → least restrictive):
-    # "prompt" < "bypass". Defaults to "bypass" (no restriction imposed) because
-    # with no admin-deployed /etc/botainer/policy.yaml there is no site to
-    # restrict, and the product default is "the container is the boundary". A
-    # cautious multi-tenant admin may LOWER it to "prompt" (force per-action
-    # prompts even in the cage); compose_session then refuses a project that
-    # requests "bypass". A project may request a posture at or below the ceiling,
-    # never above it. See DN-010.
+    # permission posture the SITE allows. Defaults to "bypass" (no restriction
+    # imposed) because with no admin-deployed /etc/botainer/policy.yaml there is
+    # no site to restrict, and the product default is "the container is the
+    # boundary". A cautious multi-tenant admin may LOWER it; compose_session
+    # then refuses a project that asks for more. See DN-010.
+    #
+    # THE CEILING RANKS TIERS, NOT MODES, and that is deliberate. A project may
+    # now name the AGENT'S OWN mode (claude `acceptEdits`, codex `on-request`),
+    # and those do not sort onto one line: where does `plan` (executes nothing)
+    # sit relative to `acceptEdits`? The question has no answer, and the old
+    # two-value rank pretended it did — any value it had not heard of scored 99
+    # and was refused, so every new mode would have been dead on arrival.
+    #
+    # There are exactly two things a ceiling can usefully say, so there are two
+    # tiers (`agent_permissions.CAP_VALUES`):
+    #
+    #   default  the agent's own permission system must stay ON
+    #   bypass   botainer may switch it off
+    #
+    # `prompt` remains accepted as the legacy spelling of `default`, because
+    # policy files in the field say it. An admin who wrote `max_permissions:
+    # prompt` meaning "no bypass" keeps meaning exactly that — and now also
+    # admits the middle modes they never had.
     max_permissions: str = "bypass"
 
     @field_validator("max_permissions")
     @classmethod
     def _validate_max_permissions(cls, v: str) -> str:
-        if v not in {"bypass", "prompt"}:
+        if v not in agent_permissions.CAP_VALUES:
             raise ValueError(
-                f"agent.max_permissions {v!r} must be 'bypass' or 'prompt'"
+                f"agent.max_permissions {v!r} must be one of "
+                f"{sorted(agent_permissions.CAP_VALUES)} — a ceiling is a TIER, "
+                f"not one of the agents' own mode names. 'default' means the "
+                f"agent's permission system must stay on; 'bypass' allows "
+                f"turning it off. ('prompt' is the older spelling of 'default'.)"
             )
         return v
 
@@ -165,13 +185,31 @@ class SitePolicy(BaseModel):
       - enum/string fields: must match across levels; mismatch → refuse
       - integer fields: min() across levels
 
-    Codex 45#6 / AUTH-PRODUCT-PLAN.md §9: `default_auth_mode` is the
-    host-wide default for new projects (used by `botainer init`).
-    Per user direction: **default is `shared` with an
-    init-time and session-launch warning**, with one-line switch to
-    isolated. Empty string = "fall back to whatever code default the
-    init flow picks"; we set "shared" explicitly here so the
-    intention is visible in the schema.
+    `default_auth_mode` is the host-wide default for new projects (used by
+    `botainer init`). Empty string = "fall back to whatever code default the
+    init flow picks"; the value is set explicitly below so the intention is
+    visible in the schema.
+
+    **The default is `isolated`, changed from `shared`.** Shared mode reuses
+    one login across projects; isolated mode limits that sharing. The relevant
+    credential-handling tradeoffs are:
+
+    - shared mode's directory holds a REAL refresh token the container can read
+      AND overwrite, so a compromised agent in ANY shared project can change
+      which account every other shared project uses. The init banner already
+      says this in full.
+    - refresh tokens ROTATE (measured 2026-07-29), so shared mode's N+1 holders
+      are unsound the moment two projects are used in sequence — every
+      container-side refresh invalidates the other copies. That is the root
+      cause of the "new project not logged in" reports.
+    - isolated and broker are the two modes with a coherent story: isolated
+      keeps one credential per project, broker keeps the refresh token out of
+      the container entirely.
+
+    A default is a recommendation the product makes on the user's behalf, and
+    recommending the mode with the worst isolation story because it is the most
+    convenient is the wrong way round. Users who want the old behaviour set it
+    once, host-wide:  `botainer policy set default_auth_mode shared`.
 
     Set via `botainer policy set default_auth_mode <mode>` or
     `botainer auth use <mode> --global`.
@@ -206,7 +244,7 @@ class SitePolicy(BaseModel):
     naming: NamingPolicy = Field(default_factory=NamingPolicy)
     agent: AgentPolicy = Field(default_factory=AgentPolicy)
     jobs: JobPolicy = Field(default_factory=JobPolicy)
-    default_auth_mode: str = "shared"
+    default_auth_mode: str = "isolated"
 
     @field_validator("default_auth_mode")
     @classmethod
@@ -487,11 +525,15 @@ def intersect(*policies: SitePolicy) -> SitePolicy:
                 f"unknown network.default_mode in policy: {exc.args[0]!r}",
             ) from exc
 
-    # #53 / T0-2: agent.max_permissions is a ceiling — most → least restrictive
-    # is prompt < bypass. Intersection takes the most-restrictive (lowest) so a
-    # site policy capping at "prompt" cannot be relaxed by a downstream user
-    # policy setting "bypass". Same shape as most_restrictive_network.
-    _PERMISSIONS_RESTRICTIVENESS = {"prompt": 0, "bypass": 1}
+    # #53 / T0-2: agent.max_permissions is a ceiling. Intersection takes the
+    # most-restrictive (lowest tier) so a site policy capping at "default"
+    # cannot be relaxed by a downstream user policy setting "bypass". Same shape
+    # as most_restrictive_network.
+    #
+    # Two spellings share tier 0 ("prompt" is the legacy name for "default"),
+    # which `min` handles: they are equally restrictive, so whichever wins is
+    # the same ceiling either way.
+    _PERMISSIONS_RESTRICTIVENESS = dict(agent_permissions.CAP_VALUES)
 
     def most_restrictive_permissions(getter):
         vals = [getter(p) for p in policies]
@@ -529,7 +571,7 @@ def intersect(*policies: SitePolicy) -> SitePolicy:
             #       able to influence this list at all (widening = self-grant
             #       of a host bind on a multi-tenant cluster). Taking the site
             #       value verbatim denies both widening and (harmlessly)
-            #       narrowing by the user. See DESIGN-160-module-binds.md.
+            #       narrowing by the user. See internal design note DN-002.
             cluster_software_roots=list(policies[0].mounts.cluster_software_roots),
             # caps.modules_inner_load: same SITE-ONLY discipline as
             # cluster_software_roots — admin sets in root-owned policy, user

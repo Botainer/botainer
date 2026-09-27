@@ -184,6 +184,30 @@ def _path_is_related(candidate: str, protected: str) -> bool:
     return False
 
 
+def _under_trusted(src: str, trusted_roots: Iterable[str]) -> bool:
+    """Has an ADMIN explicitly vouched for this source?
+
+    `trusted_source_roots` is a SITE-POLICY field: it is read from the
+    root-owned `/etc/botainer/policy.yaml`. A user-level value is intersected
+    with an empty site default and is therefore inoperative, so naming the
+    user policy here would promise a knob that does not work. The site file
+    is not writable by a caged agent, which is what makes this a legitimate
+    escape hatch rather than a
+    hole: the channel this guards against is the project's own `config.yaml`,
+    which the agent CAN write, and policy is a different channel with a
+    different writer.
+
+    Module-level because two rules consult it now — the sensitive-home list and
+    the state-root rule — and this project's recurring defect is the second
+    copy, not the first implementation.
+    """
+    for tr in trusted_roots:
+        tr_resolved = os.path.expanduser(tr).rstrip("/")
+        if tr_resolved and (src == tr_resolved or src.startswith(tr_resolved + "/")):
+            return True
+    return False
+
+
 def _source_is_denied(source: str, *, trusted_roots: Iterable[str]) -> bool:
     # Task #183: check BOTH the literal source AND the realpath. A
     # symlink at ~/.cache/safe → /etc/shadow would pass the literal
@@ -197,14 +221,6 @@ def _source_is_denied(source: str, *, trusted_roots: Iterable[str]) -> bool:
     except OSError:
         pass  # source may not exist on host (validation may still proceed)
 
-    def _under_trusted(src: str) -> bool:
-        for tr in trusted_roots:
-            tr_resolved = os.path.expanduser(tr).rstrip("/")
-            if tr_resolved and (
-                src == tr_resolved or src.startswith(tr_resolved + "/")
-            ):
-                return True
-        return False
 
     # HARD denylist — refused in EITHER direction (descendant or ancestor);
     # trusted_source_roots does NOT re-allow these (they are absolute host
@@ -225,7 +241,7 @@ def _source_is_denied(source: str, *, trusted_roots: Iterable[str]) -> bool:
         home_sensitive = [f"{home}/{sub}" for sub in SENSITIVE_USER_HOME_SUBPATHS]
         for src in sources_to_check:
             for hs in home_sensitive:
-                if _path_is_related(src, hs) and not _under_trusted(src):
+                if _path_is_related(src, hs) and not _under_trusted(src, trusted_roots):
                     return True
     return False
 
@@ -378,6 +394,81 @@ def validate(plan: MountPlan, *, policy: SitePolicy) -> None:
                 RefusalCategory.MOUNT_PATH_NOT_NORMALIZED,
                 f"source not in canonical form: {b.source!r} → {source!r}",
             )
+        # THE STATE ROOT IS NOT A PLACE A PROJECT CONFIG MAY NAME.
+        #
+        # `DENYLISTED_SOURCES` cannot carry this and adding it there would
+        # break everything: `_source_is_denied` runs on EVERY bind, and seven
+        # of botainer's own `core` binds legitimately live inside the state
+        # root (/packages, /scratch, /home/user, the per-project .botainer
+        # subtree), as does the `plugin` data-dir bind. Measured, not assumed:
+        # of the nine binds a default session composes, eight are inside the
+        # root and every one of them is core or plugin.
+        #
+        # So the rule is not "this path is forbidden" — it is WHO ASKED. A
+        # `USER`-provenance bind is one the project's own config.yaml named,
+        # and a config.yaml is attacker-reachable: /workspace is rw in the
+        # cage, so an agent can write `mounts.extra`. What that reaches is not
+        # a secret at the edges but the whole store — every OTHER project's
+        # credential under `state/<uuid>/`, the shared-auth login, and rw on
+        # `plugins/*/hooks/*.py`, which botainer executes ON THE HOST as the
+        # user at the next `start` in ANY project. That is host code
+        # execution, not information disclosure.
+        #
+        # Bidirectional, via `_path_is_related`: naming the root, naming
+        # anything under it, and naming an ANCESTOR of it are all refused. The
+        # ancestor direction is load-bearing on HPC, where `MY_BOTAINER` is
+        # routinely moved to $SCRATCH — a literal `~/.botainer` would not be
+        # the root at all there, which is the second reason this cannot be a
+        # literal.
+        if b.provenance == _Prov.USER:
+            try:
+                from botainer.state import dir as _sd
+                _r = _sd.ensure_user_state_dir(create_if_missing=False).root
+                # RESOLVE BOTH SIDES. Resolving only the candidate was a
+                # CRITICAL, found by a refuting review: `ensure_user_state_dir`
+                # resolves symlinks on its MY_BOTAINER branch and returns
+                # `Path.home() / ".botainer"` VERBATIM on its default one. So
+                # on a default install whose $HOME traverses a symlink — which
+                # is the ORDINARY cluster layout, `/home/<netid>` →
+                # `/gpfs/...`, with no attacker involved — the resolved
+                # candidate and the literal root are different strings and the
+                # comparison matched nothing. The guard did nothing on exactly
+                # the platform this product targets.
+                _roots = {str(_r).rstrip("/"),
+                          os.path.realpath(str(_r)).rstrip("/")}
+            except Exception as exc:                            # noqa: BLE001
+                # FAIL CLOSED, and say why. A guard that cannot locate what it
+                # protects must not answer "allowed" — that is the shape this
+                # project keeps finding in its own code, where a swallowed
+                # lookup became a plausible-looking permission.
+                raise Refused(
+                    RefusalCategory.MOUNT_SOURCE_DENIED,
+                    f"cannot determine the botainer state root, so the bind "
+                    f"source {source!r} from this project's config cannot be "
+                    f"checked against it ({exc}). Refusing rather than "
+                    f"guessing.",
+                ) from exc
+            # THE SAME ESCAPE HATCH THE SENSITIVE-HOME RULE USES, and the gate
+            # is what taught me to add it: refusing absolutely broke
+            # `test_trusted_source_root_reallows_home`, because $HOME is an
+            # ANCESTOR of ~/.botainer by default, so an admin who had vouched
+            # for their own home directory could no longer bind it. That is a
+            # documented capability, configured deliberately, in a file the
+            # agent cannot write. Consistency with the existing design beats an
+            # invention of mine, and the limit is stated in the contract rather
+            # than left for a reader to discover.
+            for _cand in {source, os.path.realpath(source)}:
+                if (any(_r2 and _path_is_related(_cand, _r2) for _r2 in _roots)
+                        and not _under_trusted(_cand, trusted)):
+                    raise Refused(
+                        RefusalCategory.MOUNT_SOURCE_DENIED,
+                        f"mounts.extra source {source!r} reaches the botainer "
+                        f"state root {sorted(_roots)[0]!r}. That directory holds every "
+                        f"project's credentials and the plugin hooks botainer "
+                        f"runs on the HOST as you, so a project config may not "
+                        f"name it, anything inside it, or any directory that "
+                        f"contains it.",
+                    )
         if _source_is_denied(source, trusted_roots=trusted):
             raise Refused(
                 RefusalCategory.MOUNT_SOURCE_DENIED,

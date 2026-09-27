@@ -142,6 +142,28 @@ _BOTAINER_MANAGED = frozenset({
     # Counterpart for codex; see composition._BOTAINER_MANAGED_ROUTES. A drift
     # test pins these two sets together.
     "CODEX_HOME",
+    # HOME. Added 2026-09-03, and its ABSENCE had broken this plugin outright
+    # since 5cc06e8 (2026-07-13, "give the session container a writable HOME"),
+    # which put HOME into composition._BOTAINER_MANAGED_ROUTES without adding
+    # it here.
+    #
+    # WHY THAT WAS FATAL rather than cosmetic: this hook passes HOME into its
+    # bash subshell (it has to — `module` machinery reads it), `env -0`
+    # captures it, and this set is what gets STRIPPED before the env-file is
+    # written. Missing here meant every env-file carried `HOME=`, and
+    # `_validate_host_env_file` refuses any env-file that sets a route var. So
+    # the hook always succeeded and the launcher always refused the session.
+    # Observed end to end on 2026-09-03: env-file keys came back
+    # [CUDA_HOME, HOME, LD_LIBRARY_PATH, PATH, PWD, USER] and the real
+    # validator answered "[env-var-denied] ... sets botainer-managed
+    # package-routing var 'HOME'".
+    #
+    # TWO GREEN TESTS HID IT. One asserted the hook writes an env-file; another
+    # asserted the validator refuses HOME. Nothing ran the first's output
+    # through the second — the composition gap this repo keeps finding. The
+    # drift test below was also one-directional (hook ⊆ launcher), so a member
+    # missing from the HOOK side was invisible to it by construction.
+    "HOME",
 })
 
 

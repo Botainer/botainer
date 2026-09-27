@@ -14,8 +14,11 @@ from botainer.core import identity
 @click.command("init")
 @click.option(
     "--agent",
-    default="claude",
-    help="The agent plugin this project will use (default: claude).",
+    default=None,
+    help="The agent plugin this project will use (default: claude). On a "
+         "project that already exists this must match the agent already "
+         "recorded; switch with `botainer config set agent <name>`, which "
+         "warns that the switch starts a fresh history.",
 )
 @click.option(
     "--runtime",
@@ -32,7 +35,11 @@ from botainer.core import identity
 @click.option(
     "--force",
     is_flag=True,
-    help="Overwrite existing Main/.botainer/ contents.",
+    help="Rewrite Main/.botainer/config.yaml from the defaults, discarding "
+         "hand edits. The file it replaces is kept as config.yaml.bak (one "
+         "copy — a second --force overwrites it). The project-id and its "
+         "state dir (sessions, credentials, packages) are KEPT: --force never "
+         "re-mints the project identity.",
 )
 @click.option(
     "--non-interactive",
@@ -43,10 +50,11 @@ from botainer.core import identity
     "--name",
     default=None,
     help="Friendly project name (recorded in meta.json; cosmetic only). "
-         "Defaults to the project root basename.",
+         "Sets or updates the name without renaming its folder. When omitted, "
+         "keeps a saved name or uses the project root basename.",
 )
 @_handle_refusals
-def init(agent: str, runtime: str, force: bool, non_interactive: bool,
+def init(agent: str | None, runtime: str, force: bool, non_interactive: bool,
          name: str | None) -> None:
     """Initialize the project in cwd."""
     do_init(Path.cwd(), agent=agent, runtime=runtime, force=force,
@@ -82,6 +90,85 @@ def _mode_of_written_config(project_root) -> str:
     return ""
 
 
+def _short_agent(name: str) -> str:
+    """`agent-claude` and `claude` name the same agent; compare the short form."""
+    return name[len("agent-"):] if name.startswith("agent-") else name
+
+
+def _recorded_agent(project_root: Path) -> str:
+    """The agent this project already has, from the config that was WRITTEN.
+
+    Same move `_mode_of_written_config` and the `runtime_hint` block below
+    already make, and for the same reason: the file on disk is the one source
+    of truth about this project. Returns "" when there is no config to read,
+    which is a real state — `init` on a project whose project-id exists but
+    whose config.yaml does not is a recovery path that must keep working.
+    """
+    try:
+        import yaml as _yaml
+        cfg = _yaml.safe_load(
+            (project_root / ".botainer" / "config.yaml").read_text(
+                encoding="utf-8")
+        ) or {}
+    except Exception:      # noqa: BLE001
+        # A resolver for a display/validation decision must not raise. A
+        # malformed config is answered with "" (treat as unrecorded), not with
+        # a traceback at someone trying to repair that very file with --force.
+        return ""
+    value = cfg.get("agent")
+    return str(value) if isinstance(value, str) and value else ""
+
+
+def _agent_for_this_init(project_root: Path, requested: str | None) -> str:
+    """Which agent this `init` is about — and refuse a silent switch.
+
+    THREE STATES, NOT TWO. `--agent` used to default to "claude" in the click
+    option, so "I did not say" and "I said claude" arrived here as the same
+    value; on a codex project a bare `botainer init --force` was therefore
+    indistinguishable from a request to switch to claude. The option now
+    defaults to None and the three cases are separate:
+
+      * nothing asked, project exists      -> the agent it already has
+      * nothing asked, fresh project       -> "claude", the documented default
+      * asked, and it differs from the recorded one -> REFUSE
+
+    THE REFUSAL IS THE POINT, and it is structural rather than advisory.
+    Before, `--agent codex` on a claude project was silently discarded by
+    `write_initial_config`'s `path.exists() and not force` early return — and
+    then ACTED ON anyway by the next-steps block, which read the REQUESTED
+    agent. Measured: exit 0, the word "Initialized", and instructions to build
+    `agent-codex` (~8-12 min), to `auth login --agent codex`, and to run
+    `botainer plugin agent-codex login`, on a project whose config still said
+    `agent: claude`.
+
+    Honouring it under `--force` is not the alternative. `config set agent`
+    warns that switching agent starts a FRESH history — the two agents keep
+    incompatible on-disk state, so there is nothing to carry — and names both
+    directories. An `init --force` that rewrote `agent:` would perform that
+    switch with none of it said, making this the one path where the warning can
+    be skipped. So `init` never changes the agent, and says where to.
+    """
+    recorded = _recorded_agent(project_root)
+    if requested is None:
+        return recorded or "claude"
+    if recorded and _short_agent(requested) != _short_agent(recorded):
+        from botainer.core.refusal import Refused, RefusalCategory
+        raise Refused(
+            RefusalCategory.CONFIG_INVALID,
+            f"this project is already set up for {recorded!r}, and `init` does "
+            f"not change that.\n"
+            f"  To switch it to {_short_agent(requested)!r}:\n"
+            f"      botainer config set agent {_short_agent(requested)}\n"
+            f"  That command says what the switch costs — each agent keeps its "
+            f"own history in its own\n"
+            f"  on-disk format, so switching starts a fresh one and names both "
+            f"directories.\n"
+            f"  To reset THIS project's config without changing its agent: "
+            f"botainer init --force",
+        )
+    return recorded or requested
+
+
 def do_init(
     project_root: Path,
     *,
@@ -97,11 +184,17 @@ def do_init(
     Creates `.botainer/project-id` (stable UUID), `.botainer/config.yaml`
     (capabilities + plugin config), and the host-only state dir at
     `${MY_BOTAINER:-~/.botainer}/state/<uuid>/`.
+
+    `agent=None` means THE CALLER SAID NOTHING, which is not the same as saying
+    "claude" — see `_agent_for_this_init`.
     """
+    # Check before plugin discovery or identity/config writes; the lower-level
+    # identity entry point also enforces this for callers outside this CLI.
+    name = identity.validate_project_name(name)
+    agent = _agent_for_this_init(project_root, agent)
     # Validate --agent against known plugins so a typo fails NOW, not at
     # `botainer start` time after the user has already invested in setup.
     # (Advanced-user review CRITICAL #1.)
-    agent = agent or "claude"
     _validate_agent_name(agent, force=force)
 
     result = identity.init_project(
@@ -109,19 +202,35 @@ def do_init(
         agent=agent,
         force=force,
         non_interactive=non_interactive,
+        name=name,
     )
-    config_module.write_initial_config(
+    backup = config_module.write_initial_config(
         project_root, agent=agent, force=force,
         runtime=runtime or "auto",
     )
     plugin_name = f"agent-{agent}" if not agent.startswith("agent-") else agent
     if quiet:
         return
-    click.echo(f"Initialized {project_root} (project-id: {result.project_id})")
+    if result.was_existing:
+        # "Initialized" was printed here for a project that already existed,
+        # which is how `init --agent codex` on a claude project came to announce
+        # success and then hand out four instructions for the wrong agent.
+        verb = "Re-initialized" if backup else "Recognized existing project at"
+        click.echo(f"{verb} {project_root} (project-id: {result.project_id})")
+        if backup:
+            click.echo(f"Previous config kept at: {backup}")
+        else:
+            click.echo("config.yaml left as it is "
+                       "(pass --force to reset it to the defaults).")
+    else:
+        click.echo(
+            f"Initialized {project_root} (project-id: {result.project_id})")
     click.echo(f"State dir: {result.state_dir}")
     click.echo(f"Config:    {project_root / '.botainer' / 'config.yaml'}")
+    if name is not None:
+        click.echo(f"Project name: {name}")
 
-    # AUTH-PRODUCT-PLAN §9: when init writes shared-mode plugins (the
+    # internal design note DN-040 §9: when init writes shared-mode plugins (the
     # default per policy.default_auth_mode), print a prominent warning
     # so the user knows what they're getting + how to switch back.
     # READ WHAT WAS WRITTEN, NOT WHAT WAS REQUESTED.

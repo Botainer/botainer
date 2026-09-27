@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "botainer"
-version = "0.1.0a4"
+version = "0.1.0a5"
 # The one-line subtitle on the PyPI project page, in `pip show`, and in any
 # index listing — the first sentence a stranger reads. Keep it a description of
 # what the tool DOES; per CLAUDE.md a short surface states facts and never

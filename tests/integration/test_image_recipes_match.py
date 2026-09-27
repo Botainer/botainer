@@ -8,11 +8,8 @@ Both files pin the same upstream component versions (CLI, miniforge,
 julia, agent UID/GID). They have to stay in sync or the docker image
 and the .sif diverge — same image label, different contents.
 
-Drift has bitten twice in two days:
-  - commit 85f0ca1: Dockerfile bumped CLAUDE_CODE_VERSION;
-    .def stayed pinned to a now-unpublished version → real-host Grace
-    build failed with npm 'notarget'.
-  - commit 4fb1f0f: same shape, different version.
+Updating only one recipe can leave the other pinned to an unavailable
+upstream version, causing the corresponding image build to fail.
 
 Same principle-vs-prose failure mode as the umbrella-bind disaster:
 the rule lives only in a comment ("mirrors the Dockerfile") and
@@ -140,8 +137,7 @@ def test_image_recipes_agree_on_pins(agent: str) -> None:
         f"that the Dockerfile declares. Either add `export NAME=value` in the "
         f"%post block of {def_file} (mirroring the Dockerfile) or, if "
         f"intentionally omitted, add a `# RECIPE-OMIT: NAME — why` comment to "
-        f"the .def. Drift in this direction is exactly the 2026-05-19 Grace "
-        f"build failure (HPC parity rule, CLAUDE.md)."
+        f"the .def. Recipe drift can break one runtime while the other builds."
     )
 
     # Every pin present on both sides must have the same value.

@@ -155,10 +155,23 @@ def test_the_reconcile_is_callable_by_both_hooks(plugin):
     WILL disagree about what a valid back-fill is — which is this whole file's
     subject.
     """
-    post = (REPO / "plugins" / plugin / "hooks" / "post_session.py").read_text()
-    assert "from pre_session import reconcile_shared_credential" in post, (
-        f"{plugin}/post_session.py does not call pre_session's reconcile; a "
-        f"second implementation will drift from the first"
+    # AST, not a substring: a comment or a docstring mentioning the import
+    # satisfied the old check, and the gate's own advice for a test that must
+    # inspect code is to parse it.
+    import ast
+
+    tree = ast.parse(
+        (REPO / "plugins" / plugin / "hooks" / "post_session.py").read_text())
+    imported = {
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module == "pre_session"
+        for alias in node.names
+    }
+    assert "reconcile_shared_credential" in imported, (
+        f"{plugin}/post_session.py does not IMPORT pre_session's reconcile "
+        f"(found: {sorted(imported) or 'nothing from pre_session'}); a second "
+        f"implementation will drift from the first"
     )
 
 

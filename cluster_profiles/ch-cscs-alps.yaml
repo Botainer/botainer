@@ -65,6 +65,7 @@ slurm:
       max_time_minutes: 30          # max 2 nodes/job, ~24 nodes reserved
       gpu_types: [gh200]
     low:
+      preemptible: true
       max_time_minutes: 1440        # 24 h, low priority/preemptible
       gpu_types: [gh200]
     xfer:

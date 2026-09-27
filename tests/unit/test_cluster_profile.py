@@ -72,7 +72,12 @@ def test_write_user_profile_preserves_the_scheduler_declaration(tmp_path, monkey
     monkeypatch.setenv("MY_BOTAINER", str(tmp_path))
     for sched in ("pbs", "lsf", "sge", "slurm"):
         prof = cp.ClusterProfile(name=f"x-{sched}", scheduler=sched)
-        path = cp.write_user_profile(prof)
+        # force=: each iteration deliberately REPLACES the previous file, which
+        # `write_user_profile` now refuses by default (#227 — `hpc setup` used
+        # to silently destroy a hand-edited cluster.yaml). The subject here is
+        # the serialisation round trip, not the clobber guard, which has its own
+        # tests in test_hpc_setup_does_not_eat_your_cluster_yaml.py.
+        path = cp.write_user_profile(prof, force=True)
         back = yaml.safe_load(path.read_text())
         assert back["slurm"]["scheduler"] == sched, (
             f"write_user_profile dropped scheduler={sched!r} on the round trip; "

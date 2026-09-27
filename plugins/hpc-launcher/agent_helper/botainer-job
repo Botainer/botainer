@@ -167,8 +167,15 @@ def cmd_pool(args: argparse.Namespace) -> int:
                   "`botainer-job pool start <profile> [--size N]`)")
             return 0
         for w in workers:
+            age = w.get("heartbeat_age_s")
+            beat = "" if age is None else f"  last-beat={age}s"
             print(f"{w.get('worker_id','?')}  profile={w.get('profile','?')}  "
-                  f"state={w.get('state','?')}")
+                  f"state={w.get('state','?')}{beat}")
+            # The worker's OWN reason for not running, which the host publishes
+            # here. Printing `state=never-started` and withholding the line that
+            # says why left the agent nothing to act on and nothing to report.
+            if w.get("reason"):
+                print(f"    why: {w['reason']}")
         return 0
     # start / stop → a control request into the inbox.
     if action == "start" and not _PROFILE_RE.match(args.profile or ""):
@@ -284,8 +291,14 @@ def main(argv: list[str] | None = None) -> int:
     ps.add_argument("--gpus", type=int, default=None, help="override gpus (<= max_gpus)")
     ps.add_argument("--nodes", type=int, default=None, help="override nodes (<= max_nodes)")
     ps.add_argument("--time", default=None, help="override time e.g. 02:00:00 (<= max_time)")
-    ps.add_argument("command", nargs=argparse.REMAINDER,
-                    help="the command argv (optionally after `--`)")
+    # nargs="*" NOT REMAINDER. REMAINDER starts collecting at the first token
+    # after `profile` and takes options with it, so `--cpus 8` never reached
+    # the parser at all. With "*" argparse matches the optionals first and the
+    # command is whatever positional run is left; anything option-shaped that
+    # is genuinely part of the user's command goes after `--`, which main()
+    # splits off before the parser ever sees it.
+    ps.add_argument("command", nargs="*",
+                    help="the command argv (put it after `--` if it has flags)")
 
     # #68 warm/hot worker pool.
     pp = sub.add_parser("pool", help="warm/hot worker pool (start/stop/status)")
@@ -312,7 +325,40 @@ def main(argv: list[str] | None = None) -> int:
     pc = sub.add_parser("cancel", help="cancel a job")
     pc.add_argument("id")
 
-    args = parser.parse_args(argv)
+    # SPLIT ON `--` BEFORE argparse SEES IT.
+    #
+    # `command` is `nargs=REMAINDER`, and REMAINDER starts collecting at the
+    # first token after the preceding positional — INCLUDING options. So
+    #
+    #     botainer-job submit big --cpus 8 --mem 64G python train.py
+    #
+    # parsed as cpus=None, mem=None, command=['--cpus','8','--mem','64G',
+    # 'python','train.py']. Every resource flag the in-container hints teach
+    # was swallowed into the command and the job ran with profile defaults,
+    # silently. Adding `--` did not help either: REMAINDER kept the `--`.
+    #
+    # Splitting here means the resource flags are parsed from a token list
+    # that CANNOT contain the user's command, and the command is taken
+    # verbatim from the other side. There is no ordering rule left to get
+    # wrong, so `--cpus 8 -- python train.py` and `-- python --cpus 8` both do
+    # the obvious thing.
+    #
+    # Reproduced by running, in this dev container, with no Slurm and no
+    # dispatcher — an earlier commit claimed this needed a real cluster to
+    # observe. It did not.
+    _argv = list(sys.argv[1:] if argv is None else argv)
+    _after: list[str] | None = None
+    if "--" in _argv:
+        _cut = _argv.index("--")
+        _argv, _after = _argv[:_cut], _argv[_cut + 1:]
+        args = parser.parse_args(_argv)
+    else:
+        # No `--`: let argparse take the flags it knows and treat whatever it
+        # could not place as the command.
+        args, _unknown = parser.parse_known_args(_argv)
+        _after = (list(getattr(args, "command", []) or []) + list(_unknown)) or None
+    if _after is not None and hasattr(args, "command"):
+        args.command = _after
     return {
         "profiles": cmd_profiles, "submit": cmd_submit, "list": cmd_list,
         "status": cmd_status, "logs": cmd_logs, "cancel": cmd_cancel,

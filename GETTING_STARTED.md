@@ -33,8 +33,7 @@ botainer-managed Anthropic credentials live in a flat file at:
 
 Mode `0600` (user read/write only). This is a deliberate v0.1.0
 design choice for cross-platform consistency (Linux + HPC don't have
-Keychain). Keychain backing is on the v0.1.x roadmap (see
-an internal design note; Keychain backing is on the v0.1.x roadmap).
+Keychain). Keychain backing is on the v0.1.x roadmap.
 
 **Recommendation for Mac users:** ensure FileVault is enabled, so the
 credential is encrypted at rest. Without FileVault the file is plaintext
@@ -152,17 +151,15 @@ host does NOT need the Claude CLI; it does need the image built first), with
 
 | Mode | Credentials live at | Switch with |
 |---|---|---|
-| `shared` (**default**) | `~/.botainer/shared-auth/agent-claude/.credentials.json` (one host, all projects — less isolated; `start` warns) | `botainer auth use shared` |
-| `isolated` | `~/.botainer/state/<uuid>/data/agent-claude/profiles/default/` (per-project) | `botainer auth use isolated` |
+| `shared` | `~/.botainer/shared-auth/agent-claude/.credentials.json` (one host, all projects — less isolated; `start` warns) | `botainer auth use shared` |
+| `isolated` (**default**) | `~/.botainer/state/<uuid>/data/agent-claude/profiles/default/` (per-project) | `botainer auth use isolated` |
 | `proxy` (⚠ NOT FUNCTIONAL at v0.1.0) | *designed to* keep the real key on the host with the container seeing an ephemeral token — but a proxy session **refuses to start** today (see below) | (don't — use shared/isolated) |
 
 `botainer auth status` prints the active mode + where the credential
 file lives. Mode `proxy` is **NOT FUNCTIONAL at v0.1.0**: the proxy hands
 the agent an ephemeral `ANTHROPIC_API_KEY`, but botainer's credential-leak
 guard refuses any env var by that name on principle, so a proxy session
-cannot start on any runtime. Use `shared` or `isolated`. The work to make
-proxy functional (a scoped leak-check exemption + OAuth refresh-on-401) is
-tracked in botainer's internal design notes.
+cannot start on any runtime. Use `shared` or `isolated`. Proxy support requires further implementation and runtime testing.
 
 ## 5. Inspect, dry-run, then launch
 

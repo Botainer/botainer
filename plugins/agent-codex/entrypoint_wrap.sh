@@ -48,12 +48,47 @@ if [ -r "$HINTS_FILE" ]; then
     [ -f "$CODEX_DIR/AGENTS.override.md" ] && _inject "$CODEX_DIR/AGENTS.override.md"
 fi
 
-# Read API key file into OPENAI_API_KEY if present (mount-mode auth). In BROKER
-# mode no key file is mounted, so this is skipped and the sentinel OPENAI_API_KEY
-# the broker provisioned survives. Quote the cat arg (the value is launcher-set,
-# so this is robustness, not an attacker vector).
+# Read the API key file into the environment (mount-mode auth). In BROKER mode
+# no key file is mounted, so this is skipped and the sentinel the broker
+# provisioned survives. Quote the cat arg (the value is launcher-set, so this is
+# robustness, not an attacker vector).
+#
+# CODEX_API_KEY, *not* OPENAI_API_KEY. Measured against codex-cli 0.145.0: with
+# only OPENAI_API_KEY set, codex behaves exactly as if no credential were
+# present; with CODEX_API_KEY set it sends the key. The binary's own message is
+# "run `codex login` or set CODEX_API_KEY", and its only mentions of
+# OPENAI_API_KEY are help text suggesting you PIPE it in
+# (`printenv OPENAI_API_KEY | codex login --with-api-key`) — i.e. it is an input
+# to the login command, never an ambient variable codex reads.
+#
+# So every mount/isolated/shared codex session was handing the key to a variable
+# nothing reads. Both names are exported: CODEX_API_KEY is what works today, and
+# OPENAI_API_KEY is kept because it costs nothing and other tools in the image
+# (SDKs, notebooks) conventionally read it — the user mounted a key, they should
+# be able to use it.
 if [ -r "${OPENAI_API_KEY_FILE:-/home/agent/.openai/api_key}" ]; then
-    export OPENAI_API_KEY="$(cat "${OPENAI_API_KEY_FILE:-/home/agent/.openai/api_key}")"
+    _codex_key="$(cat "${OPENAI_API_KEY_FILE:-/home/agent/.openai/api_key}")"
+    export CODEX_API_KEY="$_codex_key"
+    export OPENAI_API_KEY="$_codex_key"
+    unset _codex_key
+elif [ -n "${OPENAI_API_KEY:-}" ] && [ -z "${CODEX_API_KEY:-}" ]; then
+    # BROKER MODE HAS NO KEY FILE: agent-codex-broker delivers its sentinel as
+    # the OPENAI_API_KEY *environment variable* (via the session env-file), not
+    # as a file on disk, so the branch above never runs. Mirror it under the
+    # other name for the same reason that branch exports both — the two names
+    # are read by different things and neither costs anything.
+    #
+    # THIS IS NOT WHAT MAKES BROKER MODE WORK, and it was added on 2026-09-04
+    # believing it was. The symptom then was codex demanding a login with the
+    # broker running; the cause was not a missing key but that codex never
+    # contacted the broker at all (it ignores OPENAI_BASE_URL). Routing is a
+    # `model_providers` entry in $CODEX_HOME/config.toml, written host-side by
+    # the broker hook — see plugins/agent-codex-broker/hooks/start_broker.py
+    # `_provider_config_toml`. That config names OPENAI_API_KEY as its
+    # `env_key`, so the line below is redundant for codex itself and kept only
+    # for the non-broker env case. Setting both was VERIFIED not to disturb the
+    # provider (codex 0.153.2, 2026-09-04).
+    export CODEX_API_KEY="$OPENAI_API_KEY"
 fi
 
 # #53 / T0-2: codex's in-cage posture flags (--sandbox danger-full-access

@@ -22,6 +22,8 @@ from pydantic import (
     model_validator,
 )
 
+from botainer import auth_modes as _auth_modes
+from botainer.core import agent_permissions
 from botainer.core.refusal import RefusalCategory, Refused
 from botainer.core.spec import validate_profile_name
 
@@ -407,11 +409,29 @@ class ProjectConfig(BaseModel):
     #      `permissions: skip` default and the "container is the boundary" thesis.
     #   "prompt" — the agent's stock interactive approval prompts. Only usable
     #      with a TTY (interactive `here`); do NOT use for batch.
-    # A site policy may CAP this at "prompt" (see policy.AgentPolicy). Composed
-    # into a --cleanenv-carried BOTAINER_AGENT_PERMISSIONS env var that each
-    # agent's entrypoint wrapper maps to its own flags (claude
-    # --dangerously-skip-permissions; codex --sandbox danger-full-access
-    # --ask-for-approval never). See DN-010.
+    # A site policy may CAP this at "prompt" (see policy.AgentPolicy).
+    #
+    # HOW IT REACHES THE AGENT — and this comment described the wrong mechanism
+    # until 2026-08-31, which matters because this is the text a user reads to
+    # understand the field. It said the value is "composed into a
+    # --cleanenv-carried BOTAINER_AGENT_PERMISSIONS env var that each agent's
+    # entrypoint wrapper maps to its own flags". That WAS built (704c11f,
+    # 2026-07-03) and was REVERTED the next day (4fb80b5) after a live cluster
+    # transcript showed the agent still prompting: the wrapper lived in a `.sif`
+    # built before the fix, so shipping the logic in the image meant it only
+    # took effect after a rebuild nobody had done.
+    #
+    # What actually happens: trusted compose appends the flags to the agent argv
+    # from `_AGENT_BYPASS_FLAGS` (composition.py:1010-1014) — claude
+    # `--dangerously-skip-permissions`; codex `--sandbox danger-full-access
+    # --ask-for-approval never`. One table, in first-party code, so a stale
+    # image cannot change the posture.
+    #
+    # BOTAINER_AGENT_PERMISSIONS is still set in the container env, but ONLY as
+    # a posture SIGNAL the agent may read. Both entrypoint wrappers say so in
+    # their own comments and neither acts on it; docs/CAPABILITY-SURFACE.md §1
+    # says the same. This file was the last place still describing the reverted
+    # design. Full derivation: internal design note DN-010.
     agent_permissions: str = "bypass"
 
     @field_validator("runtime")
@@ -434,10 +454,21 @@ class ProjectConfig(BaseModel):
         # like `agent_permissions: bypss` must be refused at parse, not silently
         # treated as "prompt" (which would deadlock a batch job) or "bypass"
         # (which would silently disable prompts the user thought they'd kept).
-        valid = {"bypass", "prompt"}
+        #
+        # VALIDATION IS TWO-STAGE, and this is the WIDE half. The legal set is
+        # per-agent (claude has `acceptEdits`, codex has `on-request`), but the
+        # agent is NOT known here: `agent:` is a sibling field, and
+        # `botainer start --agent codex` (#112) can override it after parse. So
+        # narrowing here would be wrong for `--agent`. This stage catches a
+        # typo; compose catches a cross-agent mistake, where `agent:` is
+        # settled and the refusal can name what the chosen agent accepts.
+        valid = agent_permissions.ALL_KNOWN_VALUES
         if v not in valid:
             raise ValueError(
-                f"agent_permissions must be one of {sorted(valid)} (got {v!r})."
+                f"agent_permissions must be one of {sorted(valid)} (got {v!r}). "
+                f"`bypass` and `default` mean the same thing for every agent; "
+                f"the rest are the agents' own mode names and are checked "
+                f"against the agent you selected when the session is composed."
             )
         return v
     network: NetworkConfig = Field(default_factory=NetworkConfig)
@@ -447,8 +478,77 @@ class ProjectConfig(BaseModel):
     env: dict[str, str] = Field(default_factory=dict)
     plugins: dict[str, dict[str, Any]] = Field(default_factory=dict)
     plugins_enabled: list[str] = Field(default_factory=list)
+    #: Agent families whose CREDENTIALS are bound without their entrypoint
+    #: running. (#230) `agent:` decides WHICH AGENT STARTS; this decides WHOSE
+    #: CREDENTIALS ARE PRESENT. They were one decision because one plugin
+    #: carried both, which is why `--agent` had to do plugin surgery and why a
+    #: message about choosing an agent talked to the user about credentials.
+    #:
+    #: Values are the SHORT family name (`codex`, `claude`). Naming the running
+    #: agent here is a no-op, not an error: its credentials are bound anyway.
+    #:
+    #: The injected agent's CLI is NOT in the running agent's image — the images
+    #: are single-agent (agent-claude installs @anthropic-ai/claude-code only).
+    #: `npm install -g <cli>` inside the session puts it in /packages and it
+    #: persists; see NPM_CONFIG_PREFIX in the Dockerfiles.
+    inject_credentials: list[str] = Field(default_factory=list)
     # #54: named, capped resource shapes the agent may dispatch jobs into.
     job_profiles: dict[str, JobProfile] = Field(default_factory=dict)
+
+    # Optional one-line notes saying what each auth profile is FOR.
+    #
+    # WHY THIS EXISTS. `docs/CAPABILITY-SURFACE.md` §4cm makes a profile an
+    # ACCOUNT boundary, and until now the only thing distinguishing `personal`
+    # from `work` was the string itself. A user deciding which account a session
+    # is about to spend had a name and nothing else.
+    #
+    # WHY IT LIVES HERE and not beside the credential. The profile DIRECTORY is
+    # bound into the container at /home/agent/.claude and the agent writes
+    # there, so a note stored in it would be a label the agent could forge —
+    # and this label's whole job is to inform an account decision. Project
+    # config is host-side and read-only to the container.
+    #
+    # It is a LABEL, not a grant: nothing reads it to decide anything, so a
+    # wrong or hostile note misinforms and cannot authorise. Deliberately flat
+    # (name -> text) so adding one is a single line and creating a profile stays
+    # "type a name".
+    #
+    # Named `profile_notes` rather than `profiles` on purpose: `--profile`
+    # already means two unrelated things (#160) and a `profiles:` key sitting
+    # next to `profile:` would be a third way to be confused.
+    profile_notes: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("profile_notes")
+    @classmethod
+    def _profile_notes_are_short_single_line_text(
+        cls, v: dict[str, str]
+    ) -> dict[str, str]:
+        """A note is printed into a terminal listing, so bound its shape.
+
+        Not a security control — the value is host-side and grants nothing —
+        but a multi-line or control-character note would wreck the table it
+        appears in, and a config that renders badly is a config that gets
+        ignored.
+        """
+        for name, text in v.items():
+            if not isinstance(text, str):
+                raise ValueError(
+                    f"profile_notes[{name!r}] must be text, got "
+                    f"{type(text).__name__}."
+                )
+            if len(text) > 200:
+                raise ValueError(
+                    f"profile_notes[{name!r}] is {len(text)} characters; keep "
+                    f"it under 200 — it is a one-line label, not documentation."
+                )
+            if any(ch in text for ch in "\n\r\t") or any(
+                ord(ch) < 32 for ch in text
+            ):
+                raise ValueError(
+                    f"profile_notes[{name!r}] contains a newline or control "
+                    f"character; it is printed as one line in a listing."
+                )
+        return v
 
     @model_validator(mode="after")
     def _reject_misplaced_top_level_key_under_plugins(self) -> "ProjectConfig":
@@ -515,6 +615,35 @@ class ProjectConfig(BaseModel):
                 raise ValueError(
                     f"agent {v!r} must not contain whitespace/control chars."
                 )
+            # CANONICAL SHORT FORM, because two readers disagreed about the
+            # prefixed one. `agent: agent-claude` is accepted everywhere inside
+            # botainer (`_agent_plugin_name` and `_agent_variant_for_mode` both
+            # tolerate it) and the standalone hpc-launcher helper does not: it
+            # builds `agent-{value}` unconditionally, so `hpc submit` resolved
+            # `botainer-agent-agent-claude.sif` and refused naming a file the
+            # user never typed, while `start` launched the real one. Measured by
+            # a refuting review. `botainer init --agent agent-claude` can write
+            # this state itself, so refusing it outright would refuse a config
+            # botainer produced.
+            #
+            # So: strip ONE `agent-` prefix and store the short form. A SECOND
+            # one is not a spelling confusion and is refused by name — silently
+            # accepting `agent-agent-claude` would be the same class of
+            # tolerance that caused this.
+            if v.startswith("agent-"):
+                v = v[len("agent-"):]
+                if v.startswith("agent-"):
+                    raise ValueError(
+                        f"agent {v!r} still starts with 'agent-' after one "
+                        f"prefix was stripped. Write the SHORT name — "
+                        f"`agent: claude`, not `agent: agent-agent-claude`; "
+                        f"botainer adds the `agent-` prefix itself."
+                    )
+                if not v:
+                    raise ValueError(
+                        "agent 'agent-' names no agent. Write the short name, "
+                        "e.g. `agent: claude`."
+                    )
         return v
 
     @field_validator("profile")
@@ -535,10 +664,9 @@ class ProjectConfig(BaseModel):
 def _explain_config_error(raw: dict, exc: Exception) -> str:
     """Turn a pydantic dump into something a human can act on.
 
-    User report: they wrote `job-profiles:` instead of
-    `job_profiles:` and could not work out what was wrong. `extra="forbid"`
-    knew the key was unknown AND held the complete list of valid names, and
-    told them neither — just "Extra inputs are not permitted".
+    Unknown keys should identify the misspelled name and suggest valid keys.
+    For example, `job-profiles` is a near miss for `job_profiles`; the raw
+    extra-field error alone does not tell the user how to correct it.
 
     Three things are added, cheapest first:
       1. NEAR-MISS suggestion (difflib). A hyphen-for-underscore typo is the
@@ -624,7 +752,7 @@ def load_config(project_root: Path) -> ProjectConfig:
 def _resolve_default_auth_mode() -> str:
     """Read policy.yaml's default_auth_mode (host-wide). Empty if unset.
 
-    Per AUTH-PRODUCT-PLAN.md §9 + codex 45#6 follow-up: `botainer init`
+    Per internal design note DN-040 §9 + codex 45#6 follow-up: `botainer init`
     honors this so a user who set `botainer policy set default_auth_mode
     shared` (or `botainer auth use shared --global`) gets shared-mode
     projects by default."""
@@ -640,7 +768,7 @@ def _agent_variant_for_mode(agent: str, mode: str) -> str:
 
     `agent` is the SHORT form (e.g. "claude"); we return the full plugin
     name (e.g. "agent-claude-shared"). Mode-suffix convention is
-    documented in AUTH-PRODUCT-PLAN.md §1.
+    documented in internal design note DN-040 §1.
     """
     base = agent if agent.startswith("agent-") else f"agent-{agent}"
     if mode == "isolated" or not mode:
@@ -654,11 +782,38 @@ def write_initial_config(
     agent: str,
     force: bool,
     runtime: str = "auto",
-) -> None:
+) -> Path | None:
+    """Write the project's starting config. Returns the backup path, or None.
+
+    `force` overwrites an existing config.yaml — that is the whole point of the
+    flag — so THE FILE IT REPLACES IS KEPT FIRST, here rather than in the
+    caller. One chokepoint: nothing can reach the overwrite without passing the
+    backup, which is the difference between a property and a rule someone has
+    to remember. (`botainer init --force` refused on every existing project
+    until 2026-09-17, so this overwrite had never once run against a file a
+    user had edited; making the flag work is what created the hazard.)
+
+    `shutil.copy2` rather than a read-and-write, so the copy inherits the
+    original's mode: a backup must never be more readable than what it copies.
+
+    ONE `.bak`, overwritten, not a timestamped series — a per-run file is an
+    unbounded write into the user's project, and the realistic use of `--force`
+    is once. The trade is stated in the `--force` help rather than left for
+    someone to discover.
+
+    The backup is NOT reachable by the agent: `/workspace/.botainer` is
+    null-bound in the mount plan and exactly one file is re-mounted inside it
+    (AGENT_ACCESS.txt, ro).
+    """
     path = project_root / HOST_MANAGED_DIR / CONFIG_FILENAME
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists() and not force:
-        return
+        return None
+    backup: Path | None = None
+    if path.exists():
+        import shutil as _shutil
+        backup = path.with_suffix(path.suffix + ".bak")
+        _shutil.copy2(path, backup)
     # Resolve which variant of the agent plugin to enable based on
     # the host-wide default_auth_mode policy.
     default_mode = _resolve_default_auth_mode()
@@ -691,7 +846,8 @@ def write_initial_config(
         f"   # captured from policy.default_auth_mode at init time;\n"
         f"                            # this project stays on {default_mode!r} even if you\n"
         f"                            # change the policy default later. Switch with\n"
-        f"                            # `botainer auth use isolated|shared|proxy`.\n"
+        f"                            # `botainer auth use "
+        f"{_auth_modes.mode_list_hint()}`.\n"
         if default_mode
         else "\n"
     )
@@ -747,6 +903,49 @@ def write_initial_config(
         _net_mode_default = "internet"
         _net_comment = ""
         _runtime_note = ""
+
+    # The permission words THIS agent understands, listed by name. Writing a
+    # generic list would reproduce the defect this block exists to fix: a
+    # config comment that names values the selected agent does not accept.
+    # `bypass` and `default` are handled above (they mean the same for every
+    # agent); this is the agent's OWN vocabulary.
+    _perm_short = agent[len("agent-"):] if agent.startswith("agent-") else agent
+    _perm_family = ("anthropic" if _perm_short.startswith("claude")
+                    else "openai" if _perm_short.startswith("codex") else None)
+    _perm_own = sorted(
+        m for m in agent_permissions.modes_for(_perm_family)
+        if not agent_permissions.is_botainer_word(m)
+    )
+    _perm_own_words = " | ".join(_perm_own) if _perm_own else "(this agent has no others)"
+    # `default` does not mean "append nothing" for every agent, and saying so
+    # where it is false is the defect this rewrite exists to remove. codex's own
+    # default sandbox cannot START in a container, so botainer pins that ONE
+    # axis and leaves the asking to codex. Stated here rather than hidden.
+    _perm_pin_note = ""
+    if agent_permissions.argv_for(_perm_family, "default"):
+        _perm_pin_note = (
+            f"                               #   NOTE for {_perm_short}: botainer still pins\n"
+            f"                               #   `--sandbox danger-full-access`, because\n"
+            f"                               #   {_perm_short}'s own sandbox cannot start inside a\n"
+            f"                               #   container. The container is the boundary.\n"
+        )
+    if _perm_own:
+        _lines = [
+            f"                               # {_perm_short}'s own modes, passed straight"
+            f" through:\n"
+        ]
+        for _m in _perm_own:
+            _gloss = agent_permissions.gloss_for(_perm_family, _m) or ""
+            _lines.append(
+                f"                               #   {_m}: {_gloss}\n")
+        for _m, _why in sorted(
+                agent_permissions.REFUSED.get(_perm_family or "", {}).items()):
+            _lines.append(
+                f"                               # {_m} is REFUSED — {_why.split('.')[0]}.\n")
+        _perm_own_words_block = "".join(_lines)
+    else:
+        _perm_own_words_block = ""
+
     content = (
         f"# {HOST_MANAGED_DIR}/{CONFIG_FILENAME} — project config (git-shareable).\n"
         f"# Describes the capabilities your agent gets in this project. Host-only\n"
@@ -757,16 +956,32 @@ def write_initial_config(
         f"# projects; edit this file or use `botainer auth use` / similar.\n"
         f"\n"
         f"version: config-v1\n"
-        f"agent: {agent}\n"
+        # The SHORT form, always — see `_validate_agent`. `init --agent
+        # agent-claude` is a thing people do, and writing it back verbatim is
+        # what let the two resolvers disagree.
+        f"agent: {agent[len('agent-'):] if agent.startswith('agent-') else agent}\n"
+        f"                               # The OTHER agent is `codex`. Both are\n"
+        f"                               # supported; this line picks the default.\n"
+        f"                               #   one session only:  botainer start --agent codex\n"
+        f"                               #   preview it first:   botainer inspect --agent codex\n"
+        f"                               #   permanently:        botainer config set agent codex\n"
+        f"                               # Each agent has its OWN image, login and\n"
+        f"                               # history; /workspace, /packages and /scratch\n"
+        f"                               # are shared between them.\n"
         f"profile: default\n"
-        f"agent_permissions: bypass      # bypass | prompt\n"
-        f"                               # bypass (default): the agent runs with NO\n"
-        f"                               #   per-action permission prompts — the container\n"
-        f"                               #   is the boundary. REQUIRED for unattended /\n"
-        f"                               #   HPC-batch runs (no TTY to answer a prompt).\n"
-        f"                               # prompt: the agent asks before consequential\n"
-        f"                               #   actions (interactive/TTY only; would DEADLOCK\n"
-        f"                               #   a batch job). A site policy may cap this.\n"
+        f"agent_permissions: bypass      # bypass | default | {_perm_own_words}\n"
+        f"                               # bypass (the default): botainer turns the\n"
+        f"                               #   agent's OWN permission system off, so nothing\n"
+        f"                               #   asks. REQUIRED for unattended / HPC-batch\n"
+        f"                               #   runs — there is no TTY to answer a prompt on.\n"
+        f"                               # default: botainer does not choose whether you\n"
+        f"                               #   are asked. That becomes the agent's own\n"
+        f"                               #   decision — NOT a promise botainer can make\n"
+        f"                               #   on its behalf.\n"
+        f"{_perm_pin_note}"
+        f"{_perm_own_words_block}"
+        f"                               # A site policy may cap this; see\n"
+        f"                               #   `botainer policy show`.\n"
         f"runtime: {runtime}                  # docker (laptop) | apptainer (HPC) | mock | auto"
         f"{_runtime_note}\n"
         f"\n"
@@ -778,16 +993,32 @@ def write_initial_config(
         f"{_net_comment}"
         f"  endpoints: []                # endpoint groups when mode=endpoint-ip-allowlist\n"
         f"\n"
-        f"# CPU + memory limits. Applied to BOTH runtimes:\n"
-        f"#   docker     → `--cpus <N> --memory <M>m`\n"
-        f"#   apptainer  → `#SBATCH --cpus-per-task=<N> --mem=<M>m` in the sbatch script\n"
-        f"# Same semantics; only the mechanism differs. Null = no limit (subject to policy).\n"
+        f"# CPU + memory limits. DOCKER ONLY — `--cpus <N> --memory <M>m`.\n"
+        f"# Apptainer has no exec-time cgroup support, so setting either of\n"
+        f"# these REFUSES an apptainer launch rather than silently ignoring it.\n"
+        f"# For a cluster job, size it where the sbatch request is actually\n"
+        f"# built: plugins.hpc-launcher.cpus / .memory_gb (see below).\n"
+        f"# Null = no limit (subject to policy).\n"
         f"resources:\n"
-        f"  cpu: null                    # integer cores\n"
-        f"  memory_mb: null              # integer MB\n"
+        f"  cpu: null                    # integer cores   (docker only)\n"
+        f"  memory_mb: null              # integer MB      (docker only)\n"
         f"\n"
         f"mounts:\n"
-        f"  extra: []                    # extra bind mounts (must be in policy allowlist)\n"
+        f"  # Extra bind mounts. `extra: []` is the empty form; a real entry needs\n"
+        f"  # source + target, and takes an optional mode and reason. To add one,\n"
+        f"  # delete the `[]` and uncomment (keeping the indentation):\n"
+        f"  #\n"
+        f"  #   extra:\n"
+        f"  #     - source: /absolute/path/on/the/host\n"
+        f"  #       target: /data/inputs      # where it appears INSIDE the container\n"
+        f"  #       mode: ro                  # ro (default) | rw — any other value is refused\n"
+        f"  #       reason: raw inputs        # optional free text, for your future self\n"
+        f"  #\n"
+        f"  # Both ends are policy-checked, and the TARGET is the one that usually\n"
+        f"  # bites: it must sit under an allowed prefix. To see the prefixes your\n"
+        f"  # policy allows, run this on the HOST (not inside a session):\n"
+        f"  #     botainer policy show      # the mounts.extra_targets line\n"
+        f"  extra: []\n"
         f"  tmp: false                   # RESERVED / no effect. On docker, /tmp is\n"
         f"                               # ALWAYS a RAM tmpfs now (ephemeral, off the\n"
         f"                               # VM disk); this field is a v0.1 vestige (a\n"
@@ -816,11 +1047,11 @@ def write_initial_config(
         "  # - web-ports               # Forward TCP ports the agent serves (Jupyter /\n"
         "  #                           # Streamlit / Gradio inside the container) so you\n"
         "  #                           # can reach them at localhost:<port> on the host.\n"
-        "  # - agent-claude-proxy      # Keep the real Anthropic credentials on\n"
-        "  #                           # the host; the container sees only an\n"
-        "  #                           # ephemeral session token. Mutually\n"
-        "  #                           # exclusive with the default credential\n"
-        "  #                           # mount; pick one.\n"
+        "  # - agent-claude-broker     # The real token never enters the\n"
+        "  #                           # container: it stays host-side and the\n"
+        "  #                           # container sees only an ephemeral\n"
+        "  #                           # session token. Mutually exclusive with\n"
+        "  #                           # the default credential mount; pick one.\n"
         # hpc-launcher is NOT offered here: it contributes nothing at compose,
         # so enabling it does nothing (PluginManifest.enabling_is_inert).
         # `botainer hpc submit` uses the INSTALLED plugin; jobs are wired by
@@ -843,9 +1074,6 @@ def write_initial_config(
         "  #   ports:\n"
         "  #     - 8888                # container:8888 → host:127.0.0.1:8888\n"
         "  #     - {container: 7860, host: 7860, label: \"gradio\"}\n"
-        "  # agent-claude-proxy:\n"
-        "  #   upstream: \"https://api.anthropic.com\"\n"
-        "  #   max_request_size_bytes: 1048576\n"
         "  # hpc-modules:\n"
         "  #   modules: [python/3.11, gcc/13, cuda/12.3]\n"
         "  # hpc-launcher:\n"
@@ -856,3 +1084,4 @@ def write_initial_config(
         + hpc_plugins_block
     )
     path.write_text(content, encoding="utf-8")
+    return backup

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Push a token refreshed INSIDE the container back to the shared store, at exit.
 
-WHY (reported from a real cluster session). Shared mode symlinks the
+Shared mode symlinks the
 per-project `.credentials.json` at `/shared-auth/agent-claude/.credentials.json`
 so every project uses ONE file — the same way several native `claude` sessions
 share `~/.claude`. But Claude Code refreshes the token with a temp file plus

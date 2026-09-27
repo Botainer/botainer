@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from botainer.core.spec import SessionSpec
+from botainer.core.spec import BindMode, SessionSpec
 
 
 def cluster_purge_prefix(prof) -> str:
@@ -52,7 +52,7 @@ def cluster_purge_prefix(prof) -> str:
 def scratch_purge_note(spec) -> tuple[str, int | None]:
     """(host path of /scratch, auto-purge days) — days ONLY if actually purged.
 
-    User directive. Both AGENT_HINTS and the session-start summary
+    Both AGENT_HINTS and the session-start summary
     said the wrong thing about /scratch, in different ways:
 
       * AGENT_HINTS said "the user may delete this at any time" — the wrong
@@ -60,11 +60,9 @@ def scratch_purge_note(spec) -> tuple[str, int | None]:
         invites the reading "so as long as I don't, it stays".
       * The user-facing summary said nothing at all.
 
-    THE BUG THIS FUNCTION WAS SHIPPED WITH (caught by the user,:
-    *"isn't 'our' scratch stored on cluster scratch?"* — no, it is not). The
-    first version returned the profile's `auto_cleanup_days` whenever a profile
-    was loaded, so the surfaces announced "AUTO-DELETED after ~60 days by the
-    cluster" for a directory the cluster does not touch:
+    Returning the profile's `auto_cleanup_days` whenever a profile
+    is loaded can incorrectly announce scheduled deletion for a directory
+    outside the filesystem governed by that purge policy:
 
         /scratch's host side is <state_root>/state/<uuid>/scratch,
         i.e. a child of MY_BOTAINER, which defaults to ~/.botainer.
@@ -104,6 +102,79 @@ def scratch_purge_note(spec) -> tuple[str, int | None]:
     except Exception:
         days = None
     return host_path, days
+
+
+#: Paths where a case collision actually costs the agent something. `/workspace`
+#: is the project's own source; `/packages` is where installs land. Both are
+#: host binds, so both inherit the host filesystem's behaviour.
+_CASE_RELEVANT_TARGETS = ("/workspace", "/packages")
+
+
+def _case_sensitivity_lines(spec: SessionSpec) -> list[str]:
+    """Tell the agent if a bound path folds `Foo` and `foo` together (#167).
+
+    WHY THE AGENT AND NOT JUST THE USER. This started with a real agent hitting
+    it, finding a workaround, and neither the workaround nor the reason being
+    clear to the person watching. The agent could not have explained it: from
+    inside the container the filesystem looks ordinary, and nothing said the
+    bind carried the host's case-folding in with it. An agent told the fact up
+    front diagnoses in one step instead of thrashing and inventing something.
+
+    PROBED PER PATH, not assumed from the platform. `/workspace` and
+    `/packages` come from different host directories and can genuinely differ —
+    a case-sensitive external volume for one, the internal disk for the other.
+    Asking each is cheap and the alternative is a guess.
+
+    SILENT WHEN CASE-SENSITIVE, which is the common case on Linux and HPC. A
+    section that appears in every session teaching a fact that does not apply is
+    noise in a prompt, and prompt space is the scarcest thing here.
+    """
+    from botainer.state.fs_kind import is_case_insensitive
+
+    folded = []
+    for b in spec.mount_plan.binds:
+        if b.target not in _CASE_RELEVANT_TARGETS:
+            continue
+        try:
+            if is_case_insensitive(b.source) is True:
+                folded.append(b.target)
+        except Exception:            # noqa: BLE001 — a hint must never fail a launch
+            continue
+    if not folded:
+        return []
+
+    out = ["## Filenames differing only in case are NOT distinct here", ""]
+    out.append("On this machine " + " and ".join(f"`{t}`" for t in sorted(folded)))
+    out.append("treat `Foo.py` and `foo.py` as THE SAME FILE. Writing both")
+    out.append("leaves one file holding the second write. There is no error.")
+    out.append("")
+    out.append("What this means for you:")
+    out.append("- An install that pulls a package shipping two such names will")
+    out.append("  lose one of them, and the failure shows up later as an import")
+    out.append("  error or missing attribute that makes no sense.")
+    out.append("- `git checkout` of a repo containing both will silently give you")
+    out.append("  one, and `git status` may then report it as modified forever.")
+    out.append("- If something behaves as though a file you just wrote is missing")
+    out.append("  or has the wrong contents, CHECK THIS FIRST rather than")
+    out.append("  assuming the tool is broken.")
+    out.append("")
+    # THE CHECK MUST RUN ON A FOLDED PATH, and the first version did not.
+    # It said `touch /tmp/A && ls /tmp/a`. `/tmp` is NOT a host bind — docker
+    # renders `--tmpfs /tmp` and apptainer's `--containall` gives a private one
+    # — so the probe answered "case-sensitive" on every host, INCLUDING the
+    # Macs this section only appears on. The agent got the fact and, one line
+    # later, a command contradicting it: exactly the thrash-and-invent-a-
+    # workaround failure the docstring above says this exists to prevent.
+    # Verified by running it in this container: rc=2, "No such file".
+    _probe_dir = sorted(folded)[0]
+    out.append(f"You can confirm it yourself, on a path that actually folds:")
+    out.append(f"`touch {_probe_dir}/BOTAINER_CASE_A && "
+               f"ls {_probe_dir}/botainer_case_a` — if that LISTS the file,")
+    out.append("the folding is real. Delete it afterwards.")
+    out.append("Botainer has no fix for this yet — say so plainly if you hit it,")
+    out.append("rather than working around it in a way the user cannot follow.")
+    out.append("")
+    return out
 
 
 def render(spec: SessionSpec) -> str:
@@ -231,7 +302,9 @@ def render(spec: SessionSpec) -> str:
     lines.append("  Use conda when wheel-pip hits binary-compat issues (torch+cuda,")
     lines.append("  R-with-rpy2, etc.). Envs land in `/packages/conda_envs`.")
     lines.append("- Node: `npm install <pkg>` → `/packages/node_modules`")
-    lines.append("  (NODE_PATH is pre-set; both global and local installs work.)")
+    lines.append("  `npm install -g <cli>` → `/packages/npm-global/bin`, which "
+                 "is on PATH.")
+    lines.append("  Both persist. (NODE_PATH and NPM_CONFIG_PREFIX are pre-set.)")
     lines.append("- Julia: `Pkg.add(\"<pkg>\")` → `/packages/julia_depot`")
     lines.append("- R: `install.packages(\"<pkg>\")` → `/packages/R_libs`")
     lines.append("")
@@ -252,6 +325,40 @@ def render(spec: SessionSpec) -> str:
     lines.append("The user can `rm -rf /packages` to reclaim disk; you'll install")
     lines.append("again on next session. Treat `/packages` as cache, not source of truth.")
     lines.append("")
+    lines.extend(_case_sensitivity_lines(spec))
+    # `/packages` is per-PROJECT, not per-agent: the bind source is
+    # `<project state>/packages` with no agent component, so a Claude session
+    # and a codex session in the same project write the SAME directory.
+    #
+    # State this scope explicitly so each agent can recognize packages added
+    # by another agent and communicate its own changes.
+    #
+    # Advisory, deliberately. Botainer does not enforce a manifest and should
+    # not — an agent that cannot write one must still be able to install. This
+    # is a convention that costs nothing when ignored.
+    lines.append("### `/packages` is SHARED with the other agent")
+    lines.append("")
+    lines.append("`/packages` belongs to the PROJECT, not to you. If this project")
+    lines.append("has been run with a different agent (Claude ↔ codex), that agent")
+    lines.append("wrote to the same directory. So:")
+    lines.append("")
+    lines.append("- **Look before you install.** A conda env, a pip package or a")
+    lines.append("  node module may already be there. `conda env list`, `pip list`,")
+    lines.append("  `ls /packages` — reuse beats reinstalling, and reinstalling a")
+    lines.append("  different version over a shared one can break the other agent.")
+    lines.append("- **Activate, don't recreate.** An env another agent made is a")
+    lines.append("  normal env: `conda activate <name>` works.")
+    lines.append("- **Say what you did.** Append one line to")
+    lines.append("  `/packages/INSTALLED.md` when you install something")
+    lines.append("  non-obvious — what, why, and which agent you are. It is the")
+    lines.append("  only place both agents can read; your own notes and history")
+    lines.append("  are per-agent and the other one cannot see them.")
+    lines.append("")
+    lines.append("What is NOT shared: the container image. Each agent has its own,")
+    lines.append("so software baked into one may be absent from the other even")
+    lines.append("though `/packages` looks identical. If a tool is missing but")
+    lines.append("`/packages` says it was installed, that is the likely reason.")
+    lines.append("")
 
     # 1.4. HOME — tool config/caches only; NOT where project work goes.
     lines.append("## Your home directory (`$HOME` = `/home/user`)")
@@ -264,6 +371,29 @@ def render(spec: SessionSpec) -> str:
     lines.append("  look in — they are NOT in the project tree.")
     lines.append("- `~` is agent-writable persistent state (same trust class as")
     lines.append("  `/packages`); the user may `rm -rf` it to reclaim disk.")
+    lines.append("")
+    # #194: the /packages section says SHARED in a heading. This one said only
+    # "persists across sessions (same as /packages)", which a reader takes as a
+    # statement about TIME. It is also a statement about WHO: observed, the
+    # per-project state dir has no agent component, so `home`, `packages` and
+    # `scratch` are all one directory for both agents. Tool config is the part
+    # that bites — a `~/.config/<tool>` or a lockfile written by one agent's
+    # version is read by the other's, and the resulting failure looks like a
+    # broken tool rather than a shared directory.
+    lines.append("**`$HOME` is SHARED with the other agent too**, not just")
+    lines.append("persistent. It is one directory per PROJECT — there is no")
+    lines.append("per-agent copy — so `~/.config`, `~/.cache` and any lockfile you")
+    lines.append("write are read by whichever agent runs here next.")
+    lines.append("")
+    lines.append("- If a tool misbehaves in a way that makes no sense, check")
+    lines.append("  whether its config under `~` was written by a different")
+    lines.append("  version than the one in YOUR image. That is a real failure")
+    lines.append("  mode here and it does not look like one.")
+    lines.append("- The same is true of `/scratch`. `/workspace` is the project")
+    lines.append("  itself, so it is shared by definition.")
+    lines.append("- What is NOT shared: your own history, notes and settings —")
+    lines.append("  those are per-agent, and the other agent cannot read them.")
+    lines.append("  `/packages/INSTALLED.md` is the one place both of you can.")
     lines.append("")
 
     # 1.5. Network capability (critical for the agent to know up-front).
@@ -418,10 +548,59 @@ def render(spec: SessionSpec) -> str:
     # 3. Reminder.
     lines.append("## Reminder")
     lines.append("")
-    lines.append("Files outside `/workspace` are not visible to you. Files at")
-    lines.append("`/workspace` are visible and modifiable. The launcher does NOT")
-    lines.append("protect the project checkout from your changes; treat your")
-    lines.append("modifications carefully.")
+    # WAS: "Files outside `/workspace` are not visible to you." That is FALSE
+    # on every default session — measured, a plain project reaches `/packages`,
+    # `/scratch` and `/home/user` as well, and plugins add more. Telling an
+    # agent it cannot see what it can see is the worst direction for this error
+    # to point: it invites confident statements to the user about what is
+    # private, and it is the agent's own picture of its cage.
+    #
+    # So the list is DERIVED from this session's binds rather than asserted.
+    # A hardcoded sentence was wrong the moment a plugin contributed a bind;
+    # this cannot be, because it reads the same plan the adapter renders.
+    _reachable: list[str] = []
+    _masked: list[str] = []
+    for b in spec.mount_plan.binds:
+        t = b.target.rstrip("/") or "/"
+        if b.mode == BindMode.NULL_BIND:
+            _masked.append(t)
+        elif b.mode in (BindMode.RO, BindMode.RW):
+            _reachable.append(
+                (t, "read-write" if b.mode == BindMode.RW else "read-only"))
+    lines.append("These paths come from the USER'S MACHINE and are bound into")
+    lines.append("your container:")
+    lines.append("")
+    for t, mode in sorted(set(_reachable)):
+        lines.append(f"- `{t}` — {mode}")
+    lines.append("")
+    # "Nothing else is visible" would be the same error in the other direction:
+    # everything from the IMAGE (/usr, /bin, the agent's own install) is visible
+    # and has nothing to do with the host. Scope the claim to host files.
+    lines.append("No other part of the user's machine is present here. Anything")
+    lines.append("else you can see — `/usr`, `/bin`, your own tooling — comes")
+    lines.append("from the container image, not from their computer.")
+    lines.append("")
+    lines.append("Do not tell the user a file of theirs is out of your reach")
+    lines.append("without checking this list: it is THIS session's, not a")
+    lines.append("general rule, and another session may be bound differently.")
+    lines.append("")
+    if _masked:
+        # The mask is the one thing here that HIDES something, and until now it
+        # was disclosed on no agent-facing surface at all: the agent saw an
+        # empty directory and had no way to know it was deliberate rather than
+        # missing.
+        lines.append("The launcher deliberately BLANKS OUT these paths, hiding")
+        lines.append("its own state from you. That is not a fault:")
+        lines.append("")
+        for t in sorted(set(_masked)):
+            lines.append(f"- `{t}`")
+        lines.append("")
+        lines.append("Anything listed as visible ABOVE is mounted back on top of")
+        lines.append("that and IS readable — so such a path is not empty, it just")
+        lines.append("shows you only what the list above names.")
+        lines.append("")
+    lines.append("The launcher does NOT protect the project checkout from your")
+    lines.append("changes; treat your modifications carefully.")
     lines.append("")
     lines.append("If the user also has an `AGENTS.md` at `/workspace/AGENTS.md`,")
     lines.append("read that too — it has their project-specific notes for you.")
@@ -538,12 +717,34 @@ def _aggregate_plugin_hints(spec: SessionSpec) -> list[list[str]]:
                 )
                 for b in sw_binds:
                     block.append(f"- {b.target}")
+                # THE TRAP, and the reason this paragraph exists. Cluster
+                # software was compiled for the HOST operating system, and this
+                # container is a different one. A binary that runs fine on the
+                # login node can fail here with a missing-libc or
+                # GLIBC_2.xx-not-found error, and that is an ABI mismatch — not
+                # a broken bind, not a botainer bug, and not something retrying
+                # fixes. An agent that does not know this burns an hour on it.
+                block.append("")
+                block.append(
+                    "CAVEAT — these are the HOST's binaries. They were built "
+                    "for the host OS, not for this container. If one fails "
+                    "with a missing shared library or a GLIBC version error, "
+                    "that is an ABI mismatch between host software and this "
+                    "image: the bind is working and the binary simply cannot "
+                    "run here. Do not retry it or try to 'fix' the mount. Say "
+                    "so, and install the tool into /packages instead, or ask "
+                    "the user for an image built on a closer base."
+                )
             else:
                 block.append(
                     "#160 software-root binds: OFF this session (no dirs "
-                    "bound — empty site ceiling or no module dirs within it). "
-                    "Module tools are NOT reachable by name; ask the cluster "
-                    "admin to add their roots to mounts.cluster_software_roots."
+                    "bound). Module tools are NOT reachable by name. Two "
+                    "routes exist and this message used to name only the "
+                    "first, which is the one a user without admin cannot "
+                    "take (#156): (a) the site admin lists roots in "
+                    "mounts.cluster_software_roots, or (b) the cluster "
+                    "profile lists them under cluster.software_roots, which "
+                    "needs no admin. Tell the user both."
                 )
             # caps.modules_inner_load: state-aware line so the "software-root
             # binds OFF" message above doesn't mislead when the AGENT can run

@@ -66,3 +66,32 @@ def handle_refusals(fn: Callable[..., Any]) -> Callable[..., Any]:
             sys.exit(_exit_code_for(exc.category))
 
     return wrapper
+
+
+def render_refusal(exc: Exception) -> int:
+    """Print a refusal the same way the decorator does; return its exit code.
+
+    THE DECORATOR IS A RULE AND THIS IS THE BACKUP FOR IT. Every command is
+    supposed to carry `@handle_refusals`, and two did not: `botainer list` and
+    `botainer image list` printed a 43- and a 47-line Python traceback where the
+    `state-root-not-allowed` refusal already existed, with `doctor` on the same
+    state root printing it cleanly. Measured with
+    `MY_BOTAINER=/project/<grp>/<user>/botainer`.
+
+    Decorating those two would fix those two. `main()` calling this means a
+    command that forgets the decorator still cannot show a traceback — the
+    structural half, with the decorator kept because it converts the refusal
+    NEAR the call and is what most commands already carry.
+
+    Returns the exit code rather than calling sys.exit so the caller stays in
+    charge of its own exit path.
+    """
+    if isinstance(exc, identity.IdentityChangeRefused):
+        click.secho(f"refused: {exc}", fg="red", err=True)
+        return _EXIT_REFUSED
+    if isinstance(exc, Refused):
+        detail = exc.args[0] if exc.args else ""
+        line = f"refused: {exc.category.value}" + (f": {detail}" if detail else "")
+        click.secho(line, fg="red", err=True)
+        return _exit_code_for(exc.category)
+    raise exc

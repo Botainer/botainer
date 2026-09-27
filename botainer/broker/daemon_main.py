@@ -251,9 +251,31 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
-    # Pin the upstream per-provider unless explicitly overridden (env/flag).
+    # THE UPSTREAM IS THE DESTINATION OF THE REAL CREDENTIAL, so the pin is the
+    # whole point. `--upstream` has been documented as "an override for tests
+    # only" since it was written (see _PROVIDER_UPSTREAM above) and nothing
+    # enforced it — the sibling flag two lines up IS gated, this one was not.
+    # A comment claiming a check nobody performs is the shape this repo keeps
+    # finding; #216 makes the sentence true.
+    #
+    # NARROWING, NOT BLOCKING: the value the hooks pass is the pinned one (both
+    # broker hooks compute it from their own trusted constants and hand it over
+    # explicitly), so restating the pin is always allowed. Only a DIFFERENT
+    # destination needs the testing gate — which is exactly the case the
+    # docstring calls test-only.
+    pinned = _PROVIDER_UPSTREAM[args.provider]
     if not args.upstream:
-        args.upstream = _PROVIDER_UPSTREAM[args.provider]
+        args.upstream = pinned
+    elif (args.upstream.rstrip("/") != pinned.rstrip("/")
+            and os.environ.get("BOTAINER_TESTING") != "1"):
+        print(
+            f"broker: --upstream/BOTAINER_BROKER_UPSTREAM may not redirect the "
+            f"{args.provider} credential to {args.upstream!r}; it is pinned to "
+            f"{pinned!r}. Overriding it is test-only and requires "
+            f"BOTAINER_TESTING=1.",
+            file=sys.stderr,
+        )
+        return 1
 
     try:
         credential_path = _resolve_credential(args)

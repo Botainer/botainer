@@ -213,3 +213,82 @@ def test_every_private_register_entry_has_a_public_stub() -> None:
         f"{missing}\n  Each moved-out entry needs one line in the change-register "
         "appendix, or its id names nothing for anyone outside this repo."
     )
+
+
+def test_shipped_code_does_not_cite_the_private_fix_QUEUE_row_numbers() -> None:
+    """`row NNN` was a FIFTH id space, undeclared and unguarded.
+
+    CLAUDE.md names four id spaces and requires each to be unique, checked, and
+    honest about what a public reader cannot reach — "This applies to EVERY id
+    space, not just `DN-`". A fifth had grown anyway: 15 citations of `queue row
+    NNN` / `row NNN` across `botainer/` and `tests/unit/`, pointing at rows of a
+    maintainer-only planning file that is not part of any release.
+
+    THIS TEST TRIPPED THE PATH GATE ON ITS FIRST RUN, by naming that file — the
+    rule working on the test written to explain the rule. What follows says what
+    the file IS without saying where it lives: a public reader needs to
+    understand the ban, not to be handed the pointer it bans.
+
+    WHY IT IS WORSE THAN THE `#NNN` CASE IT RESEMBLES. `#NNN` is disclosed in
+    the README as an internal tracker nothing depends on, and the numbers are
+    stable. `row NNN` was disclosed nowhere, does not even name the file it
+    refers to, and the numbers are NOT stable — the queue has been regenerated
+    and renumbered, so several citations already pointed at the wrong finding.
+    A public reader met a reference that resolves to nothing and is not told so.
+
+    Found by the loop referee, which also noted that the existing internal-refs
+    gate hunts for private PATHS and was blind to a bare id.
+
+    The substance was inlined beside every one of the fifteen, which is why
+    removing them cost nothing — and is the test of whether such a citation was
+    ever load-bearing.
+    """
+    import re
+    from pathlib import Path
+
+    repo = Path(__file__).resolve().parents[2]
+    shipped = [
+        *(repo / "botainer").rglob("*.py"),
+        *(repo / "plugins").rglob("*.py"),
+        *(repo / "tests" / "unit").rglob("*.py"),
+        *(repo / "tests" / "integration").rglob("*.py"),
+        *(repo / "tests" / "hostile").rglob("*.py"),
+    ]
+    assert shipped, "found no shipped python at all — this test would pass vacuously"
+
+    # `queue row 12` / `row 12:` / `ROW 117 —`. NOT "rows" plural, which is how
+    # the codebase legitimately talks about TSV baselines and table rows.
+    pattern = re.compile(r"\b(?:queue\s+)?row\s+\d+\b", re.IGNORECASE)
+
+    # POSITIVE CONTROL, FIRST. Measured while writing this: replacing the
+    # pattern with something unmatchable left the test GREEN. A scanner whose
+    # own regex is unverified is the fires-never twin of the fires-always
+    # warning this project has a rule about — it reports "clean" and means
+    # "blind". So prove the pattern matches what it is for, and does not match
+    # the plural form the codebase uses legitimately about TSV and table rows.
+    assert pattern.search("(queue row 131)"), "the pattern cannot find its own target"
+    assert pattern.search("# ── row 163: the warning"), "misses the bare form"
+    assert pattern.search("ROW 117 — printed in full"), "misses the shouted form"
+    assert not pattern.search("walks 631 rows of the baseline"), (
+        "matches the plural, which is how this codebase legitimately refers to "
+        "TSV and table rows — a guard that fires on those would be deleted "
+        "within a week")
+    assert not pattern.search("narrow_rows = 4"), "matches an identifier"
+
+    hits = []
+    for f in shipped:
+        if f.name == Path(__file__).name:
+            continue                      # this file quotes the pattern it bans
+        for n, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
+            if pattern.search(line):
+                hits.append(f"{f.relative_to(repo)}:{n}: {line.strip()[:90]}")
+
+    assert not hits, (
+        "shipped code cites `row NNN`, which resolves to a maintainer-only "
+        "planning file: it never ships, its numbers are renumbered whenever that "
+        "file is regenerated, and no shipped document declares the id space:\n  "
+        + "\n  ".join(hits) +
+        "\n\nInline the substance instead (it was already inlined in all 15 "
+        "original cases), or cite a stable id: `#NNN` for the tracker, `DN-###` "
+        "for a design note, `§4x` for a capability-contract section."
+    )

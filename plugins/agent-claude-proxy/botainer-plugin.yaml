@@ -26,7 +26,7 @@ apiVersion: botainer-plugin-v1
 name: agent-claude-proxy
 version: 0.1.0
 
-# AUTH-PRODUCT-PLAN.md §1: this plugin is Mode C (proxy) of the
+# internal design note DN-040 §1: this plugin is Mode C (proxy) of the
 # anthropic family. Mutually exclusive with the isolated + shared variants.
 auth_family: anthropic
 auth_mode: proxy

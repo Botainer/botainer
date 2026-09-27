@@ -1,10 +1,8 @@
 """Regression: python plugin hooks run with botainer's OWN interpreter
 (sys.executable), not their `#!/usr/bin/env python3` shebang.
 
-Grace host-test: on the login node the system `python3` lacked
-`pyyaml` (a botainer dep the bundled hooks import), so the shebang path died
-with `ModuleNotFoundError: No module named 'yaml'`. sys.executable is guaranteed
-to have every dep botainer ships."""
+A system Python selected by a shebang may lack dependencies such as yaml.
+Using sys.executable keeps hook imports aligned with the launcher environment."""
 
 from __future__ import annotations
 

@@ -1,13 +1,9 @@
 """Regression test: apptainer image resolution returns an absolute
 path to a .sif file, not a docker tag.
 
-real-host Grace bug: `botainer start` with `runtime=
-apptainer` produced `spec.image = 'botainer/agent-claude:0.1'` (a
-docker tag) instead of a .sif path. apptainer interpreted that as a
-path relative to CWD and tried to read
-`<project_root>/botainer/agent-claude:0.1` → "container creation
-failed". User-facing symptom: "looking for the actual software or
-container under the project folder."
+Passing a Docker tag as the Apptainer image makes the runtime treat it
+as a path relative to the current directory and fail container creation.
+Resolution must select the installed .sif file instead.
 
 This test pins: when runtime=apptainer, `_resolve_session_image` (and
 therefore `compose_session(..., runtime_choice='apptainer')`) MUST
@@ -177,8 +173,7 @@ def test_apptainer_ignores_cfg_image_when_it_is_a_docker_tag(
     # Critical: docker tag must NOT have been passed through.
     assert spec.image == str(sif), (
         "Apptainer compose must NOT pass a docker tag through as the "
-        "image. The 2026-05-19 Grace bug: apptainer interpreted the "
-        "docker tag as a relative path under CWD."
+        "image. Apptainer interprets a Docker tag as a relative path under CWD."
     )
 
 
@@ -279,3 +274,260 @@ def test_image_override_path_also_verifies_sif_provenance(
         composition._resolve_session_image(
             cfg, runtime="apptainer", image_override=str(sif))
     assert "sha256" in str(exc.value).lower()
+
+
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# THE THIRD BRANCH — and why it DISCLOSES rather than refuses.
+#
+# `_resolve_session_image` had three ways to produce an apptainer image path and
+# verification was written into two of them, one at a time, months apart. The
+# third — a top-level `image:` in the project config — is the one
+# `GETTING_STARTED-HPC.md:488` documents and `examples/hpc-slurm.yaml:18` ships,
+# so the unverified branch was the DOCUMENTED branch.
+#
+# Measured before this change, on a real editable install with a .sif replaced
+# out-of-band: `hpc submit --dry-run` refused `[image-invalid]` (it routes
+# through image_override), while `start --preflight` — this project's stated
+# pre-push gate, "exit 0 is the gate" — reported CLEAN and `start` proceeded.
+#
+# WHY NOT JUST REFUSE HERE TOO. Adding a refusal to the documented launch route
+# breaks anyone whose `image:` points at a .sif botainer did not build, and that
+# is a product decision with a real cost, recorded as an open ask to the
+# maintainer (refuse / warn / disclose-only). What does NOT need anyone's
+# permission is ending the SILENCE. So: mismatch on this branch is stated, in the
+# same words the refusal would use, and the launch proceeds.
+#
+# The structure is the durable part. Every return from the resolver carries its
+# SOURCE, one dict says what each source means, and an unregistered source fails
+# closed — so the maintainer's answer is one word, and a fourth branch is covered
+# the day it lands.
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def _genuine_sif_with_marker(installed_state: Path, content: bytes = b"genuine-sif-bytes"):
+    import hashlib
+    images = installed_state / "images"
+    images.mkdir(parents=True, exist_ok=True)
+    sif = images / "botainer-agent-claude.sif"
+    sif.write_bytes(content)
+    _record_apptainer_marker(
+        installed_state, "agent-claude", sif, hashlib.sha256(content).hexdigest())
+    return sif
+
+
+def _point_config_image_at(proj: Path, target: Path) -> None:
+    import yaml
+    cfg_path = proj / ".botainer" / "config.yaml"
+    data = yaml.safe_load(cfg_path.read_text())
+    data["image"] = str(target)          # the documented HPC config, verbatim
+    cfg_path.write_text(yaml.safe_dump(data, sort_keys=False))
+
+
+def test_a_top_level_image_that_was_swapped_is_STATED_not_swallowed(
+    installed_state: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """THE DEFECT: this said nothing at all. Not "it should have refused".
+
+    The path in the guide IS `$MY_BOTAINER/images/botainer-agent-claude.sif`,
+    which is the file the marker was recorded against — so a baseline exists and
+    botainer KNEW the file had changed. It resolved it and ran it without a word.
+    """
+    from botainer.core import config as cfgmod
+
+    proj = _make_project(tmp_path, "agent-claude", "claude")
+    sif = _genuine_sif_with_marker(installed_state)
+    _point_config_image_at(proj, sif)
+    cfg = cfgmod.load_config(proj)
+    assert cfg.image == str(sif), "precondition: the cfg.image branch is taken"
+
+    # Control: the genuine image says nothing. A warning on every launch is the
+    # scenery this project has a rule against.
+    assert composition._resolve_session_image(cfg, runtime="apptainer") == str(sif)
+    assert "WARNING" not in capsys.readouterr().err
+
+    sif.write_bytes(b"TAMPERED-sif-bytes")
+    assert composition._resolve_session_image(cfg, runtime="apptainer") == str(sif), (
+        "this branch must still LAUNCH — whether it should refuse is the "
+        "maintainer's open decision, and this test must not quietly settle it")
+    err = capsys.readouterr().err
+    assert "does NOT match" in err, f"the swap was silent again:\n{err}"
+    assert "image forget" in err, f"no way out was offered:\n{err}"
+    assert "NOT verified" in err, (
+        f"it must not read as a passed check:\n{err}")
+
+
+def test_the_other_two_branches_still_REFUSE(
+    installed_state: Path, tmp_path: Path
+) -> None:
+    """The disclosure must not have leaked into the branches that refuse today.
+
+    A single-exit refactor makes exactly this mistake easy: one policy applied
+    everywhere. `hpc submit`'s chokepoint and the plugin's own .sif refused
+    before and must still refuse, or this change is a silent relaxation of two
+    shipped guarantees.
+    """
+    from botainer.core import config as cfgmod
+
+    proj = _make_project(tmp_path, "agent-claude", "claude")
+    sif = _genuine_sif_with_marker(installed_state)
+    cfg = cfgmod.load_config(proj)
+    sif.write_bytes(b"TAMPERED-sif-bytes")
+
+    with pytest.raises(Refused) as exc:                      # override branch
+        composition._resolve_session_image(
+            cfg, runtime="apptainer", image_override=str(sif))
+    assert "Refusing" in str(exc.value)
+
+    with pytest.raises(Refused) as exc:                      # plugin-sif branch
+        composition.compose_session(
+            proj, runtime_choice="apptainer", identity_accept=False)
+    assert "Refusing" in str(exc.value)
+
+
+def test_the_disclosure_reaches_a_REAL_compose_not_just_the_resolver(
+    installed_state: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Through the real caller, because `--preflight` is what reported CLEAN.
+
+    `start --preflight` composes a session and exits 0. It still exits 0 — and
+    now it cannot do so in silence. Asserting on the resolver alone would not
+    have told me whether `compose_session` reaches this branch at all, and
+    "verify through the real caller" is a rule this repo learned expensively.
+    """
+    proj = _make_project(tmp_path, "agent-claude", "claude")
+    sif = _genuine_sif_with_marker(installed_state)
+    _point_config_image_at(proj, sif)
+    sif.write_bytes(b"TAMPERED-sif-bytes")
+
+    spec = composition.compose_session(
+        proj, runtime_choice="apptainer", identity_accept=False)
+    assert spec.image == str(sif), "compose must still succeed on this branch"
+    assert "does NOT match" in capsys.readouterr().err
+
+
+def test_a_source_NOBODY_HAS_WRITTEN_YET_fails_closed(
+    installed_state: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE STRUCTURAL GUARD, and the reason this is a refactor not a third call.
+
+    A future branch returns a path and a source string nobody registered. The
+    policy dict has no entry, so it gets the STRICT answer — a new resolution
+    path cannot be silently exempt, and its author does not have to know this
+    check exists.
+
+    This test is what dies if verification moves back inside the branches: the
+    three behavioural tests above would all still pass.
+    """
+    from botainer.core import config as cfgmod
+
+    proj = _make_project(tmp_path, "agent-claude", "claude")
+    sif = _genuine_sif_with_marker(installed_state)
+    cfg = cfgmod.load_config(proj)
+
+    elsewhere = tmp_path / "somewhere-else" / "hand-built.sif"
+    elsewhere.parent.mkdir(parents=True, exist_ok=True)
+    elsewhere.write_bytes(b"a-different-sif-entirely")
+    monkeypatch.setattr(
+        composition, "_resolve_session_image_unverified",
+        lambda *a, **k: (str(elsewhere), "a-branch-invented-next-year"))
+
+    with pytest.raises(Refused) as exc:
+        composition._resolve_session_image(cfg, runtime="apptainer")
+    assert "sha256" in str(exc.value).lower(), str(exc.value)
+
+
+def test_every_source_the_resolver_can_return_is_a_source_the_policy_KNOWS(
+    installed_state: Path, tmp_path: Path
+) -> None:
+    """Fail-closed is the backstop, not the plan.
+
+    An unregistered source refuses, which is safe but arrives as a surprise
+    refusal for a user. So the sources the resolver actually returns are
+    enumerated from the source text and checked against the dict: a new branch
+    that forgets to declare its policy fails HERE, at commit time, instead of on
+    someone's cluster.
+    """
+    import inspect as _inspect
+    import re
+    src = _inspect.getsource(composition)
+    body = src.split("def _resolve_session_image_unverified(", 1)[1]
+    body = body.split("\ndef ", 1)[0]
+    returned = set(re.findall(r'return [^\n]*, "([a-z0-9-]+)"', body))
+    assert len(returned) >= 5, (
+        f"only found {returned} — the extraction stopped matching the code, so "
+        f"this test is no longer checking what it claims")
+
+    apptainer_sources = {"override", "config-image", "plugin-sif"}
+    assert apptainer_sources <= returned, (
+        f"a source this test names is gone from the resolver: "
+        f"{sorted(apptainer_sources - returned)}")
+    undeclared = apptainer_sources - set(composition._ENFORCE_SIF_PROVENANCE)
+    assert not undeclared, (
+        f"these sources can produce an apptainer .sif and have no entry in "
+        f"_ENFORCE_SIF_PROVENANCE: {sorted(undeclared)}. They will fail closed, "
+        f"which is safe and is not the intent — declare them.")
+
+
+def test_the_chokepoint_leaves_DOCKER_alone(
+    installed_state: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE CONTROL for the refactor, and it is a capability fact, not a detail.
+
+    Docker has NO image-identity check (docs/CAPABILITY-SURFACE.md §4bh says
+    so). A wrapper that hashed everything would start refusing docker tags —
+    which cannot be hashed at all — so "always verify" must mean "always verify
+    APPTAINER". Without this, the change could pass every test above and break
+    every docker user.
+    """
+    from botainer.core import config as cfgmod
+
+    proj = _make_project(tmp_path, "agent-claude", "claude")
+    _genuine_sif_with_marker(installed_state)
+    cfg = cfgmod.load_config(proj)
+
+    monkeypatch.setattr(
+        composition, "_resolve_session_image_unverified",
+        lambda *a, **k: ("test-runtime/agent:0.1", "plugin-lock-tag"))
+    assert composition._resolve_session_image(
+        cfg, runtime="docker") == "test-runtime/agent:0.1"
+
+
+def test_an_apptainer_SANDBOX_DIR_is_named_as_uncheckable_on_both_policies(
+    installed_state: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A directory has no sha256, so the honest answer says THAT.
+
+    Before the single exit this depended on which branch you arrived through:
+    `image_override` hashed it and refused with `[Errno 21] Is a directory`
+    dressed up as "the .sif is unreadable"; `cfg.image` proceeded unverified.
+    Neither told the user what was actually wrong.
+
+    Only when a marker EXISTS. A sandbox on an install that never recorded one
+    keeps working, unverified — the same fail-open-on-no-marker semantics the
+    rest of this file pins.
+    """
+    from botainer.core import config as cfgmod
+
+    proj = _make_project(tmp_path, "agent-claude", "claude")
+    sandbox = tmp_path / "sandbox-dir"
+    sandbox.mkdir()
+    _point_config_image_at(proj, sandbox)
+    cfg = cfgmod.load_config(proj)
+
+    # No marker yet -> unverifiable, and nothing claims otherwise.
+    assert composition._resolve_session_image(cfg, runtime="apptainer") == str(sandbox)
+    assert "SANDBOX" not in capsys.readouterr().err
+
+    _genuine_sif_with_marker(installed_state)
+    assert composition._resolve_session_image(cfg, runtime="apptainer") == str(sandbox)
+    err = capsys.readouterr().err
+    assert "SANDBOX DIRECTORY" in err, err
+    assert "image forget" in err, err
+
+    # The same fact, on a branch whose policy is to refuse.
+    with pytest.raises(Refused) as exc:
+        composition._resolve_session_image(
+            cfg, runtime="apptainer", image_override=str(sandbox))
+    assert "SANDBOX DIRECTORY" in str(exc.value), str(exc.value)

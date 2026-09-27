@@ -28,7 +28,12 @@ from pathlib import Path
 
 import click
 
+from botainer.plugins import provenance as prov_module
+
+from botainer.auth_modes import (AUTH_MODES, ONE_SHOT_AXIS_HELP,
+                                  choice_help)
 from botainer.cli._refusal_handler import handle_refusals
+from botainer.core.refusal import Refused as _Refused
 from botainer.state import cluster_profile as profile_module
 
 # Pool-control request ids are agent-supplied and become a FILENAME component in
@@ -52,13 +57,19 @@ def hpc(ctx: click.Context) -> None:
 
 @hpc.command("setup")
 @click.option(
-    "--profile",
+    # #174: `--cluster` FIRST, so it is the name `--help` shows and the name a
+    # reader meets. botainer says "profile" about three unrelated axes — a
+    # credential slot, a machine, and a resource-request shape — and a bare
+    # `--profile` cannot say which. This one is the machine. See docs/PROFILES.md.
     "--cluster",
-    "profile_name",
+    "--profile",
+    "cluster_profile_name",
     default=None,
     help=(
-        "Use a specific bundled profile by name (e.g. generic-slurm, "
-        "generic-slurm). `--cluster` is an alias for `--profile`."
+        "Which bundled CLUSTER profile to use — the declared facts about a "
+        "machine (partitions, limits, Lmod bootstrap), e.g. generic-slurm. "
+        "`--profile` is accepted for compatibility and means the same thing "
+        "HERE; on `auth login` it means a credential slot instead."
     ),
 )
 @click.option(
@@ -78,6 +89,15 @@ def hpc(ctx: click.Context) -> None:
     help="No prompts; use autodetect or fail.",
 )
 @click.option(
+    "--force",
+    is_flag=True,
+    help=(
+        "Replace an existing ~/.botainer/cluster.yaml even if you have edited "
+        "it. The old file is copied to cluster.yaml.bak first. Without this, "
+        "setup refuses rather than discarding your edits."
+    ),
+)
+@click.option(
     "--probe",
     is_flag=True,
     help=(
@@ -88,8 +108,8 @@ def hpc(ctx: click.Context) -> None:
     ),
 )
 @handle_refusals
-def setup(profile_name: str | None, account: str | None,
-          non_interactive: bool, probe: bool) -> None:
+def setup(cluster_profile_name: str | None, account: str | None,
+          non_interactive: bool, force: bool, probe: bool) -> None:
     """First-time HPC wizard: detect cluster, write ~/.botainer/cluster.yaml.
 
     Interactive flow:
@@ -106,7 +126,7 @@ def setup(profile_name: str | None, account: str | None,
     bundled = profile_module.list_bundled()
     chosen: profile_module.ClusterProfile | None = None
 
-    if profile_name:
+    if cluster_profile_name:
         # Accept both the profile's cluster.name AND the filename
         # stem (without .yaml). yale-grace.yaml has cluster.name=grace;
         # users naturally type --cluster yale-grace OR --cluster grace.
@@ -134,13 +154,13 @@ def setup(profile_name: str | None, account: str | None,
         # because cluster names collide between institutions; the
         # alias keeps `--profile grace` — what a user actually types, and what
         # every existing instruction says — working.
-        want = profile_name.strip().lower()
+        want = cluster_profile_name.strip().lower()
         match = [p for p in bundled if want in p.match_names()]
-        if not match and profile_name in filename_stems:
-            match = [filename_stems[profile_name]]
+        if not match and cluster_profile_name in filename_stems:
+            match = [filename_stems[cluster_profile_name]]
         if not match:
             click.secho(
-                f"refused: bundled profile {profile_name!r} not found",
+                f"refused: bundled profile {cluster_profile_name!r} not found",
                 fg="red", err=True,
             )
             click.echo("Available bundled profiles (cluster.name | filename):")
@@ -231,8 +251,13 @@ def setup(profile_name: str | None, account: str | None,
     #
     # Structural rather than "call it on each branch": a chokepoint cannot be
     # forgotten by the next person who adds a fourth way to choose a profile.
-    path = profile_module.write_user_profile(chosen)
+    path = profile_module.write_user_profile(chosen, force=force)
     click.secho(f"✓ wrote cluster profile to {path}", fg="green")
+    _backup = getattr(profile_module.write_user_profile, "last_backup", None)
+    if _backup is not None:
+        # Say it, and say it in the same breath as the success. A backup the
+        # user is not told about is a backup they will not look for.
+        click.secho(f"  your previous file was kept at {_backup}", fg="yellow")
     _echo_profile_trust(chosen)
     click.echo(f"   cluster:   {chosen.name}")
     click.echo(f"   partition: {chosen.slurm_default_partition or '(set in config)'}")
@@ -586,6 +611,7 @@ def jobs_status(project: str | None) -> None:
     from botainer.core import identity as _identity
     from botainer.hpc import dispatcher as _disp
     from botainer.hpc import jobs as _jobs
+    from botainer.hpc import pool as _pool
     from botainer.state import dir as _sd
 
     proj = Path(project).resolve() if project else (
@@ -609,27 +635,76 @@ def jobs_status(project: str | None) -> None:
 
     paths = _sd.ensure_user_state_dir(create_if_missing=False)
     mb = _jobs.mailbox_for(paths, uid)
-    if not mb.out_dir.is_dir():
-        click.echo("no jobs dispatched yet for this project.")
-        return
-    recs = []
+    recs = {}
     _MAX = 500  # cap the read so a flooded out/ can't blow up host memory (#4)
-    for p in sorted(mb.out_dir.glob("*.status.json"))[:_MAX]:
-        r = _disp._read_status(p)
-        if r:
-            recs.append(r)
-    if not recs:
+    if mb.out_dir.is_dir():
+        for p in sorted(mb.out_dir.glob("*.status.json"))[:_MAX]:
+            r = _disp._read_status(p)
+            if r:
+                jid = p.name[:-len(".status.json")]
+                recs[jid] = {**r, "id": jid}
+
+    # THE MAILBOX HAS TWO SIDES AND THIS COMMAND READ ONE. `out/` is written by
+    # the HOST; `in/` is what the caged AGENT writes. A request the agent queued
+    # that the dispatcher has not picked up yet exists only in `in/`, so it was
+    # invisible here — and the command answered "no jobs dispatched yet for this
+    # project", which is false: one HAS been dispatched, by the agent.
+    #
+    # That is exactly the case this command's own help promises to surface —
+    # "see what your caged agent has queued/running/stuck without attaching" —
+    # and it is the most useful one, because a request stuck in `in/` usually
+    # means the dispatcher is not running at all. The one state you would open
+    # this command to diagnose was the one state it could not show.
+    pending = _disp.pending_requests(mb)[:_MAX]
+    # A host-prepared handoff has already been taken, even if its first public
+    # status could not be written. Abandoned preparations retain ID ownership.
+    handoffs = _pool.hot_handoff_statuses(mb)
+    by_id = recs
+    for jid, rec in list(handoffs.items())[:_MAX]:
+        existing = by_id.get(jid)
+        if existing is None or (not existing.get("slurm_job_id") and (
+            existing.get("state") == "deferred"
+            or (existing.get("state") == "assigned" and existing.get("worker") == rec["worker"])
+        )):
+            by_id[jid] = rec
+    recs = list(by_id.values())
+
+    if not recs and not pending:
         click.echo("no jobs dispatched yet for this project.")
         return
-    click.secho(f"{'JOB':16} {'STATE':10} {'PROFILE':12} {'SLURM':10} REASON/NOTE",
+    # THE JOB COLUMN CAPPED CONTENT AT 15 AND A JOB ID IS 16 HEX CHARACTERS
+    # (`^[0-9a-f]{16}$`), so every id this table has ever printed was missing its
+    # last character — you could read the queue but not copy an id out of it into
+    # `hpc jobs-explain` or a grep. Found by a test asserting a full id appears;
+    # it predates the pending-request rows below and applies to both.
+    click.secho(f"{'JOB':18} {'STATE':10} {'PROFILE':12} {'SLURM':10} REASON/NOTE",
                 bold=True)
+    for job_id, req in pending:
+        # `job_id` came from the FILENAME and is `_ID_RE`-gated. Everything from
+        # `req` is the AGENT'S OWN TEXT — same untrusted-render rule as the
+        # status table below, so it goes through `_clean` and a width.
+        prof = _clean((req or {}).get("profile", ""), 12)
+        click.echo(f"{_clean(job_id, 16):18} {'awaiting':10} {prof} "
+                   f"{'-':10} in the mailbox; the dispatcher has not taken it")
     for r in sorted(recs, key=lambda x: x.get("submitted_at", "")):
         note = _clean(r.get("squeue_reason") or r.get("reason") or "")
-        click.echo(f"{_clean(r.get('id',''), 15):16} {_clean(r.get('state',''), 10)} "
+        click.echo(f"{_clean(r.get('id',''), 16):18} {_clean(r.get('state',''), 10)} "
                    f"{_clean(r.get('profile',''), 12)} "
                    f"{_clean(r.get('slurm_job_id','-'), 10)} {note}")
         for w in (r.get("warnings") or []):
             click.secho(f"    ⚠ {_clean(w)}", fg="yellow")
+    if pending:
+        # STATE A FACT AND POINT. Whether the dispatcher is alive is a real
+        # question with a real answer, and `hpc jobs-doctor` is the command that
+        # walks the whole chain. Re-deciding it here would be a second opinion
+        # on one question — and a cheaper, worse one, since this command has no
+        # access to the config that says whether dispatch is configured at all.
+        click.echo()
+        click.secho(
+            f"{len(pending)} request(s) are waiting in the mailbox. That is "
+            f"normal for a few seconds;\nif it persists, the dispatcher is "
+            f"probably not running: `botainer hpc jobs-doctor`",
+            fg="yellow")
     # also show warm-pool workers if any
     pj = mb.out_dir / "pool.json"
     if pj.is_file():
@@ -639,10 +714,14 @@ def jobs_status(project: str | None) -> None:
 
 
 @hpc.command("jobs-explain")
-@click.argument("profile_name")
+# #174: named for its AXIS. Until now hpc.py used `profile_name` for
+# BOTH the cluster profile (a machine) and the job profile (a
+# resource-request shape) — one identifier, two unrelated things, in
+# one file. See docs/PROFILES.md.
+@click.argument("job_profile_name")
 @click.option("--project", default=None, help="Project dir (default: cwd).")
 @handle_refusals
-def jobs_explain(profile_name: str, project: str | None) -> None:
+def jobs_explain(job_profile_name: str, project: str | None) -> None:
     """Show EXACTLY what a dispatched job for a profile can see and do — the
     transparency view. Composes the caged child job (without submitting) and dumps
     its binds (+ mode), the module/cluster exposure, the resolved resources, what
@@ -659,9 +738,9 @@ def jobs_explain(profile_name: str, project: str | None) -> None:
     proj = Path(project).resolve() if project else (
         _common.find_project_root() or Path.cwd())
     cfg = _cfgm.load_config(proj)
-    prof = cfg.job_profiles.get(profile_name)
+    prof = cfg.job_profiles.get(job_profile_name)
     if prof is None:
-        click.secho(f"no job profile named {profile_name!r}. Available: "
+        click.secho(f"no job profile named {job_profile_name!r}. Available: "
                     f"{', '.join(cfg.job_profiles) or '(none)'}", fg="red")
         raise SystemExit(2)
     eff = _pol.intersect(_pol.load_site_policy(), _pol.load_user_policy())
@@ -675,7 +754,7 @@ def jobs_explain(profile_name: str, project: str | None) -> None:
     cluster, env = _jobs.child_cluster_contribution(eff)
     resolved = _res.resolve_resources(prof, None)
 
-    click.secho(f"job profile: {profile_name}", fg="cyan", bold=True)
+    click.secho(f"job profile: {job_profile_name}", fg="cyan", bold=True)
     click.echo("─" * 60)
     click.secho("RESOURCES (defaults; agent may override up to max_*):", bold=True)
     for k in ("partition", "account", "time", "cpus", "memory", "gpus",
@@ -713,14 +792,10 @@ def jobs_explain(profile_name: str, project: str | None) -> None:
 
 
 def _echo_profile_trust(profile) -> None:
-    """Show HOW MUCH a cluster profile has been verified, at the moment it matters.
+    """Show profile verification status at the point of selection.
 
-    User requirement: "clearly mark what's tested and not tested".
-    A profile transcribed from a vendor's docs and one actually run on the
-    hardware look identical in a list; the difference decides whether a failed
-    submit means "my config is wrong" or "this profile was always a guess".
-    Unverified is stated loudly rather than omitted — silence would read as
-    endorsement.
+    Distinguish hardware-tested profiles from documentation-derived profiles.
+    State missing verification explicitly rather than implying endorsement.
     """
     label = profile.verification_label()
     if profile.is_verified_on_hardware():
@@ -908,7 +983,20 @@ def build(plugin_name: str | None, force: bool) -> None:
     sif_path = paths.apptainer_sif_path(plugin_name)
 
     profile = profile_module.active_profile()
-    env = dict(os.environ)
+    # A BUILD IS A CONTAINER LAUNCH TOO, and this was the one apptainer
+    # invocation in the tree that handed over `os.environ` untouched. `%post`
+    # runs inside the build container with elevated privileges and installs
+    # software; `APPTAINERENV_*` from the login shell lands in its environment
+    # exactly as it would in a session, so the same scrub applies. Five other
+    # sites already did this — the session adapter, the HPC submit path,
+    # `_sbatch_env`, and the two claude login hooks — and this one did not.
+    #
+    # `APPTAINER_BIND` / `SINGULARITY_BIND` are deliberately LEFT ALONE: sites
+    # legitimately set them in module files to make scratch visible, and
+    # stripping them would break builds on exactly the clusters this is for.
+    # The channel that matters is the one that crosses `--cleanenv` into the
+    # container, which is what `_scrub_apptainer_env_channel` removes.
+    env = _scrub_apptainer_env_channel(os.environ)
     if profile and profile.apptainer_cachedir:
         env["APPTAINER_CACHEDIR"] = os.path.expandvars(profile.apptainer_cachedir)
 
@@ -919,7 +1007,22 @@ def build(plugin_name: str | None, force: bool) -> None:
         )
         return
 
-    cmd = ["apptainer", "build"]
+    from botainer.adapters.apptainer import image_build_binary
+    bin_name = image_build_binary()
+    if bin_name is None:                    # precheck passed, PATH changed under us
+        click.secho("refused: neither `apptainer` nor `singularity` on PATH",
+                    fg="red", err=True)
+        sys.exit(4)
+    if bin_name == "singularity":
+        # SAY IT BEFORE THE BUILD, not after. A build is 10-20 minutes and the
+        # launch path still emits a literal `apptainer exec`.
+        click.secho(
+            "note: building with `singularity` (no `apptainer` on PATH). The "
+            "image will be built correctly, but launching currently requires "
+            "`apptainer` — if this host has only singularity, `botainer start` "
+            "and `hpc submit` will not run the image yet.",
+            fg="yellow", err=True)
+    cmd = [bin_name, "build"]
     if force:
         cmd.append("--force")
     cmd.append(str(sif_path))
@@ -927,28 +1030,15 @@ def build(plugin_name: str | None, force: bool) -> None:
     click.secho(f"Building {sif_path} (this can take 10-20 min)...", fg="cyan")
     click.echo(f"  cmd: {' '.join(cmd)}")
     click.echo(f"  cache: {env.get('APPTAINER_CACHEDIR', '(default)')}")
-    # Apptainer resolves `%files` SOURCE paths relative to the build's WORKING
-    # DIRECTORY, not the .def's location. The bundled .defs copy a sibling
-    # `entrypoint_wrap.sh` by a RELATIVE path, so the build MUST run from the
-    # plugin dir or apptainer can't stat it (seen on a real cluster: build launched from
-    # the user's project dir → "cannot stat 'entrypoint_wrap.sh'"). sif_path +
-    # def_path are absolute, so cwd only affects the relative %files lookup.
+    # Apptainer resolves %files sources relative to the working directory.
+    # Run from the plugin directory so relative wrapper paths resolve; the
+    # image destination and definition path are already absolute.
     rc = subprocess.call(cmd, env=env, cwd=str(plugin.plugin_dir))
     if rc != 0:
         click.secho(f"refused: build failed (rc={rc})", fg="red", err=True)
         sys.exit(rc)
-    # A ZERO EXIT IS NOT A BUILT IMAGE. This printed "✓ built … (0 MiB)" on a
-    # login node whose apptainer executes nothing: it computed st_size, got 0,
-    # and put a green tick next to it. `doctor --strict` — the command the guide
-    # sends you to before launching jobs — passed the same empty file.
-    #
-    # A green tick on an empty image is worse than a red X, because it sends the
-    # user downstream to debug authentication or Slurm when the problem is two
-    # layers below. That is exactly what happened in a UX walk: the user spent
-    # their whole session past this point chasing a login failure.
-    #
-    # Check the ARTEFACT, not the exit code — the same rule this project applies
-    # to its own tests. `apptainer build` can exit 0 having produced nothing.
+    # A successful process exit alone does not establish a usable image.
+    # Check the artifact before sending the user on to launch diagnostics.
     size = sif_path.stat().st_size if sif_path.exists() else 0
     if size < _MIN_PLAUSIBLE_SIF_BYTES:
         click.secho(
@@ -968,8 +1058,16 @@ def build(plugin_name: str | None, force: bool) -> None:
             fg="cyan", err=True,
         )
         sys.exit(4)
+    # Record the sha256 so the .sif provenance check at compose time has a
+    # baseline. Without this it finds no marker, takes its "nothing to verify"
+    # branch, and is inert for every image built on a cluster — while working
+    # for the same image built on a laptop with `botainer image build`. Same
+    # recorder as that command, deliberately: a second copy of the format here
+    # is how the build side and the verify side drift apart.
+    digest = prov_module.record_apptainer_sif(plugin.name, sif_path)
     click.secho(
-        f"✓ built {sif_path} ({size // 1024 // 1024} MiB)",
+        f"✓ built {sif_path} ({size // 1024 // 1024} MiB)\n"
+        f"  sha256={digest[:19]}...; recorded in installed.lock",
         fg="green",
     )
 
@@ -1178,6 +1276,32 @@ def _warn_if_jobs_without_dispatcher(project_root) -> None:
 @click.option("--gres", "gres_str", default=None,
               help="Slurm --gres shorthand: 'gpu:1' or 'gpu:a100:1'.")
 @click.option("--image", default=None, help="Override apptainer .sif path.")
+@click.option("--agent", "agent_override", default=None,
+              help="One-shot override of WHICH AGENT runs this submission. "
+                   "Same flag as `botainer start --agent`; without it the "
+                   "project's `agent:` is used.")
+@click.option("--auth-mode", "auth_mode_override",
+              # click.Choice(AUTH_MODES), NOT a bare string, and NOT a second
+              # hand-written list. Every other auth-mode surface in the product
+              # (start, dry-run, inspect, auth, init) does this; shipping the
+              # one that does not is how a typo becomes a silent downgrade.
+              # `--auth-mode isolate` passed the plugin's charset check, reached
+              # `_apply_auth_mode_override_in_memory`, matched no variant, and
+              # submitted in the CONFIG's mode with one stderr line — i.e. the
+              # user asked to keep the credential out of the container and got
+              # it bound rw into an unattended job instead. Observed on the real
+              # CLI before this line existed.
+              type=click.Choice(AUTH_MODES),
+              default=None,
+              help=choice_help(
+                  "One-shot auth-mode override for this submission only. "
+                  "`broker` is refused on the sbatch path: its unix socket is "
+                  "a rendezvous with a process on the LOGIN node and the job "
+                  "runs on a COMPUTE node; the refusal names the two "
+                  "alternatives. Modes:"))
+@click.option("--auth-profile", "auth_profile_override", default=None,
+              help="One-shot auth-profile override for this submission. "
+                   + ONE_SHOT_AXIS_HELP)
 def submit(
     mode: str | None, jobid: str | None, dry_run: bool, auto_yes: bool,
     partition: str | None, account: str | None,
@@ -1185,6 +1309,8 @@ def submit(
     memory_gb: int | None, mem_str: str | None,
     gpus: int | None, gpu_type: str | None, gres_str: str | None,
     image: str | None,
+    agent_override: str | None, auth_mode_override: str | None,
+    auth_profile_override: str | None,
 ) -> None:
     """Submit a fresh sbatch allocation hosting the agent.
 
@@ -1212,7 +1338,38 @@ def submit(
     # three shared-mode hardenings applied to one plugin of a pair). Both
     # callers now go through the same helper; adding a third entry point means
     # calling it there too.
-    _c.confirm_no_other_shared_session(_c.find_project_root())
+    # Same scoping as `start`: ask about THIS agent's shared credential, not
+    # any agent's. Use the same effective plugin selection as composition;
+    # raw config can list several families or be changed by one-shot flags.
+    try:
+        import io as _io
+        from contextlib import redirect_stderr as _redirect_stderr
+
+        from botainer.cli.start import _shared_auth_family as _saf
+        from botainer.core import composition as _composition
+        from botainer.core import config as _cfgm
+
+        # This is an advisory preview, not another composition. Leave the
+        # native submit's selection diagnostics/refusals to its normal path.
+        with _redirect_stderr(_io.StringIO()):
+            _effective = _composition.apply_plugin_overrides(
+                _cfgm.load_config(_c.find_project_root()),
+                agent_override=agent_override,
+                auth_mode_override=auth_mode_override)
+        _fam = _saf(_effective)
+    except _Refused:
+        # The native submit path owns expected selection refusals.
+        _fam = None
+    except Exception:                                            # noqa: BLE001
+        click.secho(
+            "Warning: the shared-credential session check could not be evaluated; "
+            "continuing without this advisory.",
+            fg="yellow", err=True,
+        )
+        _fam = None
+    if _fam:
+        _c.confirm_no_other_shared_session(_c.find_project_root(),
+                                           agent_family=_fam)
     from botainer.plugins import lifecycle as lifecycle_module
     if not any(p.name == "hpc-launcher" for p in lifecycle_module.list_installed()):
         click.secho(
@@ -1248,12 +1405,21 @@ def submit(
         argv += ["--gpus", str(gpus)]
     if gpu_type:
         argv += ["--gpu-type", gpu_type]
+    if agent_override:
+        argv += ["--agent", agent_override]
+    if auth_mode_override:
+        argv += ["--auth-mode", auth_mode_override]
+    if auth_profile_override:
+        argv += ["--auth-profile", auth_profile_override]
     if gres_str is not None:
         argv += ["--gres", gres_str]
     if image:
         argv += ["--image", image]
+    # #109 partition warnings are emitted by the hpc-launcher helper, not here:
+    # only IT knows the effective partition (config.yaml > flag > cluster
+    # default). Warning from this side would have used the flag alone.
     rc = subprocess.call(
-        [sys.executable, "-m", "botainer.cli.main",
+        [sys.executable, "-I", "-B", "-m", "botainer.cli.main",
          "plugin", "hpc-launcher", "submit", *argv],
         env={**os.environ, "BOTAINER_NO_TIPS": "1"},  # one footer, not two (M1)
     )
@@ -1339,7 +1505,7 @@ def attach_cmd(jobid_arg: str | None, jobid: str | None, dry_run: bool) -> None:
     if dry_run:
         argv += ["--dry-run"]
     rc = subprocess.call(
-        [sys.executable, "-m", "botainer.cli.main",
+        [sys.executable, "-I", "-B", "-m", "botainer.cli.main",
          "plugin", "hpc-launcher", "submit", *argv],
         env={**os.environ, "BOTAINER_NO_TIPS": "1"},  # one footer, not two (M1)
     )
@@ -1603,21 +1769,127 @@ def _dispatcher_state_dir():
 
 
 def _resolve_child_image(cfg, paths) -> str:
-    """Child jobs run in the SAME agent .sif (has python/bash/etc.)."""
-    if cfg.image:
-        return cfg.image
+    """Child jobs run in the SAME agent .sif (has python/bash/etc.).
+
+    A THIRD RESOLVER, AND IT WAS THE UNVERIFIED ONE. This serves the job
+    dispatcher and the warm-pool worker, neither of which goes anywhere near
+    `composition._resolve_session_image` — so when the session path learned to
+    hash the .sif it was about to exec, dispatched jobs did not. Observed by a
+    refuting review, end to end: with a .sif whose sha256 no longer matched its
+    recorded marker, `botainer hpc submit` exited 2 and `doctor --strict`
+    reported an error, while `botainer hpc dispatcher once` composed a caged
+    child sbatch containing that exact image, silently. Only the absence of
+    `sbatch` on this box stopped the submission, and that is a scheduler fact,
+    not a check.
+
+    So it applies the SAME policy, from the same dict, keyed the same way — the
+    whole argument for moving verification to one place was one policy in one
+    place, and for a while there were two places.
+    """
+    from botainer.core.composition import (
+        _ENFORCE_SIF_PROVENANCE, _verify_apptainer_sif_provenance)
+    from botainer.core.spec import validate_image_reference
+
     agent_plugin = cfg.agent if str(cfg.agent).startswith("agent-") else f"agent-{cfg.agent}"
-    sif = paths.apptainer_sif_path(agent_plugin)
-    if not sif.exists():
-        raise click.ClickException(
-            f"child-job image not found: {sif}. Build it with "
-            f"`botainer hpc build {agent_plugin}`, or set `image:` in config.")
-    return str(sif)
+    image, source = "", ""
+    if cfg.image:
+        # VALIDATE HERE, not only where the argv is finally assembled. The
+        # flag-like/whitespace rejection was applied by every other resolution
+        # path and not by this one; `botainer/hpc/jobs.py` catches it downstream,
+        # so this was defence-in-depth rather than a live hole — and relying on
+        # one distant caller is the arrangement that produced the missing
+        # provenance check above.
+        try:
+            validate_image_reference(str(cfg.image))
+        except ValueError as exc:
+            raise click.ClickException(f"`image:` in config: {exc}") from exc
+        image, source = str(cfg.image), "config-image"
+    # AND THE OTHER HALF OF THE SESSION'S RULE, which the first version of this
+    # fix left out — caught by a refuting review before it landed. Composition
+    # validates the charset AND THEN requires, under apptainer, an absolute path
+    # that is a file (a .sif) or a directory (a sandbox); anything else DROPS
+    # `cfg.image` and falls through to the plugin image. Porting only the charset
+    # half made one config produce three answers: with
+    # `examples/hpc-slurm.yaml`'s line verbatim (the `USER` placeholder
+    # unsubstituted, or simply a different home path), `inspect` showed the
+    # plugin .sif, `hpc submit --dry-run` refused [config-missing], and
+    # `hpc dispatcher once` wrote a caged sbatch around the nonexistent path. A
+    # docker-style tag was worse: a RELATIVE operand, resolved by apptainer
+    # against the job's CWD, which is the agent-writable project root.
+    if image and not (Path(image).is_absolute()
+                      and (Path(image).is_file() or Path(image).is_dir())):
+        image, source = "", ""
+    if not image:
+        # THE FOUR CANDIDATES, not one. `apptainer_sif_path` says where a build
+        # SHOULD write; this asks where one IS. `botainer hpc build` once wrote
+        # the unprefixed `<plugin>.sif`, and such state roots exist — so with
+        # `images/agent-claude.sif` on disk, a SESSION launched (the session
+        # resolver walks all four spellings) and every dispatched job died with
+        # "child-job image not found" naming a path the user never chose.
+        # Measured 2026-09-12. DN-036 is the naming drift.
+        #
+        # `find_apptainer_sif` is NOT the only copy of this walk and this comment
+        # said it was: `composition._resolve_apptainer_sif_path` carries a second
+        # one, which is the resolver this function is being compared against.
+        # THE PRECEDENCE SENTENCE THAT WAS HERE IS NOW BACKWARDS ON BOTH HALVES,
+        # so it is replaced rather than trimmed. It said the hpc-launcher prefers
+        # the PATH RECORDED IN THE MARKER over any conventional filename, so a
+        # `.sif` in a non-standard location was "found by `hpc submit` and by
+        # neither of the other two". Both statements were inverted as of
+        # 2026-09-12: the launcher consults the recorded path LAST, like this side,
+        # and all three resolvers now find such a file. What the launcher still
+        # sees alone is its own `plugins.hpc-launcher.apptainer_image` key; what
+        # THIS side sees alone is the installed plugin directory, below.
+        plugin_dir = None
+        try:
+            from botainer.plugins.lifecycle import list_installed
+            for inst in list_installed():
+                if inst.name == agent_plugin:
+                    plugin_dir = inst.plugin_dir
+                    break
+        except Exception:
+            pass
+        sif = paths.find_apptainer_sif(agent_plugin, plugin_dir)
+        if sif is None:
+            raise click.ClickException(
+                f"child-job image not found for {agent_plugin!r}: looked for "
+                f"{paths.apptainer_sif_path(agent_plugin)} and the legacy "
+                f"{paths.images_dir / (agent_plugin + '.sif')}. Build it with "
+                f"`botainer hpc build {agent_plugin}`, or set `image:` in config.")
+        image, source = str(sif), "plugin-sif"
+    _verify_apptainer_sif_provenance(
+        agent_plugin, Path(image),
+        enforce=_ENFORCE_SIF_PROVENANCE.get(source, True))
+    return image
 
 
 # All botainer SLURM job-name prefixes: sessions, dispatched child jobs, warm
 # workers. `hpc status` filters on these so a user sees ALL their botainer jobs.
 _BOTAINER_JOB_NAME_PREFIXES = ("botainer-", "botjob-", "botpool-")
+
+
+def _scrub_apptainer_env_channel(source) -> dict:
+    """`source` minus `APPTAINERENV_*` / `SINGULARITYENV_*`.
+
+    ONE DECISION, NAMED ONCE IN THIS FILE. Those prefixes are how a variable is
+    deliberately propagated INTO a container — they survive `--cleanenv`, which
+    is the point of them — so anything this process spawns that ends in
+    `apptainer` must drop the ones it did not choose itself.
+
+    Extracted when `hpc build` turned out to be the sixth such site and the only
+    one that did not do it. `_sbatch_env` below now expresses its own scrub in
+    terms of this rather than repeating the prefix tuple, so a future seventh
+    caller has one thing to find.
+
+    NOT stripped here: `APPTAINER_BIND` / `SINGULARITY_BIND` / `LD_PRELOAD`.
+    The first two are ordinary site configuration — module files set them to
+    make scratch visible — and removing them would break builds on real
+    clusters. `LD_PRELOAD` affects the host-side apptainer process, not the
+    container, and is the user's own shell; scrubbing it here would be a guess
+    about their environment rather than a boundary.
+    """
+    return {k: v for k, v in source.items()
+            if not k.startswith(("APPTAINERENV_", "SINGULARITYENV_"))}
 
 
 def _sbatch_env() -> dict:
@@ -1637,9 +1909,8 @@ def _sbatch_env() -> dict:
     this closes that parity gap for every child launch (security review).
     """
     keep = {"SLURM_CONF"}
-    return {k: v for k, v in os.environ.items()
-            if k in keep or not k.startswith(
-                ("SLURM_", "SBATCH_", "SRUN_", "APPTAINERENV_", "SINGULARITYENV_"))}
+    return {k: v for k, v in _scrub_apptainer_env_channel(os.environ).items()
+            if k in keep or not k.startswith(("SLURM_", "SBATCH_", "SRUN_"))}
 
 
 def _run_dispatcher_cycle(project_root: Path) -> int:
@@ -1661,7 +1932,21 @@ def _run_dispatcher_cycle(project_root: Path) -> int:
     if not uid:
         raise click.ClickException(f"{project_root} is not a botainer project (no project-id).")
     mb = _jobs.ensure_mailbox(paths, uid)
-    image = _resolve_child_image(cfg, paths)
+    # AN IMAGE FAULT MUST NOT FREEZE THE CYCLE. This used to raise here, ahead of
+    # `poll_running`, the `*.cancel` sweep and the pool-status publish — measured
+    # by a refuting review: with an unresolvable `image:`, a job that had already
+    # finished still read `queued` to the agent, and a cancel marker was silently
+    # dropped, for a reason unrelated to either. An auto-started dispatcher sends
+    # stdout AND stderr to /dev/null, so the only trace was the capped run log.
+    # Everything that does not NEED an image now runs regardless, and the requests
+    # that do need one get a refusal naming the real cause.
+    image, image_error = "", ""
+    try:
+        image = _resolve_child_image(cfg, paths)
+    except click.ClickException as exc:
+        image_error = exc.format_message()
+    except _Refused as exc:
+        image_error = str(exc)
     # #68: the project binds every child job gets so it can see its code/data
     # (/workspace rw, /packages ro, /scratch rw) — the foundational fix; before
     # this, dispatched jobs got ZERO binds and couldn't see /workspace at all.
@@ -1700,10 +1985,18 @@ def _run_dispatcher_cycle(project_root: Path) -> int:
                          parts[2].strip() if len(parts) > 2 else "")
         return ids, info
 
-    results = _disp.process_inbox_once(
-        mb, cfg.job_profiles, eff.jobs, image, child_binds, child_env,
-        sbatch=_sbatch, now=_identity.now_iso8601_utc(),
-    )
+    if image_error:
+        results = _disp.refuse_all_pending(
+            mb, f"cannot resolve the job image: {image_error}")
+        sys.stderr.write(
+            "[botainer] dispatcher: no usable child-job image, so nothing was "
+            "submitted this cycle; status polling and cancels still ran.\n"
+            f"  {image_error}\n")
+    else:
+        results = _disp.process_inbox_once(
+            mb, cfg.job_profiles, eff.jobs, image, child_binds, child_env,
+            sbatch=_sbatch, now=_identity.now_iso8601_utc(),
+        )
     _ids, _info = _squeue_info()
     _disp.poll_running(mb, _ids, _info)
     # cancel markers → scancel + mark cancelled.
@@ -1725,7 +2018,11 @@ def _run_dispatcher_cycle(project_root: Path) -> int:
     # (Bugfix: this passed an undefined `proj` — a NameError that,
     # swallowed by the per-cycle guard, made ALL pool control silently dead.)
     _autostart_warm_pools(project_root, cfg, mb, eff)
-    _handle_pool_control(project_root, cfg, mb, eff, image)
+    # Pool control STARTS workers, so it needs an image; the status publish does
+    # not, and is what the agent reads. Skipping the first must not skip the
+    # second — that coupling is the same defect one layer down.
+    if not image_error:
+        _handle_pool_control(project_root, cfg, mb, eff, image)
     _publish_pool_status(mb)
     return len([r for r in results if r.state == "queued"])
 
@@ -1782,6 +2079,16 @@ def _start_pool_workers(proj: Path, profile_name: str, prof, mb, eff,
     _pol.check_profile_against_ceiling(
         profile_name, prof.partition, prof.account, prof.gpus,
         prof.max_concurrent, eff.jobs, nodes=int(getattr(prof, "nodes", 1) or 1))
+    # RELEASE THE SLOTS OF WORKERS THAT TOLD US THEY FINISHED, before counting.
+    # A record only ever left pool state on an explicit `pool stop`, so every
+    # worker that self-released on its idle timeout kept a `max_concurrent` slot
+    # for ever: with the shipped example profile two idle-outs made this function
+    # start ZERO workers, and since `max_concurrent` defaults to 1, ONE idle-out
+    # exhausted a default profile. That made the documented recovery ("the agent
+    # re-warms with `botainer-job pool start`") the broken path. Measured by the
+    # refuting review of the diagnosis work. Only TERMINAL beats are reaped: a still-
+    # PENDING in the queue has no heartbeat yet and must keep its slot.
+    _reaped = _pool.reap_exited_workers(mb)
     # Clamp to the profile cap MINUS workers already up for this profile, so
     # repeated `pool start` can't accumulate past max_concurrent (sharp-edges F4
     #). If already at/over the cap, start none.
@@ -1790,16 +2097,26 @@ def _start_pool_workers(proj: Path, profile_name: str, prof, mb, eff,
     _room = max(0, int(prof.max_concurrent) - _existing)
     size = max(0, min(int(size), _room))
     if size == 0:
+        # SAY SO. Returning 0 in silence is how "auto-started warm pool (size 2)"
+        # came to be printed for a cycle that started nothing.
+        click.secho(
+            f"pool: profile {profile_name!r} already has {_existing} worker "
+            f"record(s) and max_concurrent is {prof.max_concurrent} — started 0. "
+            f"`botainer hpc pool status` says what each one is doing; "
+            f"`pool stop` releases them.", fg="yellow", err=True)
         return 0
+    if _reaped:
+        click.secho(f"pool: released {len(_reaped)} finished worker record(s) "
+                    f"({', '.join(_reaped)}).", err=True)
     for _ in range(size):
         wid = _pool.new_worker_id(secrets.token_hex(6))
         _pool.ensure_worker_dirs(mb, wid)
+        # Both Slurm streams go to the host-private mb.run_dir/pool/<wid>, derived
+        # inside the renderer from the mailbox — NEVER bound into a container.
+        # Without this Slurm defaulted to <submit-dir>/slurm-%j.out, and the submit
+        # CWD is the RW-bound project root (bug audit CRITICAL-1).
         script = _pool.render_worker_sbatch(
-            wid, prof, str(proj), idle_to, quote=shlex.quote,
-            # Host-private (mb.run_dir/pool/<wid>) — NEVER bound into a container.
-            # Without this Slurm defaulted to <submit-dir>/slurm-%j.out, and the
-            # submit CWD is the RW-bound project root (bug audit CRITICAL-1).
-            out_dir=_pool.worker_dir(mb, wid))
+            wid, prof, str(proj), idle_to, quote=shlex.quote, mb=mb)
         sp = _pool.pool_root(mb) / f"{wid}.sbatch"
         sp.write_text(script, encoding="utf-8")
         slurm_id = sbatch_submit(sp, profile_name=profile_name,
@@ -1825,13 +2142,16 @@ def _autostart_warm_pools(project_root: Path, cfg, mb, eff) -> None:
             continue
         _AUTOWARMED_POOLS.add(key)  # mark BEFORE attempting, so a failure can't loop
         try:
-            _start_pool_workers(
+            # The STARTED count, not the requested one. This used to print
+            # "auto-started warm pool (size 2)" for a cycle that started zero
+            # because dead records held every slot (found by a refuting review).
+            started = _start_pool_workers(
                 project_root, name, prof, mb, eff, size=int(n),
                 idle_to=int(getattr(prof, "warm_pool_idle_timeout", 300)))
             import sys as _sys
             _sys.stderr.write(
-                f"dispatcher: auto-started warm pool for {name!r} "
-                f"(size {n}).\n")
+                f"dispatcher: warm pool for {name!r}: started {started} of "
+                f"{n} requested.\n")
         except Exception as exc:
             import sys as _sys
             _sys.stderr.write(
@@ -1920,10 +2240,30 @@ def _publish_pool_status(mb) -> None:
     from botainer.hpc import pool as _pool
     manifest = {"version": "botainer-pool-status-v1", "workers": []}
     for w in _pool.read_pool_state(mb):
-        beat = _pool.read_beat(mb, w.worker_id) or {}
+        # `pool.worker_diagnosis` is the ONE owner of "what state is this worker
+        # in, and why not" — the CLI's `pool status` reads the same call. This
+        # used to publish `beat.get("state", "?")`, so a worker that died before
+        # its first heartbeat (commonest cause: an image it cannot resolve) was
+        # reported to the AGENT as "?" while its own stderr sat unread in the
+        # host-private pool tree.
+        diag = _pool.worker_diagnosis(mb, w)
+        # SANITISED for this surface, in full on the human one. `out/` is bound RO
+        # into the container, and a worker's stderr is host-authored text that can
+        # carry absolute state-root paths and the project uuid. The refuting review
+        # of this change established it is NOT a new boundary — `_copy_run_logs`
+        # already copies a child job's whole stderr into out/, deliberately, and the
+        # state root is bound at its own absolute path on the HPC session anyway —
+        # so this is hygiene consistency with §4cu.1's channel, not a hole being
+        # closed. Same filter as the sbatch-rejection text, applied to the LAST
+        # lines because that is where the useful one is.
+        reason = diag["reason"]
+        if reason:
+            reason = _sanitize_scheduler_error(
+                "\n".join(reason.splitlines()[-2:]))
         manifest["workers"].append({
             "worker_id": w.worker_id, "profile": w.profile,
-            "slurm_job_id": w.slurm_job_id, "state": beat.get("state", "?")})
+            "slurm_job_id": w.slurm_job_id, "state": diag["state"],
+            "heartbeat_age_s": diag["age_s"], "reason": reason})
     mb.out_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     tmp = mb.out_dir / ".pool.json.tmp"
     tmp.write_text(_json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
@@ -2045,7 +2385,7 @@ def dispatcher_start(project: str, interval: int) -> None:
         # cycle that errors every time (a bad account, a down scheduler) writes
         # thousands of identical lines a day. An unbounded log in $MY_BOTAINER
         # is the same defect as everything else that quietly filled the
-        # maintainer's home quota — see storage tiering, task #107. One rotation
+        # a real home quota — see storage tiering, task #107. One rotation
         # at the cap, so the last error is always the visible one.
         try:
             if log_path.exists() and log_path.stat().st_size > _DISPATCH_LOG_MAX:
@@ -2193,13 +2533,8 @@ def dispatcher_liveness(project_root: Path | None = None) -> tuple[str, str]:
     cannot be identified (not a project, or jobs not enabled) — in which case
     there is nothing to report on and no warning should fire.
 
-    Was per-USER until, which was simply the wrong shape: the
-    dispatcher process has always been per-project (`--project`), so with two
-    projects open the single record described whichever started last, and its
-    exit deleted the other's. Observed:
-
-        A started; record = 58689    B started; record = 58694
-        status -> "running (58694)"  while A is the one serving project A
+    Dispatcher liveness is per project. A single per-user record cannot
+    represent multiple simultaneous project dispatchers or their lifetimes.
 
     Liveness now comes from a heartbeat in the project's own host-private
     `run/dispatcher.json`. A heartbeat also answers across login nodes, where a
@@ -2319,9 +2654,20 @@ def _warn_legacy_dispatcher() -> None:
 # ─────────────────────── warm/hot worker pool (#68) ───────────────────────
 
 
-def _pool_ctx(project_root: Path):
-    """Shared setup for the pool commands: (cfg, mailbox, image, eff_policy, uid).
-    Mirrors _run_dispatcher_cycle so the pool reuses the same config/policy/image."""
+def _pool_ctx_no_image(project_root: Path):
+    """(cfg, mailbox, eff_policy, uid) — everything a pool command needs that is
+    NOT the child image.
+
+    SPLIT FROM `_pool_ctx` BECAUSE READING AND TEARING DOWN MUST NOT NEED AN IMAGE.
+    `pool status` and `pool stop` both discarded the resolved image and still died
+    with it, so in the very failure this subsystem's diagnosis exists for — no
+    `.sif`, which is the commonest reason a worker never starts — `pool status`
+    printed `Error: child-job image not found` and no worker line at all, and
+    `pool stop` could not release allocations that were already running. A user
+    was left to `squeue` and `scancel` by hand. Measured by the refuting review of
+    the warm-pool diagnosis work. The split IS the fix: those two can no longer acquire
+    an image, so they can no longer fail on one.
+    """
     from botainer.core import config as _cfgm
     from botainer.core import identity as _identity
     from botainer.core import policy as _pol
@@ -2336,6 +2682,18 @@ def _pool_ctx(project_root: Path):
     if not uid:
         raise click.ClickException(f"{project_root} is not a botainer project (no project-id).")
     mb = _jobs.ensure_mailbox(paths, uid)
+    return cfg, mb, eff, uid
+
+
+def _pool_ctx(project_root: Path):
+    """Shared setup for the pool commands that RUN something: (cfg, mailbox, image,
+    eff_policy, uid). Mirrors _run_dispatcher_cycle so the pool reuses the same
+    config/policy/image. `pool start` keeps the resolution as a deliberate
+    pre-flight — better to refuse on the login node than to burn an allocation on a
+    worker that will die resolving the same image."""
+    from botainer.state import dir as _sd
+    cfg, mb, eff, uid = _pool_ctx_no_image(project_root)
+    paths = _sd.ensure_user_state_dir(create_if_missing=True)
     image = _resolve_child_image(cfg, paths)
     return cfg, mb, image, eff, uid
 
@@ -2412,15 +2770,46 @@ def pool_status(project: str) -> None:
     """Show the warm workers + their live idle/busy state."""
     from botainer.hpc import pool as _pool
     proj = Path(project).resolve()
-    _cfg, mb, _image, _eff, _uid = _pool_ctx(proj)
+    _cfg, mb, _eff, _uid = _pool_ctx_no_image(proj)
     workers = _pool.read_pool_state(mb)
     if not workers:
         click.echo("pool: no warm workers.")
         return
     for w in workers:
-        beat = _pool.read_beat(mb, w.worker_id) or {}
+        diag = _pool.worker_diagnosis(mb, w)
+        age = "" if diag["age_s"] is None else f"  last-beat={diag['age_s']}s"
         click.echo(f"  {w.worker_id}  profile={w.profile}  slurm={w.slurm_job_id}  "
-                   f"state={beat.get('state','?')}")
+                   f"state={diag['state']}{age}")
+        if diag["terminal"]:
+            # NOT A FAULT: the worker reported its own exit. Saying "stale" here
+            # (which this code did in its first version) turns the designed end of
+            # a warm worker's life into an alarm, and sends the user to `squeue`
+            # for a job that has finished.
+            why = ("released its allocation on the idle timeout"
+                   if diag["state"] == "exiting" else "exited on a stop request")
+            click.echo(f"      finished cleanly — {why}. Its slot is freed on the "
+                       f"next `botainer hpc pool start`.")
+            continue
+        # A WORKER'S OWN REASON, WHICH NO COMMAND USED TO SHOW. Slurm writes the
+        # worker's stderr into the host-private pool tree because we ask it to;
+        # until now nothing read it, so "state=?" was the whole story a user got
+        # for a worker that never started.
+        if diag["reason"]:
+            click.secho("      its own last words:", fg="yellow")
+            for line in diag["reason"].splitlines()[-6:]:
+                click.echo(f"        {line}")
+        elif diag["state"] not in ("idle", "busy"):
+            click.secho(
+                f"      nothing in its stderr — the allocation may have ended, or "
+                f"never started. Check `squeue -j {w.slurm_job_id}`.",
+                fg="yellow")
+        if diag["state"] == "stale" and diag["last_state"] == "busy":
+            # The one case where something else may also be broken: it was RUNNING
+            # a hot task when it stopped beating, so that task has no one left to
+            # write its result.
+            click.secho("      it was BUSY when it stopped — a hot task died with "
+                        "it; check `botainer hpc jobs-status` for one stuck "
+                        "'running'.", fg="yellow")
 
 
 @pool_grp.command("stop")
@@ -2431,7 +2820,9 @@ def pool_stop(project: str, worker_id: str | None) -> None:
     """Stop warm workers: drop a STOP marker (clean exit) + scancel."""
     from botainer.hpc import pool as _pool
     proj = Path(project).resolve()
-    _cfg, mb, _image, _eff, _uid = _pool_ctx(proj)
+    # NO IMAGE: tearing a pool down must work when the image is the thing that is
+    # broken, or a user with live GPU allocations is left to scancel by hand.
+    _cfg, mb, _eff, _uid = _pool_ctx_no_image(proj)
     workers = _pool.read_pool_state(mb)
     keep = []
     stopped = 0

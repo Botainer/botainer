@@ -1,3 +1,23 @@
+# check=skip=SecretsUsedInArgOrEnv
+#
+# WHY THAT CHECK IS OFF HERE, and what replaces it.
+#
+# BuildKit flags `ENV OPENAI_API_KEY_FILE=...` because the NAME contains
+# API_KEY. The value is a PATH — /home/agent/.openai/api_key — and the `_FILE`
+# suffix is the convention that exists so a secret never becomes an env VALUE
+# in the first place. The rule matches on the name and does not understand the
+# suffix, so it fires on the secure pattern and would fire on every image build
+# forever. A warning nobody can act on trains people to skip the channel, which
+# is how the next real one gets missed.
+#
+# The skip is file-scoped, which means it would also hide a GENUINE secret
+# added here later. So it does not stand alone:
+# `tests/unit/test_no_secret_values_in_images.py` scans every shipped Dockerfile
+# and .def for an ENV/ARG/export whose VALUE looks like key material, and
+# permits a `*_FILE` name only when its value is an absolute path. That is a
+# narrower check than the one disabled, and one we can actually keep true.
+#
+# The key itself arrives at runtime as a read-only bind; nothing is baked in.
 # Dockerfile for agent-codex (botainer v0.1.x)
 #
 # Mirrors agent-claude's structure: kitchen-sink language tools so the
@@ -105,6 +125,21 @@ USER agent
 WORKDIR /workspace
 
 # Env-var routing for /packages (matches agent-claude).
+# npm GLOBAL installs must land in /packages and be on PATH. (#230)
+#
+# NODE_PATH (set below) fixes `require()` resolution for LIBRARIES and does
+# nothing for `npm install -g`, which writes BINARIES to the global prefix. That
+# prefix defaulted to root-owned /usr/local/lib/node_modules while the container
+# runs --user 1000:1000, so a global install FAILED — and the agent hints told
+# the agent "both global and local installs work", which was false for global.
+#
+# It matters beyond tidiness: `inject_credentials` lets a session hold another
+# agent's credentials, but the images are single-agent (this one installs only
+# its own CLI). Installing the other agent's CLI at runtime is how that gap is
+# closed, and it has to persist in /packages to be worth doing once.
+ENV NPM_CONFIG_PREFIX=/packages/npm-global
+ENV PATH=/packages/npm-global/bin:$PATH
+
 ENV PIP_TARGET=/packages/pip \
     PYTHONPATH=/packages/pip \
     NODE_PATH=/packages/node_modules \

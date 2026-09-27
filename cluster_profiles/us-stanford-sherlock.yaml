@@ -80,6 +80,7 @@ slurm:
       max_cpus: 32                 # vendor: "20-32 cores/node"
       max_memory_gb: 256
     owners:
+      preemptible: true
       # PREEMPTIBLE. This is the shared pool spanning all PI-purchased
       # nodes: any owner can submit here, but a job can be killed and
       # requeued the moment the node's purchasing group needs it back

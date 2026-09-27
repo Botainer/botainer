@@ -286,3 +286,143 @@ def test_hpc_advertises_jobs_capability_when_not_configured() -> None:
     assert "capability available, NOT enabled" in apt
     assert "job_profiles" in apt and "jobs-doctor" in apt
     assert "capability available" not in agent_hints.render(_spec("docker"))
+
+
+def _docker_spec():
+    from botainer.core.spec import MountPlan, SessionSpec
+    return SessionSpec(session_id="s", project_uuid="u", project_root="/p",
+                       state_dir="/s", runtime="docker", image="img",
+                       plugins_enabled=("agent-claude",),
+                       mount_plan=MountPlan(binds=()))
+
+
+def test_the_hints_say_packages_is_shared_with_the_other_agent(tmp_path) -> None:
+    """`/packages` is per-PROJECT: the bind source is `<project state>/packages`
+    with no agent component, so Claude and codex in one project write the SAME
+    directory.
+
+    State this scope explicitly so each agent can recognize packages added
+    by another agent and communicate its own changes.
+    """
+    hints = agent_hints.render(_docker_spec())
+
+    assert "SHARED with the other agent" in hints
+    assert "Look before you install" in hints, (
+        "reinstalling a different version over a shared one can break the "
+        "other agent, so looking first is the actionable part"
+    )
+    assert "/packages/INSTALLED.md" in hints, (
+        "and a place to write it down that BOTH agents can read — their own "
+        "histories are per-agent and cannot be read across"
+    )
+
+
+def test_the_hints_distinguish_the_shared_dir_from_the_unshared_image(
+        tmp_path) -> None:
+    """The half no manifest can fix. Each agent has its own image, so software
+    baked into one may be absent from the other while `/packages` looks
+    identical — which is exactly the confusing case, and the one where the
+    answer is "different image", not "someone forgot to write it down"."""
+    hints = agent_hints.render(_docker_spec())
+
+    assert "What is NOT shared: the container image" in hints
+
+
+# ── the case-folding section, and the check it hands the agent (#167) ────────
+
+
+def _folded_spec(targets=("/workspace", "/packages")):
+    class _B:
+        def __init__(self, t): self.target, self.source = t, "/host" + t
+    class _MP:
+        binds = [_B(t) for t in targets]
+    class _Spec:
+        mount_plan = _MP()
+    return _Spec()
+
+
+def test_the_confirm_command_names_a_FOLDED_path_not_tmp(monkeypatch):
+    """The first version told the agent `touch /tmp/A && ls /tmp/a`.
+
+    `/tmp` is not a host bind — docker renders `--tmpfs /tmp` and apptainer's
+    `--containall` gives a private one — so that probe answered
+    "case-sensitive" on EVERY host, including the Macs where this section is
+    the only thing that appears. The agent was handed the fact and, one line
+    later, a command contradicting it: the thrash-and-invent-a-workaround
+    failure this section exists to prevent, delivered by the section itself.
+    """
+    from botainer.inspect import agent_hints
+    from botainer.state import fs_kind
+
+    monkeypatch.setattr(fs_kind, "is_case_insensitive", lambda p: True)
+    text = "\n".join(agent_hints._case_sensitivity_lines(_folded_spec()))
+
+    assert "/tmp/" not in text, (
+        "the confirmation command points at /tmp, which is a tmpfs in both "
+        "runtimes and never folds — it answers 'case-sensitive' every time"
+    )
+    assert any(f"{t}/BOTAINER_CASE_A" in text
+               for t in ("/workspace", "/packages")), (
+        "the check must run on a path this session actually reported as folded"
+    )
+
+
+def test_the_section_is_silent_when_nothing_folds(monkeypatch):
+    """Common case on Linux and HPC. A section teaching a fact that does not
+    apply is noise, and prompt space is the scarcest thing here."""
+    from botainer.inspect import agent_hints
+    from botainer.state import fs_kind
+
+    monkeypatch.setattr(fs_kind, "is_case_insensitive", lambda p: False)
+    assert agent_hints._case_sensitivity_lines(_folded_spec()) == []
+
+
+def test_HOME_says_it_is_SHARED_with_the_other_agent_not_just_persistent():
+    """#194. The `/packages` section says SHARED in a heading. HOME said only
+    "persists across sessions (same as /packages)" — which a reader takes as a
+    statement about TIME, when it is also one about WHO.
+
+    Observed rather than assumed: `ensure_project_dirs` gives
+    `state/<uuid>/{home,packages,scratch}` with NO agent component, so all
+    three are one directory for both agents. Tool config is the part that
+    bites, and its failure does not look like a shared directory.
+
+    Asserts on the RENDERED text — what the agent is actually handed — not on
+    the module source.
+    """
+    from botainer.core.spec import SessionSpec
+
+    rendered = agent_hints.render(SessionSpec(
+        session_id="s1", project_uuid="u", project_root="/p", state_dir="/s",
+        runtime="docker", image="img", plugins_enabled=("agent-claude",),
+    ))
+    home = rendered[rendered.index("## Your home directory"):]
+    home = home[:home.index("## Network access in this session")]
+
+    assert "SHARED with the other agent" in home, (
+        "the HOME section still describes only persistence. An agent that does "
+        "not know `~` is shared reads a config written by the other agent's "
+        "tool version as a broken tool."
+    )
+    assert "/scratch" in home, "the same is true of /scratch and it is unsaid"
+    assert "INSTALLED.md" in home, (
+        "the section says what is NOT shared without naming the one channel "
+        "that IS — leaving the agent no way to act on it"
+    )
+
+
+def test_the_agent_is_told_which_directories_are_NOT_shared():
+    """The other half. "Everything is shared" would be as wrong as the silence
+    it replaces: history, notes and settings are per-agent, and an agent that
+    thinks otherwise will look for the other one's context and find nothing."""
+    from botainer.core.spec import SessionSpec
+
+    rendered = agent_hints.render(SessionSpec(
+        session_id="s1", project_uuid="u", project_root="/p", state_dir="/s",
+        runtime="docker", image="img", plugins_enabled=("agent-claude",),
+    ))
+    assert "NOT shared" in rendered
+    assert "the container image" in rendered, (
+        "the image is the other thing that differs between agents, and a tool "
+        "missing despite /packages saying it was installed is the symptom"
+    )

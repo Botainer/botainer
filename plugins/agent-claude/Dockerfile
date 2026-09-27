@@ -199,6 +199,21 @@ USER agent
 WORKDIR /workspace
 
 # Env-var routing for /packages (Phase 2 binds these dirs).
+# npm GLOBAL installs must land in /packages and be on PATH. (#230)
+#
+# NODE_PATH (set below) fixes `require()` resolution for LIBRARIES and does
+# nothing for `npm install -g`, which writes BINARIES to the global prefix. That
+# prefix defaulted to root-owned /usr/local/lib/node_modules while the container
+# runs --user 1000:1000, so a global install FAILED — and the agent hints told
+# the agent "both global and local installs work", which was false for global.
+#
+# It matters beyond tidiness: `inject_credentials` lets a session hold another
+# agent's credentials, but the images are single-agent (this one installs only
+# its own CLI). Installing the other agent's CLI at runtime is how that gap is
+# closed, and it has to persist in /packages to be worth doing once.
+ENV NPM_CONFIG_PREFIX=/packages/npm-global
+ENV PATH=/packages/npm-global/bin:$PATH
+
 ENV PIP_TARGET=/packages/pip \
     PYTHONPATH=/packages/pip \
     NODE_PATH=/packages/node_modules \

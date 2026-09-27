@@ -52,18 +52,32 @@ class PartitionSpec:
     # FASTEST TO START, so they are precisely what an optimising agent (or a
     # user reading a queue table) will pick.
 
+    # THREE-STATE, and it took a submit-time warning existing before this
+    # mattered. Both were `bool = False`, which cannot distinguish "the site
+    # documents this partition as ordinary" from "nobody has checked". Once
+    # `partition_warnings` shipped, that collapse became load-bearing: the
+    # warning's SILENCE reads as an all-clear, and it was silent on 49 of 51
+    # bundled profiles — several of which state the fact in PROSE two lines
+    # from the unset field. `charge_factor` beside them already made exactly
+    # this distinction and its comment already argued for it. (#211)
+    #
+    # None ⇒ not recorded. Never treat it as False in anything a user reads.
+
     #: The job can be killed and requeued at any moment, without warning.
     #: Yale `scavenge`, Harvard `serial_requeue`/`gpu_requeue`, Stanford
     #: `owners`, Berkeley `savio_lowprio`, NERSC `preempt`/`overrun`.
     #: An agent that does not know this will not checkpoint and will silently
     #: lose hours. Several bundled profiles DEFAULT to such a partition.
-    preemptible: bool = False
+    #: None ⇒ not documented (NOT False — some profiles say explicitly that
+    #: they looked and found no preemptible partition; that is a finding).
+    preemptible: bool | None = None
 
     #: Allocates — and charges for — a whole node regardless of what you
     #: request. SDSC Expanse `compute` bills all 128 cores for a 1-core job;
     #: same for `gpu` vs `gpu-shared`, and Bridges-2 `RM` vs `RM-shared`.
     #: This is the most expensive silent mistake available on those machines.
-    exclusive: bool = False
+    #: None ⇒ not documented.
+    exclusive: bool | None = None
 
     #: Multiplier applied to allocation charging. NERSC `premium` is 2-4x;
     #: `preempt` is discounted below 1.0. None ⇒ not documented (NOT 1.0 —
@@ -92,6 +106,26 @@ class ClusterProfile:
     aliases: tuple[str, ...] = field(default_factory=tuple)
     description: str = ""
     lmod_bootstrap: str = ""
+    #: Directories holding this site's centrally-installed software, bound
+    #: READ-ONLY at their original paths (#171/#156).
+    #:
+    #: WHY THE PROFILE AND NOT THE USER. Deriving roots from a `module load` is
+    #: authoritative — Lmod knows where its own software lives — but it needs a
+    #: module load already run AND a site administrator listing prefixes in the
+    #: root-owned policy. Without an admin you got silence. The profile is the
+    #: escape: it is a curated artefact the user already selected, it carries a
+    #: verification status, and using it means the common case is zero typing
+    #: and zero admin.
+    #:
+    #: THESE ARE NOT TRUSTED PATHS. Every one goes through the same guards as a
+    #: derived root — realpath, the sensitive/FHS denylist, the shallow-path
+    #: refusal, an existence check and the max_roots ceiling. A profile can
+    #: carry a typo, and `/usr/lib` bound over the container's own libraries
+    #: breaks the session whoever asked for it.
+    #:
+    #: A profile that lists none is the normal case; nothing is mounted and
+    #: nothing is claimed.
+    software_roots: tuple[str, ...] = field(default_factory=tuple)
     slurm_default_partition: str = ""
     slurm_default_account: str = ""
     slurm_default_time_minutes: int = 240
@@ -125,7 +159,7 @@ class ClusterProfile:
     policy_refuse_network: bool = False
     agent_hints_preamble: str = ""
     # ── provenance: how much should a user trust this profile? ──
-    # User requirement: "clearly mark what's tested and not tested".
+    # Profile provenance must distinguish hardware verification from documentation.
     #
     # Most bundled site profiles already carried a free-text comment of the form
     # "# last verified: <date> against <the site's public docs URL>", in several
@@ -166,6 +200,32 @@ class ClusterProfile:
                     f"cluster{when}{src}")
         return f"community-contributed, provenance unstated{when}{src}"
 
+    def provenance_clause(self) -> str:
+        """A SHORT provenance clause for a warning, not the full label.
+
+        `verification_label()` is for a screen with room — Grace's
+        `verification_source` alone is a paragraph with two URLs. A submit-time
+        warning has one line, and dropping the provenance entirely is the
+        failure this exists to prevent: the partition warnings (#109) state
+        "this job can be killed at any moment" with the authority of a measured
+        fact, when for most profiles the source is a vendor web page an agent
+        transcribed. The claim may well be right. The tone was unearned.
+
+        Returns "" only for `tested-on-hardware`, where there is nothing to
+        caveat. One place knows this vocabulary, next to the long form.
+        """
+        st = self.verification_status
+        if st == "tested-on-hardware":
+            return ""
+        if st == "from-probe":
+            return "from this cluster profile, generated by probing the scheduler"
+        if st == "from-public-docs":
+            return ("from this cluster profile, transcribed from the site's "
+                    "public docs and NOT checked against the live scheduler")
+        if st == "community-contributed":
+            return "from this cluster profile, contributed with no stated provenance"
+        return "from this cluster profile, which does not record where it came from"
+
     def match_names(self) -> set[str]:
         """Every name this profile answers to, lowercased.
 
@@ -204,8 +264,13 @@ class ClusterProfile:
                 max_cpus=p.get("max_cpus"),
                 max_memory_gb=p.get("max_memory_gb"),
                 gpu_types=tuple(p.get("gpu_types") or []),
-                preemptible=bool(p.get("preemptible", False)),
-                exclusive=bool(p.get("exclusive", False)),
+                # ABSENT stays None. `bool(p.get(k, False))` would have
+                # turned every unrecorded partition into a positive "not
+                # preemptible" claim — the collapse this field exists to undo.
+                preemptible=(None if p.get("preemptible") is None
+                             else bool(p["preemptible"])),
+                exclusive=(None if p.get("exclusive") is None
+                           else bool(p["exclusive"])),
                 charge_factor=(
                     float(p["charge_factor"])
                     if p.get("charge_factor") is not None else None
@@ -232,6 +297,8 @@ class ClusterProfile:
             aliases=tuple(cluster.get("aliases") or []),
             description=cluster.get("description", ""),
             lmod_bootstrap=lmod.get("bootstrap", ""),
+            software_roots=tuple(
+                str(x) for x in (cluster.get("software_roots") or [])),
             slurm_default_partition=slurm.get("default_partition", ""),
             slurm_default_account=slurm.get("default_account", ""),
             slurm_default_time_minutes=int(
@@ -347,8 +414,19 @@ def load_user_profile() -> ClusterProfile | None:
         ) from exc
 
 
-def write_user_profile(profile: ClusterProfile) -> Path:
-    """Persist a profile to `~/.botainer/cluster.yaml` (mode 0600)."""
+def write_user_profile(profile: ClusterProfile, *,
+                       force: bool = False) -> Path:
+    """Persist a profile to ~/.botainer/cluster.yaml with mode 0600.
+
+    Refuse differing existing content unless force is explicit. Profile files can
+    hold hand-edited scheduler settings and comments; regeneration must not silently
+    discard them. With force, preserve the old file beside the new one and report
+    its location. Identical content remains a no-op."""
+    # Imported here, not at module scope, matching the existing local import
+    # further up this file — botainer.core.refusal pulls in enough that a
+    # top-level import from a state module risks a cycle.
+    from botainer.core.refusal import RefusalCategory, Refused
+
     paths = state_dir.ensure_user_state_dir(create_if_missing=True)
     profile_path = paths.root / "cluster.yaml"
     data = {
@@ -358,6 +436,16 @@ def write_user_profile(profile: ClusterProfile) -> Path:
             "aliases": list(profile.aliases),
             "hostname_patterns": list(profile.hostname_patterns),
             "description": profile.description,
+            # UNDER `cluster`, because that is where from_dict reads it. The
+            # first version of this emitted it at the top level and the value
+            # was silently lost on every round-trip — caught by writing a
+            # profile and reading it back, not by reading the diff.
+            #
+            # Emitted only when non-empty: a profile that lists no software
+            # roots should not gain an empty key that reads like a setting
+            # somebody turned off.
+            **({"software_roots": list(profile.software_roots)}
+               if profile.software_roots else {}),
         },
         "verification": {
             "status": profile.verification_status,
@@ -387,8 +475,14 @@ def write_user_profile(profile: ClusterProfile) -> Path:
                     "max_cpus": p.max_cpus,
                     "max_memory_gb": p.max_memory_gb,
                     "gpu_types": list(p.gpu_types),
-                    "preemptible": p.preemptible,
-                    "exclusive": p.exclusive,
+                    # OMITTED when None. Writing `preemptible: false` for a
+                    # partition nobody has checked would launder "unknown" into
+                    # a claim on the next read — the same round-trip defect the
+                    # empty `software_roots: []` key had.
+                    **({} if p.preemptible is None
+                       else {"preemptible": p.preemptible}),
+                    **({} if p.exclusive is None
+                       else {"exclusive": p.exclusive}),
                     "charge_factor": p.charge_factor,
                 }
                 for p in profile.partitions
@@ -411,16 +505,66 @@ def write_user_profile(profile: ClusterProfile) -> Path:
         "policy": {"refuse_network": profile.policy_refuse_network},
         "agent_hints": {"preamble": profile.agent_hints_preamble},
     }
+    text = yaml.safe_dump(data, sort_keys=False)
+
+    backup_path: Path | None = None
+    if profile_path.exists():
+        try:
+            existing = profile_path.read_text(encoding="utf-8")
+        except OSError:
+            existing = None            # unreadable: treat as different, refuse
+        if existing != text:
+            if not force:
+                raise Refused(
+                    RefusalCategory.CONFIG_INVALID,
+                    f"{profile_path} already exists and differs from the "
+                    f"profile that would be written.\n"
+                    f"  Overwriting it would discard whatever is in there now "
+                    f"— including any account, partition or scratch path you "
+                    f"set by hand, which botainer cannot recover.\n"
+                    f"  Look at it first:  cat {profile_path}\n"
+                    f"  Then, to replace it (the old file is copied to "
+                    f"{profile_path.name}.bak first):\n"
+                    f"      botainer hpc setup --force ...",
+                )
+            backup_path = _backup_beside(profile_path)
+
     fd = os.open(
         str(profile_path),
         os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
         mode=0o600,
     )
     try:
-        os.write(fd, yaml.safe_dump(data, sort_keys=False).encode("utf-8"))
+        os.write(fd, text.encode("utf-8"))
     finally:
         os.close(fd)
+    if backup_path is not None:
+        # The caller prints paths; hand it back rather than printing here, so
+        # this module stays free of UI.
+        setattr(write_user_profile, "last_backup", backup_path)
+    else:
+        setattr(write_user_profile, "last_backup", None)
     return profile_path
+
+
+def _backup_beside(path: Path) -> Path:
+    """Copy `path` to `<name>.bak`, or `.bak.1`, `.bak.2`... if taken.
+
+    Never overwrites an existing backup: the second `--force` in a row would
+    otherwise destroy the copy the first one made, which is the same data loss
+    one level removed.
+    """
+    candidate = path.with_name(path.name + ".bak")
+    n = 1
+    while candidate.exists():
+        candidate = path.with_name(f"{path.name}.bak.{n}")
+        n += 1
+    candidate.write_bytes(path.read_bytes())
+    try:
+        candidate.chmod(0o600)
+    except OSError:
+        pass
+    return candidate
 
 
 def autodetect() -> ClusterProfile | None:

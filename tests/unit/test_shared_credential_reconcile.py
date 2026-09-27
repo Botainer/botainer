@@ -1,6 +1,6 @@
 """A token refreshed inside the container must reach the shared store.
 
-Reported. Shared mode symlinks the per-project `.credentials.json`
+Shared mode symlinks the per-project `.credentials.json`
 into `/shared-auth/` so all projects use one file. Claude Code refreshes it with
 temp-file + `rename()`, and `rename()` REPLACES the symlink with a regular file
 — so the refreshed token stays local and the shared store goes stale. A NEW
@@ -9,7 +9,7 @@ project keeps working.
 
 The repair existed but only ran at session START, so it landed only when THAT
 project was started again. These tests drive the extracted reconcile directly
-and simulate the exact clobber observed on the user's cluster.
+and simulate replacement of the symlink with a regular credential file.
 """
 from __future__ import annotations
 

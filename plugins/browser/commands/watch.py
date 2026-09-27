@@ -74,11 +74,9 @@ def _security_warning(color: bool) -> str:
     container — an untrusted sandbox. The container owns its end, so NOTHING set
     server-side (clipboard rules, etc.) is a real boundary against a compromised
     agent/page; the browser you connect WITH is served code by the container and is
-    the real trust surface. Say so, loudly, in red on a TTY. (User directive
-: connect-your-client-to-a-container-served-server capabilities MUST
-    carry a very clear warning in a very clear place. The proper fix — a host-side
-    TRUSTED renderer/gateway that serves known-good assets and brokers only the
-    pixel/input stream — is a deferred TODO; until then this warning is the guard.)"""
+    the real trust surface. Show a prominent warning in red on a TTY. A trusted
+    host-side renderer serving known assets and mediating the pixel/input stream
+    remains deferred; the warning does not provide that isolation."""
     red = "\x1b[1;31m" if color else ""
     off = "\x1b[0m" if color else ""
     body = (

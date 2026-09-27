@@ -1,16 +1,5 @@
 """Exactly ONE agent plugin is activated per session — the selected one.
 
-User,, reading their own `botainer start` output: "wait what? In a
-mode when we're not doing multi agent codex cred leaks into claude???"
-
-Yes. Their Claude session showed:
-
-    /…/data/agent-codex/profiles/default  →  /home/agent/.codex        (rw)
-    /…/shared-auth/agent-codex            →  /shared-auth/agent-codex  (rw)
-    Env vars set (4): …, CLAUDE_CONFIG_DIR, CODEX_HOME, HOME
-    Entrypoint wraps: agent-claude-entrypoint → agent-codex-entrypoint
-    error: unknown option '--sandbox'
-
 `botainer auth use <mode>` switches EVERY installed family by design, so
 plugins_enabled became [agent-claude-shared, agent-codex-shared]. Composition
 honoured both, producing two failures from one cause:

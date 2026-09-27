@@ -253,17 +253,35 @@ class PortForward(BaseModel):
 
 
 class ResourceSpec(BaseModel):
-    """Per-session resource caps. Only fields that an adapter reads
-    live here — HPC scheduling parameters (time_minutes, gpus,
-    partition, account, gpu_type) belong on the SubmissionPlan in
-    plugins/hpc-launcher/, which reads them directly from
-    cfg.resources at submit time. Putting them on SessionSpec too
-    was duplication: the spec carried them but no adapter ever
-    consulted them. #175 — removed."""
+    """Per-session resource caps. Only fields that an adapter reads live
+    here — pure HPC scheduling parameters (time_minutes, partition, account,
+    gpu_type) belong on the SubmissionPlan in plugins/hpc-launcher/, which
+    reads them directly from cfg.resources at submit time. Carrying those on
+    SessionSpec too was duplication: the spec held them and no adapter ever
+    consulted them. #175 removed them, correctly.
+
+    `gpus` was removed in that same sweep and that part was WRONG (#177).
+    It is the one resource that means TWO things at once:
+
+        scheduler side   `#SBATCH --gres=gpu:N`   — Slurm ALLOCATES the device
+        container side   `--nv` / `--gpus N`      — the container can SEE it
+
+    Everything else in #175's list is purely scheduler-side, so "no adapter
+    reads it" was the right test for them and the wrong one for this. The
+    consequence of dropping it: `hpc submit --gpus 1` took the allocation and
+    launched a container with no device access, so the workload failed at
+    import time, far from the flag that caused it — and on a contended
+    partition it consumed a GPU nobody could use. The rule the docstring
+    states is kept; `gpus` now satisfies it, because the adapters below DO
+    read it."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
     cpu: int | None = None
     memory_mb: int | None = None
+    # 0 = no GPU requested. Matches ResourcesConfig.gpus, which is also an
+    # int defaulting to 0 rather than None — keep the two in step so a
+    # round-trip through compose cannot change the meaning of "unset".
+    gpus: int = 0
 
 
 class KernelCapsSpec(BaseModel):

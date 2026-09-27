@@ -1,6 +1,6 @@
 # First-party plugin: agent-claude-shared (Mode B — shared mount)
 #
-# Mode B of the anthropic auth family. Per AUTH-PRODUCT-PLAN.md §3:
+# Mode B of the anthropic auth family. Per internal design note DN-040 §3:
 # selective bind. Per-project state dir (~/.botainer/state/<uuid>/
 # data/agent-claude/profiles/<profile>/) is bound at /home/user/.claude
 # inside the container, holding the per-project history, sessions,
@@ -84,7 +84,7 @@ contributes:
     - /home/agent/.claude
     - /home/agent/.claude/
     # Selective-bind target for the shared credential dir (per
-    # AUTH-PRODUCT-PLAN.md §3 and the dir-bind + symlink architecture
+    # internal design note DN-040 §3 and the dir-bind + symlink architecture
     # in hooks/pre_session.py). The container sees a symlink at
     # /home/agent/.claude/.credentials.json pointing here.
     - /shared-auth/agent-claude

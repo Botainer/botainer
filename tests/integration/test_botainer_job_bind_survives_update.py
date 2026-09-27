@@ -1,11 +1,7 @@
 """Updating botainer must not break a session that is already running.
 
-User,, mid-session on Grace: "codex also seems to say that
-botainer-jobs isn't there, something about a failed mount. oh, maybe the bind
-died when the version updated..."
-
-Exactly right, and the mechanism is worth writing down because it will recur
-anywhere a single FILE is bind-mounted:
+A bind of a single plugin file can become stale when an update replaces
+the source inode:
 
     Bind(source=<plugins>/hpc-launcher/agent_helper/botainer-job,
          target=/usr/local/bin/botainer-job)
@@ -29,6 +25,7 @@ it — there is nothing here to detect any more.
 from __future__ import annotations
 
 import os
+import shutil
 import uuid
 from pathlib import Path
 
@@ -69,11 +66,18 @@ def _botjob_bind(spec):
 def composed(tmp_path, monkeypatch):
     monkeypatch.setenv("MY_BOTAINER", str(tmp_path / "bot"))
     monkeypatch.setenv("BOTAINER_STATE_ROOT", str(tmp_path / "bot"))
+    # The update test replaces a plugin file. Discovery must use a private
+    # copy so a test run cannot edit the checkout or an installed plugin tree.
+    from botainer.plugins import lifecycle
+
+    plugin_root = tmp_path / "fixture-plugins"
+    shutil.copytree(_REPO / "plugins", plugin_root)
+    monkeypatch.setattr(lifecycle, "_editable_source_plugins_root",
+                        lambda: plugin_root)
     proj = _project(tmp_path)
     spec = compose_session(proj, runtime_choice="docker", identity_accept=True)
     bind = _botjob_bind(spec)
-    if bind is None:
-        pytest.skip("hpc-launcher not installed in this environment")
+    assert bind is not None, "the bundled fixture must provide hpc-launcher"
     return spec, bind
 
 
@@ -99,12 +103,17 @@ def test_the_copy_exists_and_is_executable(composed) -> None:
     _spec, bind = composed
     source = Path(bind.source)
     assert source.is_file(), f"bind source does not exist: {source}"
-    assert os.access(source, os.X_OK), f"copied helper is not executable: {source}"
+    # st_mode, NOT os.access: measured in this container, os.access(X_OK)
+    # returns True for a 0o644 file, so this assertion could pass while the
+    # helper was NOT executable — vacuous. See botainer/core/exec_bit.py.
+    assert source.stat().st_mode & 0o111, (
+        f"copied helper is not marked executable: {source} "
+        f"(mode {oct(source.stat().st_mode & 0o777)})")
     assert source.stat().st_size > 0
 
 
 def test_replacing_the_plugin_file_does_NOT_touch_the_running_session(
-        composed) -> None:
+        composed, tmp_path) -> None:
     """The property the whole change exists for.
 
     Simulates the update: replace the plugin's copy the way git/rsync do —
@@ -115,33 +124,29 @@ def test_replacing_the_plugin_file_does_NOT_touch_the_running_session(
     from botainer.plugins.lifecycle import list_installed
 
     hpc = next((i for i in list_installed() if i.name == "hpc-launcher"), None)
-    if hpc is None:
-        pytest.skip("hpc-launcher not installed")
+    assert hpc is not None, "the bundled fixture must provide hpc-launcher"
     plugin_file = Path(hpc.plugin_dir) / "agent_helper" / "botainer-job"
-    original = plugin_file.read_bytes()
+    assert plugin_file.resolve().is_relative_to(tmp_path / "fixture-plugins"), (
+        "the simulated update must never write to the real plugin tree")
     original_inode = plugin_file.stat().st_ino
 
     _spec, bind = composed
     session_copy = Path(bind.source)
     before = session_copy.read_bytes()
 
-    try:
-        # Exactly what an update does: new file, new inode, renamed over the old.
-        tmp = plugin_file.with_suffix(".new")
-        tmp.write_bytes(b"#!/bin/sh\necho REPLACED\n")
-        tmp.replace(plugin_file)
-        assert plugin_file.stat().st_ino != original_inode, (
-            "the simulated update reused the inode; this test would prove "
-            "nothing")
+    # Exactly what an update does: new file, new inode, renamed over the old.
+    tmp = plugin_file.with_suffix(".new")
+    tmp.write_bytes(b"#!/bin/sh\necho REPLACED\n")
+    tmp.replace(plugin_file)
+    assert plugin_file.stat().st_ino != original_inode, (
+        "the simulated update reused the inode; this test would prove "
+        "nothing")
 
-        assert session_copy.is_file(), (
-            "the running session's helper vanished when the plugin file was "
-            "replaced — this is the reported bug")
-        assert session_copy.read_bytes() == before, (
-            "the running session's helper changed under it")
-    finally:
-        plugin_file.write_bytes(original)
-        plugin_file.chmod(0o755)
+    assert session_copy.is_file(), (
+        "the running session's helper vanished when the plugin file was "
+        "replaced — this is the reported bug")
+    assert session_copy.read_bytes() == before, (
+        "the running session's helper changed under it")
 
 
 def test_two_sessions_each_pin_their_own_copy(tmp_path, monkeypatch) -> None:

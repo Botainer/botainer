@@ -8,10 +8,42 @@ from typing import Any
 
 import click
 
+from botainer.cli import _common
 from botainer.cli._refusal_handler import handle_refusals
 from botainer.plugins import install as install_module
 from botainer.plugins import lifecycle as lifecycle_module
 from botainer.plugins import manifest as manifest_module
+from botainer.plugins import selection as selection_module
+
+
+def _project_root() -> Path:
+    """The project root, NOT `Path.cwd()`.
+
+    `enable`, `disable` and `list` each used the working directory directly, so
+    running any of them from a subdirectory silently addressed the wrong place.
+    Observed for `list`, which reads `./.botainer/config.yaml` to decide what is
+    enabled:
+
+        [project root]  ● agent-claude   ENABLED
+        [sub/deeper]    ○ agent-claude   installed, not enabled
+
+    Every enabled plugin read as not-enabled, one directory down. The same
+    `Path.cwd()` in `enable`/`disable` is the write-side of that bug.
+
+    `find_project_root` walks up for `.botainer/project-id` and carries the
+    nested-project guard the rest of the CLI relies on, so using it here is
+    also the only way these commands agree with `start` about which project
+    they are in.
+    """
+    root = _common.find_project_root()
+    if root is None:
+        _common.refuse(
+            "botainer plugin",
+            "not inside a botainer project",
+            "cd into a project with .botainer/project-id, "
+            "or create one with `botainer init --agent <name>`",
+        )
+    return root
 
 
 @click.group("plugin", invoke_without_command=True)
@@ -31,7 +63,19 @@ def add(source: str, yes: bool) -> None:
     try:
         info = install_module.install(source, consent=yes)
     except install_module.PluginInstallError as exc:
-        click.secho(f"refused: {exc.category}: {exc}", fg="red", err=True)
+        # `.value`, not the member. RefusalCategory is `(str, Enum)`, and on
+        # Python 3.11+ `str(member)` gives 'RefusalCategory.PLUGIN_TIER_NOT_ALLOWED'
+        # rather than the value — so this printed a Python identifier at users
+        # while every other refusal in the product printed kebab-case via
+        # _refusal_handler.py:64. Measured on 3.14: str() -> the member name,
+        # .value -> 'plugin-tier-not-allowed'.
+        #
+        # It matters more than a cosmetic slip because this is the FIRST message
+        # anyone hits trying to add a plugin — including the MCP-server route,
+        # where the refusal is already unexpected. Handing them a Python
+        # identifier on top is the plain-language rule failing at the worst
+        # moment. The class is now closed by a test rather than by this comment.
+        click.secho(f"refused: {exc.category.value}: {exc}", fg="red", err=True)
         sys.exit(5)
     click.echo(f"Installed plugin '{info.name}' v{info.version} (tree-sha: {info.tree_sha[:12]}).")
 
@@ -61,7 +105,17 @@ def enable(name: str) -> None:
             click.echo(f"  {n}")
         import sys
         sys.exit(4)
-    lifecycle_module.enable(Path.cwd(), name)
+    root = _project_root()
+
+    # REFUSE AT THE POINT OF ACTION, with the check `compose_session` uses.
+    # Enabling a second same-family agent plugin used to succeed here, pass
+    # `config check`, and be refused only by `start` — by which time the user
+    # has a config they believe is good. The prospective set is checked, so
+    # nothing is written when it would be invalid.
+    _prospective = list(lifecycle_module.enabled_names(root)) + [name]
+    selection_module.check_family_exclusion(_prospective)
+
+    lifecycle_module.enable(root, name)
     click.echo(f"Enabled '{name}' for this project.")
 
 
@@ -70,7 +124,56 @@ def enable(name: str) -> None:
 @handle_refusals
 def disable(name: str) -> None:
     """Disable a plugin for this project."""
-    lifecycle_module.disable(Path.cwd(), name)
+    root = _project_root()
+    enabled = list(lifecycle_module.enabled_names(root))
+
+    # THE TYPO GUARD `enable` GOT IN #235 AND THIS NEVER DID. `plugin disable
+    # agent-claudeee` printed "Disabled 'agent-claudeee' for this project."
+    # and exited 0 — a success message for a no-op, so a user fixing a problem
+    # by disabling something walks away believing they did.
+    #
+    # Note this checks ENABLED, not installed: disabling a plugin that is
+    # installed but not enabled here is equally a no-op, and equally worth
+    # saying out loud.
+    if name not in enabled:
+        import difflib
+        close = difflib.get_close_matches(name, enabled, n=1, cutoff=0.6)
+        suggestion = f" Did you mean '{close[0]}'?" if close else ""
+        click.secho(
+            f"refused: '{name}' is not enabled for this project, so there is "
+            f"nothing to disable.{suggestion}",
+            fg="red", err=True)
+        if enabled:
+            click.echo("Enabled here:")
+            for n in sorted(enabled):
+                click.echo(f"  {n}")
+        else:
+            click.echo("No plugins are enabled for this project.")
+        sys.exit(4)
+
+    # REMOVING THE LAST AGENT PLUGIN IS A QUESTION, NOT AN ERROR.
+    # A session with no agent plugin is a legitimate state — composition has a
+    # branch for it and a preflight gets past every plugin check — so this must
+    # NOT refuse. But it is almost never what someone means, and it used to be
+    # silent: `config check --strict` then reported "no issues found", and the
+    # first sign of trouble was a launch-time refusal that named a missing
+    # IMAGE for a plugin no longer enabled. Ask, at the moment it is true.
+    _agents = selection_module.agent_plugins_among(enabled)
+    if _agents == [name]:
+        click.secho(
+            f"'{name}' is the only agent plugin enabled for this project.",
+            fg="yellow", bold=True)
+        click.echo(
+            "  Disabling it leaves the project with no agent: `botainer start`\n"
+            "  will have nothing to launch, and the error you get then will be\n"
+            "  about the image, not about this.\n"
+            "  To switch modes instead, use `botainer auth use <mode>`, which\n"
+            "  swaps one agent plugin for another in a single step.")
+        if not click.confirm("  Disable it anyway?", default=False):
+            click.echo("Nothing changed.")
+            return
+
+    lifecycle_module.disable(root, name)
     click.echo(f"Disabled '{name}' for this project.")
 
 
@@ -91,11 +194,20 @@ def list_(show_available: bool) -> None:
     enabled_in_project: set[str] = set()
     try:
         import yaml as _yaml
-        cfg_path = Path.cwd() / ".botainer" / "config.yaml"
-        if cfg_path.exists():
-            _data = _yaml.safe_load(cfg_path.read_text()) or {}
-            enabled_in_project = set(_data.get("plugins_enabled") or [])
+        # find_project_root, NOT cwd: from `<project>/sub/deeper` this read a
+        # config.yaml that does not exist, so `enabled_in_project` stayed empty
+        # and EVERY enabled plugin printed as "installed, not enabled".
+        _root = _common.find_project_root()
+        if _root is not None:
+            cfg_path = _root / ".botainer" / "config.yaml"
+            if cfg_path.exists():
+                _data = _yaml.safe_load(cfg_path.read_text()) or {}
+                enabled_in_project = set(_data.get("plugins_enabled") or [])
     except Exception:
+        # Deliberately still soft: `plugin list` must work OUTSIDE a project,
+        # where there is no config to read and "nothing enabled here" is the
+        # true answer. The bug above was not this except — it was asking the
+        # wrong directory and then reporting the empty result as fact.
         pass
 
     # Legend up front so the markers are self-explanatory (UX: the old
@@ -152,8 +264,7 @@ def list_(show_available: bool) -> None:
     for name, version, tier, status, desc in rows:
         # A plugin that contributes nothing at compose is unaffected by
         # `plugins_enabled`, so "installed, not enabled" misreads as a switch
-        # left off (user report: they ran cluster jobs fine without
-        # hpc-launcher enabled and could not tell whether that was a mistake).
+        # left off. Such plugins do not need a compose-time enabling switch.
         label = ("ENABLED" if status == "enabled"
                  else "installed (no enabling needed)"
                       if status == "installed" and _inert.get(name)

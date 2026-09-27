@@ -48,7 +48,7 @@ pytestmark = pytest.mark.skipif(
 
 REPO = Path(__file__).resolve().parents[2]
 
-# Top-level directories that exist only in the maintainer's tree. In the
+# Top-level directories that exist only in the development tree. In the
 # exported repo they are simply absent, which is what makes a citation of one
 # a dead pointer rather than a private-but-followable one.
 PRIVATE_ROOTS = ("private", "handoff", "design", "strategy")

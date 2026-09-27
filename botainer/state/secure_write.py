@@ -50,12 +50,8 @@ def write_secure(path: Path, content: str, *, mode: int = 0o600,
     except OSError as exc:
         # A FULL DISK OR AN EXHAUSTED QUOTA IS NOT A STACK TRACE.
         #
-        # Observed on a real cluster: `botainer start` died with a
-        # bare Python traceback ending in
-        #     OSError: [Errno 122] Disk quota exceeded: '…/.meta.json.tmp.0m1xotbp'
-        # which tells a user nothing about what filled the quota or what is safe
-        # to remove. `botainer where` already reports per-project sizes and marks
-        # which directories are disposable — and nothing pointed at it.
+        # A raw quota exception does not identify reclaimable state. Point to
+        # `botainer where` so the user can inspect storage before deleting it.
         #
         # EDQUOT (122 on Linux) and ENOSPC are the same problem to a user and
         # want the same answer, so they get one message. Every state write funnels

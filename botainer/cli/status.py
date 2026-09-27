@@ -66,7 +66,15 @@ def status(show_all: bool, as_json: bool, show_global: bool) -> None:
             "across all projects on this host",
         )
 
-    uid, _ = identity.resolve_identity(project_root, identity_accept=True)
+    uid, _ = identity.resolve_identity(
+        project_root,
+        # A QUERY DOES NOT DECIDE THE CLONE QUESTION, and does not write
+        # meta.json. This used to pass identity_accept=True — the flag
+        # this command does not have — which silently answered it and
+        # disarmed the guard for `start` too. (#231)
+        identity_accept=False,
+        record=False,
+    )
     proj_paths = state_dir.ensure_project_dirs(paths, uid)
     _emit_rows(_build_rows(proj_paths, show_all=show_all, as_json=as_json),
                as_json=as_json, show_global=False)
@@ -104,6 +112,23 @@ def _broker_health(rec) -> bool | None:
     except OSError:
         return None          # can't tell — don't guess
     return True
+
+
+def _broker_err_name(session_dir) -> str | None:
+    """The broker stderr file(s) in this session dir, or None.
+
+    Per-plugin since 2026-09-04: `agent-<family>-broker-daemon.err`. Both
+    brokers previously wrote one `broker-daemon.err`, so a failure could not be
+    attributed without opening the session record. Globbing means this keeps
+    working when a session runs two brokers, and degrades to None rather than
+    naming a file that is not there.
+    """
+    try:
+        names = sorted(p.name for p in session_dir.glob("*-daemon.err")
+                       if p.stat().st_size > 0)
+    except OSError:
+        return None
+    return ", ".join(names) if names else None
 
 
 def _build_rows(proj_paths, *, show_all: bool, as_json: bool) -> list[dict[str, object]]:
@@ -154,6 +179,10 @@ def _build_rows(proj_paths, *, show_all: bool, as_json: bool) -> list[dict[str, 
                 "screen_session_id": rec.screen_session_id,
                 # None = no broker for this session; False = broker died.
                 "broker_alive": _broker_health(rec),
+                # The per-plugin stderr file(s) this session actually has, so
+                # the "why:" line can name one instead of guessing.
+                "broker_err": _broker_err_name(
+                    proj_paths.sessions_dir / rec.session_id),
             }
         )
     return rows
@@ -201,8 +230,12 @@ def _emit_rows(rows: list[dict[str, object]], *, as_json: bool, show_global: boo
                 fg="red",
                 bold=True,
             )
+            # Broker log filenames include the plugin name so errors can be
+            # attributed when multiple plugins use the same session directory.
+            # Diagnostics should point to a file that actually exists.
+            _which = str(row.get("broker_err") or "*-daemon.err")
             click.secho(
-                f"      why: see sessions/{sid_full}/broker-daemon.err  "
+                f"      why: see sessions/{sid_full}/{_which}  "
                 "(often an expired/rotated login)\n"
                 "      fix: `botainer auth login`, then restart the session.",
                 fg="red",

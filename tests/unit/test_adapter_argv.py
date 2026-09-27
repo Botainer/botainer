@@ -18,6 +18,7 @@ from botainer.core.spec import (
     NetworkMode,
     NetworkSpec,
     Provenance,
+    ResourceSpec,
     SessionSpec,
 )
 
@@ -403,7 +404,7 @@ def test_selinux_enforcing_probe_reads_sys_file(monkeypatch, tmp_path) -> None:
 def test_apptainer_sets_home_via_home_flag_not_env(tmp_path) -> None:
     """Apptainer REFUSES `--env HOME=` — it must be `--home src:dest`.
 
-    Reported from a real Grace run:
+    Apptainer reports:
         WARNING: Overriding HOME environment variable with APPTAINERENV_HOME
                  is not permitted
 
@@ -455,8 +456,8 @@ def test_apptainer_sets_home_via_home_flag_not_env(tmp_path) -> None:
 
 
 # --------------------------------------------------------------------------
-# PID-1 reaping. Added after the dev container wedged at 466
-# zombies (all ppid 1) and could no longer fork.
+# PID-1 must reap orphan processes to prevent zombie accumulation and
+# eventual exhaustion of the container process limit.
 # --------------------------------------------------------------------------
 
 @pytest.mark.parametrize("kwargs", [
@@ -502,3 +503,126 @@ def test_apptainer_never_disables_its_default_init_shim() -> None:
     assert "--no-init" not in argv, (
         "--no-init disables the shim that reaps orphans in apptainer's PID "
         "namespace; see the docker --init comment for what that costs")
+
+
+# ── GPU exposure (#177) ────────────────────────────────────────────────────
+#
+# Slurm ALLOCATING a device and the container being able to SEE it are two
+# separate things, and only the first was happening for a session. hpc/jobs.py
+# and hpc/pool.py already rendered `--nv` for dispatched jobs and warm-pool
+# tasks — the session path, one layer up, did not. So `hpc submit --gpus 1`
+# consumed a GPU off a contended partition and the workload failed at import
+# time, far from the flag that caused it.
+#
+# These tests are the connection between the two layers. They render argv
+# only, which is pure and needs no daemon; whether the device is actually
+# usable inside the container is a cluster observation and is NOT claimed here.
+
+def _gpu_spec(runtime: str, gpus: int) -> SessionSpec:
+    update: dict = {"resources": ResourceSpec(gpus=gpus)}
+    if runtime == "apptainer":
+        # The baseline spec asks for network.mode=none, which the apptainer
+        # adapter REFUSES outright (it shares the host netns and will not
+        # pretend otherwise — audit T4). Nothing to do with GPUs; without
+        # this the test fails on the refusal and never reaches the flag.
+        update["network"] = NetworkSpec(mode=NetworkMode.INTERNET)
+    return _spec(runtime).model_copy(update=update)
+
+
+def test_apptainer_renders_nv_when_gpus_requested() -> None:
+    """`--containall` is precisely why this is required, not optional: it
+    hides the host's NVIDIA driver libraries and device nodes, so a job
+    holding a `--gres=gpu:N` allocation sees nothing without `--nv`."""
+    argv = ApptainerAdapter().render_argv(_gpu_spec("apptainer", 1))
+    assert "--nv" in argv, (
+        "apptainer session with gpus>0 must render --nv, or the Slurm "
+        "allocation is paid for and unusable (#177)"
+    )
+
+
+def test_apptainer_omits_nv_when_no_gpu_requested() -> None:
+    """The default must not quietly widen what the container reaches."""
+    assert "--nv" not in ApptainerAdapter().render_argv(_gpu_spec("apptainer", 0))
+
+
+def test_docker_renders_gpus_when_requested() -> None:
+    argv = DockerAdapter().render_argv(_gpu_spec("docker", 2))
+    assert "--gpus" in argv
+    assert argv[argv.index("--gpus") + 1] == "2"
+
+
+def test_docker_omits_gpus_when_none_requested() -> None:
+    assert "--gpus" not in DockerAdapter().render_argv(_spec("docker"))
+    assert "--gpus" not in DockerAdapter().render_argv(_gpu_spec("docker", 0))
+
+
+def test_both_runtimes_expose_gpus_or_neither_does() -> None:
+    """HPC parity as a test rather than a promise.
+
+    The defect this pins is not "apptainer lacked a flag" — it is that ONE
+    runtime grew GPU support and the other did not, which is the shape that
+    produced the docker-only `bot1 image build` the project calls its
+    canonical bad example. Asserting the two together means a future change
+    cannot quietly regress to a single-runtime feature.
+    """
+    docker = DockerAdapter().render_argv(_gpu_spec("docker", 1))
+    apptainer = ApptainerAdapter().render_argv(_gpu_spec("apptainer", 1))
+    assert ("--gpus" in docker) and ("--nv" in apptainer), (
+        f"one runtime exposes the GPU and the other does not: "
+        f"docker={'--gpus' in docker} apptainer={'--nv' in apptainer}"
+    )
+
+
+# ── a GPU request that cannot be honoured must say so at COMPOSE ───────────
+#
+# Rendering the flag (above) fixes the case where a GPU exists. These cover the
+# two where the request cannot work, because #177 was not "the flag was
+# missing" so much as "the failure surfaced far from its cause".
+
+def test_a_gpu_request_is_refused_on_macos(monkeypatch) -> None:
+    """Docker Desktop has no NVIDIA passthrough and Metal is not exposed to
+    Linux containers, so `--gpus` cannot work on a Mac under any config.
+    Passing it through makes the user decode dockerd's error instead."""
+    from botainer.core.composition import _refuse_or_warn_on_gpu_request
+
+    monkeypatch.setattr("sys.platform", "darwin")
+    with pytest.raises(Refused) as exc:
+        _refuse_or_warn_on_gpu_request(1, "docker")
+    msg = str(exc.value)
+    assert "macOS" in msg, "must name the platform in words, not 'darwin'"
+    # A refusal that does not say what to do instead is half a refusal.
+    assert "hpc submit" in msg and "resources.gpus: 0" in msg
+
+
+def test_a_gpu_request_on_linux_warns_but_proceeds(monkeypatch, capsys) -> None:
+    """Whether the NVIDIA Container Toolkit is installed cannot be known at
+    compose time without calling the daemon. Refusing would break every
+    correctly-configured Linux GPU host; silence would reproduce #177."""
+    from botainer.core.composition import _refuse_or_warn_on_gpu_request
+
+    monkeypatch.setattr("sys.platform", "linux")
+    _refuse_or_warn_on_gpu_request(2, "docker")          # must NOT raise
+    err = capsys.readouterr().err
+    assert "NVIDIA Container Toolkit" in err
+    assert "--gpus" in err, "name the flag dockerd will name"
+
+
+def test_no_gpu_request_is_silent_on_every_platform(monkeypatch, capsys) -> None:
+    """Pinned so the fix above cannot become a warning on every session — the
+    scenery problem this project has been bitten by."""
+    from botainer.core.composition import _refuse_or_warn_on_gpu_request
+
+    for plat in ("darwin", "linux"):
+        monkeypatch.setattr("sys.platform", plat)
+        _refuse_or_warn_on_gpu_request(0, "docker")
+        assert capsys.readouterr().err == ""
+
+
+def test_apptainer_gpu_requests_are_never_refused(monkeypatch) -> None:
+    """The cluster case is the one expected to work, and `--nv` degrades to
+    'no device visible' rather than failing — so a platform guard there would
+    only ever be wrong."""
+    from botainer.core.composition import _refuse_or_warn_on_gpu_request
+
+    monkeypatch.setattr("sys.platform", "darwin")
+    _refuse_or_warn_on_gpu_request(4, "apptainer")       # must NOT raise

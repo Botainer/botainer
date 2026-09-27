@@ -87,6 +87,7 @@ slurm:
       max_memory_gb: 512
       gpu_types: [v100]
     killable:
+      preemptible: true
       # PREEMPTIBLE queue for smaller jobs. Can REQUEST up to 24h, but is
       # only GUARANTEED a runtime window before possible preemption: 6h for
       # <=91 nodes (bin 4), 2h for <=45 nodes (bin 5). Treat 24h as an

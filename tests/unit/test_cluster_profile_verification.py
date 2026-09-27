@@ -1,6 +1,6 @@
 """A cluster profile must say how much it has been verified — or say it hasn't.
 
-User requirement: "clearly mark what's tested and not tested". A
+Profile provenance must distinguish hardware verification from documentation. A
 profile transcribed from a vendor's docs and one actually run on the hardware
 look identical in a list, but the difference decides whether a failed submit
 means "my config is wrong" or "this profile was always a guess".
@@ -57,14 +57,9 @@ def test_every_bundled_profile_declares_its_provenance(name: str) -> None:
 def test_public_docs_profiles_do_not_claim_hardware_testing() -> None:
     """Transcribed-from-docs profiles must not imply anyone ran them.
 
-    Grace joined this list on. It had carried `tested-on-hardware`
-    because a session really did launch on it — but a launch exercises the
-    ADAPTER and never reads the partition table, and when the table was finally
-    compared against the vendor's docs, nine values were wrong (scavenge's max
-    time was 4x under, bigmem's memory ~4x under, four partitions missing, and
-    the scratch template named the PROJECT filesystem). "It ran" and "its
-    numbers are right" are different claims; the first must never be recorded
-    as the second.
+    Launching a session exercises the adapter, not the accuracy of the
+    partition table. Hardware-verification labels must describe the values
+    actually checked, including time limits, memory and storage paths.
     """
     for name in ("us-yale-bouchet.yaml", "us-yale-mccleary.yaml",
                  "us-yale-milgram.yaml", "us-yale-grace.yaml"):

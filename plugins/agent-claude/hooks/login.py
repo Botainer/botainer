@@ -11,10 +11,9 @@ helpers, same argv builders, same message format) — diverging only
 on which directory the credential lands in. See internal design note DN-036 for
 the planned extraction into a shared helper module.
 
-User direction (a standing user direction): the launcher MUST NEVER
-touch the host's credential store (macOS Keychain, ~/.claude/,
-~/.config/anthropic/). All four code paths (docker|apptainer
-× shared|isolated) must state this promise to the user explicitly.
+Login targets the selected Botainer credential directory, not the native
+host credential stores (macOS Keychain, ~/.claude/, ~/.config/anthropic/).
+The login messages must describe this boundary in both runtimes and modes.
 
 Supports two runtimes:
   - Docker (laptop default)

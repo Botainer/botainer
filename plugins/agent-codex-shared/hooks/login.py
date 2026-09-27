@@ -1,40 +1,14 @@
 #!/usr/bin/env python3
-"""agent-codex-shared login: run `codex login` INSIDE A CONTAINER.
+"""Run Codex account login inside the selected agent container.
 
-REWRITTEN. The previous version ran `subprocess.run(["codex",
-"login"])` ON THE HOST, inheriting the full host environment and HOME, and
-merely SET `CODEX_HOME` hoping the CLI would honour it. Its own comments
-admitted that was unverified, and it carried a detector that fired AFTER the
-fact:
+The host does not need the Codex binary. Login writes to a single output bind,
+<shared_dir>:/out, rather than relying on CODEX_HOME to prevent writes to the
+native host credential store. If the client ignores CODEX_HOME, the expected
+output is missing and login reports that failure.
 
-    "⚠ DETECTED: codex login modified ~/.codex despite CODEX_HOME=... The L1
-     'no host credential store' promise was violated for this login."
-
-So the plugin knew it could write the user's host credential store and reported
-it afterwards instead of preventing it. That is detect-don't-prevent, which
-CLAUDE.md's "structure over rules" section rejects — and it is a promise the
-sibling agent-claude-shared already keeps by construction.
-
-TWO PROBLEMS, ONE FIX. Running the login in the agent-codex container solves
-both at once:
-
-  1. THE HOST BINARY IS NOT NEEDED. The user hit this on a cluster login node:
-     `codex` is not installed there, so the old code fell through to an API-key
-     prompt. The container ships codex, so OAuth works anywhere a runtime does
-     — which is exactly why `claude /login` already works on the cluster.
-
-  2. L1 HOLDS BY CONSTRUCTION. Inside `--containall` / `--rm` there IS no host
-     `~/.codex` to fall back to. The question "does the CLI honour CODEX_HOME?"
-     stops mattering: if it ignores the variable it writes to a path that dies
-     with the container, and we detect the missing credential and say so. The
-     failure mode moves from "silently wrote to your host store" to "wrote
-     nothing, here is why" — fail-closed instead of fail-quiet.
-
-Bind surface is one directory: <shared_dir>:/out. `--no-home` is set on
-apptainer for the same reason agent-claude-shared sets it — some builds still
-bind $HOME under `--containall`, which would leak ~/.ssh, ~/.aws and ~/.config
-into the very login container that exists to avoid them.
-"""
+Apptainer also uses --no-home because some builds bind HOME under --containall.
+Docker uses a disposable container. These settings keep the native host home
+out of the login container's bind surface."""
 from __future__ import annotations
 
 import fcntl
@@ -152,6 +126,42 @@ def build_apptainer_argv(apptainer_bin: str, sif_path: Path,
     ]
 
 
+# ── env channel (SIBLING PARITY with agent-claude-shared) ─────────────────────
+# `APPTAINERENV_FOO=bar` in the LAUNCHING shell becomes `FOO=bar` inside the
+# container. That is the prefix's whole purpose and it survives `--cleanenv`,
+# which strips ordinary variables and honours these BY DESIGN. So a poisoned
+# login environment on a shared node reaches into the container unless the
+# launching process removes them first, and `APPTAINERENV_LD_PRELOAD` is the
+# sharp version of that.
+#
+# The two claude login hooks have done this since their L1 hardening; both codex
+# hooks built an `apptainer exec` argv and then ran `subprocess.run(cmd)` with
+# no `env=` at all, inheriting the shell wholesale. Same decision, one family
+# short — on the path that WRITES A CREDENTIAL.
+#
+# Nothing is re-added afterwards, unlike the claude side: this argv propagates
+# what it wants with explicit `--env` flags, so the scrub is pure removal.
+_APPTAINER_ENV_PREFIXES: tuple[str, ...] = (
+    "APPTAINERENV_",
+    "SINGULARITYENV_",
+)
+
+
+def build_apptainer_subenv(parent_env: dict[str, str]) -> dict[str, str]:
+    """The subprocess env for the login container: parent_env minus the
+    apptainer/singularity env-injection channel.
+
+    Applied to the docker branch too. `APPTAINERENV_*` means nothing to docker,
+    so removing it there is a no-op — and one env for both branches is a
+    property, where remembering which branch needs it is a rule.
+    """
+    return {
+        k: v for k, v in parent_env.items()
+        if not any(k.startswith(p) for p in _APPTAINER_ENV_PREFIXES)
+    }
+
+
+
 def _choose_oauth_flow() -> bool:
     """Return True for --device-auth. DEVICE CODE IS THE DEFAULT, always.
 
@@ -232,6 +242,21 @@ def _choose_method(oauth_available: bool) -> str:
     """
     forced = (os.environ.get("BOTAINER_CODEX_LOGIN_METHOD") or "").strip().lower()
     if forced in ("oauth", "api-key", "apikey", "key"):
+        if forced == "oauth" and not oauth_available:
+            # SAME REFUSAL THE INTERACTIVE PATH GIVES. This branch used to
+            # return "oauth" before anyone checked, so the caller went on to
+            # build an apptainer argv from a None binary and died with a
+            # TypeError. It did NOT fall back to running codex on the host —
+            # that path does not exist — but a security-shaped command dying
+            # in a traceback is the "condition with a specific remedy,
+            # surfaced as a crash" pattern this project keeps recording.
+            sys.stderr.write(
+                "refused: BOTAINER_CODEX_LOGIN_METHOD=oauth, but OAuth needs "
+                "the agent-codex container and no container runtime + image "
+                "is available.\n"
+                "  Build it with `botainer image build agent-codex`, or set\n"
+                "  BOTAINER_CODEX_LOGIN_METHOD=api-key.\n")
+            raise SystemExit(2)
         return "oauth" if forced == "oauth" else "api-key"
     if forced:
         sys.stderr.write(
@@ -368,7 +393,10 @@ def main() -> int:
             f"  Callback listens on 127.0.0.1:{port_lo}-{port_hi} of THIS host.\n"
             f"  If your browser is elsewhere: ssh -L {port_lo}:127.0.0.1:{port_lo} "
             f"<this-host>\n\n")
-    rc = subprocess.run(cmd, check=False).returncode
+    rc = subprocess.run(
+        cmd, check=False,
+        env=build_apptainer_subenv(dict(os.environ)),
+    ).returncode
     if rc != 0:
         sys.stderr.write(f"\ncodex login exited {rc}\n")
         return rc

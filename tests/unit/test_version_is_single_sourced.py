@@ -121,6 +121,50 @@ def test_no_other_version_literals_hide_in_the_package() -> None:
     )
 
 
+def test_shipped_prose_states_the_version_pyproject_declares() -> None:
+    """THE COPIES A READER SEES, which this file did not cover until 0.1.0a5.
+
+    Its own docstring says the first version was written by listing the places
+    drift was KNOWN to have happened rather than the places it COULD, and then
+    it looked only inside `botainer/`. Three shipped documents also state the
+    version in prose, to a reader, and nothing checked them:
+
+        README.md      the Status line, the first fact on the front page
+        SECURITY.md    "botainer is at vX", and the supported-versions table
+        CHANGELOG.md   the heading of the newest release section
+
+    None is derivable from package metadata — prose has to say a number — so
+    unlike `__version__` this cannot be made unrepresentable, and a check is the
+    honest fallback rather than a second-best. The failure it prevents is
+    specific and bad: SECURITY.md's table is what tells a reporter whether the
+    version they are running is supported, and a stale number there says "no"
+    about the only version that exists.
+    """
+    declared = _pyproject_version()
+    missing = []
+
+    readme = (REPO / "README.md").read_text(encoding="utf-8")
+    if f"`{declared}`" not in readme:
+        missing.append("README.md — the **Status:** line")
+
+    security = (REPO / "SECURITY.md").read_text(encoding="utf-8")
+    if f"v{declared}" not in security:
+        missing.append("SECURITY.md — the 'botainer is at vX' sentence")
+    if re.search(rf"^\|\s*{re.escape(declared)}\s*\|\s*yes\s*\|", security, re.M) is None:
+        missing.append("SECURITY.md — the supported-versions table row")
+
+    changelog = (REPO / "CHANGELOG.md").read_text(encoding="utf-8")
+    if re.search(rf"^## \[{re.escape(declared)}\]", changelog, re.M) is None:
+        missing.append(f"CHANGELOG.md — no `## [{declared}]` section")
+
+    assert not missing, (
+        f"pyproject declares {declared!r}, but the shipped prose has not caught "
+        f"up:\n  " + "\n  ".join(missing)
+        + "\n\nA version bump is not one edit. These are read by people, not by "
+        "code, so nothing else will notice."
+    )
+
+
 def test_the_version_is_a_valid_pep440_prerelease() -> None:
     """`0.1.0-alpha.1` is legal but PyPI rewrites it to `0.1.0a1`, so what you
     typed and what users see differ. Keep the normalised form in the file."""

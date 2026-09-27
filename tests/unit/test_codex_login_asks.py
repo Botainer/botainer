@@ -1,26 +1,11 @@
 """The Codex login must run in a CONTAINER, and must ASK which account to bill.
 
-Two defects reported by the user on, fixed together because they had
-one cause and one fix.
+Authentication type must be selected explicitly. A missing host CLI or
+a failed OAuth attempt must not silently switch to a differently billed
+API-key login. Running login in the agent container uses its bundled CLI
+and the mounts selected for login, rather than the host environment.
+These tests check that command construction and the account-choice prompt.
 
-1. "why are you asking for api key?" — the login decided from
-   `shutil.which("codex")` alone: binary present -> OAuth (subscription),
-   absent -> paste a key (API account, per token). The user was never asked. As
-   they put it, sharper than my own framing: "it didn't decide for me - first it
-   failed, then went to something else. It surprised me." A step FAILED and the
-   failure was silently converted into a DIFFERENT ACTION with a different cost.
-
-2. "Are you stealing credentials from the host again??" — it ran
-   `subprocess.run(["codex", "login"])` ON THE HOST with the full host
-   environment and HOME, merely SETTING CODEX_HOME and hoping the CLI honoured
-   it. The plugin's own comment admitted that was unverified, and it detected
-   the breach AFTER the fact ("the L1 'no host credential store' promise was
-   violated for this login"). Its sibling agent-claude-shared has always run
-   the OAuth flow in a container precisely so that cannot happen.
-
-Running the login in the agent-codex container fixes both: the container ships
-codex (so no host install, which is why it failed on the cluster at all), and
-inside --containall there is no host ~/.codex to reach.
 """
 from __future__ import annotations
 
@@ -190,19 +175,12 @@ def test_unavailable_oauth_is_explained_not_hidden(monkeypatch, capsys) -> None:
 
 
 # --------------------------------------------------------------------------
-# Which OAuth flow. The user was logging in on a cluster node when codex told
-# them to run `codex login --device-auth`, which they could not do — and the
-# browser flow could not work either, since no browser there can reach the
-# callback port.
+# Device-code login avoids requiring a browser on a remote node to reach
+# its local callback port. Browser login remains an explicit choice.
 # --------------------------------------------------------------------------
 
 def test_device_code_is_the_default(monkeypatch) -> None:
-    """One option works EVERYWHERE; the other works locally only. When a branch
-    is universally correct, detecting which branch you are in is cleverness
-    that can only be wrong.
-
-    An earlier version sniffed SSH_CONNECTION/DISPLAY to guess. The user
-    retired it: "you really think I'd default into running ssh command line?"
+    """Device-code is the default; browser login requires an explicit choice.
     """
     mod = _load()
     monkeypatch.delenv("BOTAINER_CODEX_OAUTH_FLOW", raising=False)
@@ -338,3 +316,33 @@ def test_isolated_api_key_is_stored_RAW_not_json(tmp_path, monkeypatch) -> None:
         f"the bare key and nothing else, got {written!r}")
     assert not written.lstrip().startswith("{"), "key was JSON-wrapped"
     assert oct(creds_file.stat().st_mode)[-3:] == "600"
+
+
+def test_forced_oauth_without_a_runtime_refuses_instead_of_crashing() -> None:
+    """`BOTAINER_CODEX_LOGIN_METHOD=oauth` with no container runtime.
+
+    The forced branch returned "oauth" before anything checked availability, so
+    the caller built an apptainer argv from a None binary and died with a
+    TypeError. It never ran codex on the host — that path does not exist — but
+    a security-shaped command dying in a traceback is the wrong failure, and it
+    hides the one-line remedy.
+
+    Both hooks, because sibling drift between the codex plugins is a defect
+    class this repo has already recorded once (#136).
+    """
+    import os
+
+    for n, path in enumerate((_ISOLATED_HOOK, _HOOK)):
+        spec = importlib.util.spec_from_file_location(f"_forced_oauth_{n}", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        rel = path.name + f" ({path.parent.parent.name})"
+        os.environ["BOTAINER_CODEX_LOGIN_METHOD"] = "oauth"
+        try:
+            with pytest.raises(SystemExit) as exc:
+                mod._choose_method(oauth_available=False)
+            assert exc.value.code == 2, rel
+            # ...and it still works when the runtime IS there.
+            assert mod._choose_method(oauth_available=True) == "oauth", rel
+        finally:
+            os.environ.pop("BOTAINER_CODEX_LOGIN_METHOD", None)

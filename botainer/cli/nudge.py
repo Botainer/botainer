@@ -189,7 +189,9 @@ def nudge(
     # Dead branch; removed.
     uid, _project_paths_state = resolve_identity(
         project_root,
-        identity_accept=True,
+        # A QUERY DOES NOT DECIDE THE CLONE QUESTION (#231); see identity.py.
+        identity_accept=False,
+        record=False,
     )
     proj_paths = state_dir.ensure_project_dirs(paths, uid)
 
@@ -350,7 +352,7 @@ def nudge(
     log_enabled = True
     try:
         from botainer.core import config as _config
-        cfg = _config.load_project_config(project_root)
+        cfg = _config.load_config(project_root)
         nudge_cfg = (cfg.plugins or {}).get("nudge", {})
         log_enabled = bool(nudge_cfg.get("log_sent_nudges", True))
     except Exception:
@@ -520,7 +522,7 @@ def _build_delivery_argv(
 ) -> list[str]:
     """Construct the full delivery argv for this runtime + this screen-stuff call.
 
-    FEATURE-PARTITION-LOCKED.md §A19: screen runs OUTSIDE the container.
+    internal design note DN-041 §A19: screen runs OUTSIDE the container.
     Delivery target is the HOST-side `screen -S <screen_session_id>` that
     `botainer start` created when nudge was enabled.
 
@@ -616,11 +618,12 @@ def _self_invocation_argv(
     #  - a detached `sh -c` doesn't see the user's shell aliases/wrappers, so a
     #    literal "botainer" resolved to nothing and `nudge --in` failed SILENTLY
     #;
-    #  - the user may run MULTIPLE botainer versions — `sys.executable` pins the
-    #    scheduled send to the SAME version that scheduled it (its own venv),
-    #    not whatever `botainer` is active when the timer fires.
-    # `python -m botainer.cli.main` is the same entrypoint the pool worker uses.
-    argv = [sys.executable, "-m", "botainer.cli.main",
+    #  - the user may run MULTIPLE botainer versions: use this interpreter's
+    #    installed Botainer, not whichever command is on PATH when the timer
+    #    fires. A parent-only sys.path override is not an installation.
+    # Isolated startup excludes the project cwd and PYTHONPATH from imports;
+    # -B also prevents bytecode writes after -I ignores Python env settings.
+    argv = [sys.executable, "-I", "-B", "-m", "botainer.cli.main",
             "nudge", "--session", sid, "--quiet"]
     if no_enter:
         argv.append("--no-enter")

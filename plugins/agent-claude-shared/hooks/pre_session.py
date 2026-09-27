@@ -3,7 +3,7 @@
 
 Mode B (shared) selective-bind contributor.
 
-Per AUTH-PRODUCT-PLAN.md §3:
+Per internal design note DN-040 §3:
 - bind per-project state-claude dir at /home/agent/.claude (rw)
 - ALSO bind shared-auth dir at /shared-auth/agent-claude (rw)
 - Per-project state dir contains a SYMLINK at .credentials.json that
@@ -30,7 +30,7 @@ import os
 import sys
 from pathlib import Path
 
-# AUTH-PRODUCT-PLAN.md §4 (agent_home_allowlist): the shared-auth dir
+# internal design note DN-040 §4 (agent_home_allowlist): the shared-auth dir
 # should hold ONLY the credential file. Anything else is either a
 # `claude /login` residue (login.py runs in a tempdir now, so this
 # should be rare) or future state from `claude` that we haven't
@@ -69,7 +69,7 @@ _SHARED_ALLOWED_SUFFIXES = (".refresh.lock",)
 # Per-project allowlist: anything `claude` writes inside the container
 # at /home/agent/.claude/ is fine. Listed for completeness; we only
 # warn on things outside this set. Generated from a survey of a recent
-# Claude Code install (per AUTH-PRODUCT-PLAN.md §3 table).
+# Claude Code install (per internal design note DN-040 §3 table).
 _PER_PROJECT_ALLOWLIST = {
     ".credentials.json",   # the symlink we manage
     ".credentials.json.pre-shared",  # back-up from mode-A → mode-B migration
@@ -154,15 +154,11 @@ def reconcile_shared_credential(per_project_dir: Path, shared_dir: Path) -> str:
     stale one. Running only at START meant the repair happened the next time you
     started THAT SAME project — so a NEW project inherited the stale token and
     reported "login expired" while the old one kept working. Two projects,
-    identical config, opposite behaviour. That was the reported bug.
+    identical config, opposite behavior.
 
-    Observed on the reporting user's cluster, which is what settled it:
-
-        lrwxrwxrwx  .claude.json      -> /shared-auth/agent-claude/.claude.json
-        -rw-------  .credentials.json                                 280 bytes
-
-    `.claude.json` (written in place) kept its symlink; `.credentials.json`
-    (atomic-renamed) did not.
+    In-place writes preserve a symlink; atomic replacement leaves a regular
+    file. Reconciliation must handle both shapes without relying on how a
+    previous client version wrote the credential.
 
     Returns "backfilled" | "relinked" | "ok". Raises _ReconcileError on the two
     conditions that used to be bare `return 4` / `return 5`, so each caller can
@@ -382,7 +378,7 @@ def main() -> int:
     shared_dir = state_root / "shared-auth" / "agent-claude"
     shared_file = shared_dir / ".credentials.json"
 
-    # AUTH-PRODUCT-PLAN.md §4: warn on unknown files in either dir.
+    # internal design note DN-040 §4: warn on unknown files in either dir.
     # Cheap; runs once per session start. Caught now → not a silent
     # cross-project leak next release.
     _warn_unknown_in_dir(shared_dir, _SHARED_ALLOWLIST, "shared-auth dir",

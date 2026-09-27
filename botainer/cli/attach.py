@@ -48,7 +48,15 @@ def attach(session_id: str | None) -> None:
         )
 
     paths = state_dir.ensure_user_state_dir(create_if_missing=False)
-    uid, _ = identity.resolve_identity(project_root, identity_accept=True)
+    uid, _ = identity.resolve_identity(
+        project_root,
+        # A QUERY DOES NOT DECIDE THE CLONE QUESTION, and does not write
+        # meta.json. This used to pass identity_accept=True — the flag
+        # this command does not have — which silently answered it and
+        # disarmed the guard for `start` too. (#231)
+        identity_accept=False,
+        record=False,
+    )
     proj_paths = state_dir.ensure_project_dirs(paths, uid)
 
     records = session_record.list_sessions(proj_paths.sessions_dir)

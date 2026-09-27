@@ -91,3 +91,42 @@ def test_profiles_lists_from_manifest(mailbox) -> None:
     r = _run(["profiles"], in_dir, out_dir)
     assert r.returncode == 0
     assert "gpu" in r.stdout and "1 A100" in r.stdout
+
+
+def test_pool_status_shows_a_dead_workers_REASON_to_the_agent(mailbox) -> None:
+    """The agent is the one that submitted the work, so it is the one waiting.
+
+    The host now publishes each warm worker's state, heartbeat age and — for a
+    worker that is not running — the (path-stripped) reason it gave. This CLI
+    printed `state=` alone, so the agent saw `never-started` with no cause and no
+    way to find one: it cannot read the host-private pool tree, and AGENT_HINTS
+    points it at this command. Measured as a gap by a refuting review.
+    """
+    in_dir, out_dir = mailbox
+    (out_dir / "pool.json").write_text(json.dumps({
+        "version": "botainer-pool-status-v1",
+        "workers": [{"worker_id": "w0000001", "profile": "gpu",
+                     "slurm_job_id": "551", "state": "never-started",
+                     "heartbeat_age_s": None,
+                     "reason": "child-job image not found for 'agent-claude'"}],
+    }))
+    r = _run(["pool", "status"], in_dir, out_dir)
+    assert r.returncode == 0, r.stderr
+    assert "never-started" in r.stdout, r.stdout
+    assert "child-job image not found" in r.stdout, (
+        f"the agent is told its pool is broken and not why:\n{r.stdout}")
+
+
+def test_pool_status_shows_the_heartbeat_age_when_there_is_one(mailbox) -> None:
+    """`busy` alone does not say whether anything is still alive. The age is how
+    the agent can tell a working worker from a record of one."""
+    in_dir, out_dir = mailbox
+    (out_dir / "pool.json").write_text(json.dumps({
+        "version": "botainer-pool-status-v1",
+        "workers": [{"worker_id": "w0000002", "profile": "gpu",
+                     "slurm_job_id": "552", "state": "busy",
+                     "heartbeat_age_s": 4.2, "reason": ""}],
+    }))
+    r = _run(["pool", "status"], in_dir, out_dir)
+    assert r.returncode == 0, r.stderr
+    assert "last-beat=4.2s" in r.stdout, r.stdout

@@ -160,8 +160,11 @@ def _is_system_root(realpath: str) -> bool:
     if realpath == "/":
         return True
     for s in _SYSTEM_SUBTREES:
-        if realpath == s or realpath.startswith(s + "/"):
-            return True
+        # Resolve both sides. On macOS /etc and /var resolve under /private;
+        # resolving only a candidate silently removed these denylist entries.
+        for denied in (s, _realpath(s)):
+            if realpath == denied or realpath.startswith(denied.rstrip("/") + "/"):
+                return True
     return False
 
 
@@ -232,8 +235,9 @@ def is_unsafe_module_tree_source(path: str) -> tuple[bool, str]:
     if _is_sensitive_home(real):
         return True, f"{path!r} is a sensitive per-user dir (never a module tree)"
     for d in _MODULE_TREE_SOURCE_DENYLIST:
-        if real == d or real.startswith(d.rstrip("/") + "/"):
-            return True, f"{path!r} resolves under the refused subtree {d!r}"
+        for denied in (d, _realpath(d)):
+            if real == denied or real.startswith(denied.rstrip("/") + "/"):
+                return True, f"{path!r} resolves under the refused subtree {d!r}"
     if _depth(literal) < _DEFAULT_MIN_DEPTH and _is_system_root(literal):
         return True, (
             f"{path!r} is a shallow system mount point; an identity bind there "
@@ -411,3 +415,153 @@ def derive_software_root_binds(
         baseline_env, loaded_env, policy_prefixes,
         min_depth=min_depth, max_roots=max_roots,
     ).binds
+
+
+# ── #171 / #156: software roots WITHOUT a module load ────────────────────────
+#
+# Everything above derives roots by diffing the environment across a
+# `module load`. That is the authoritative method when a module system exists
+# — Lmod knows exactly which directories its software lives in, so nothing is
+# guessed. It has two prerequisites:
+#
+#   1. it requires the host to have run `module load` first, and
+#   2. NOTHING IS BOUND unless a site administrator has listed prefixes in the
+#      root-owned site policy. A user without administrator support cannot
+#      use that workflow to declare software roots.
+#
+# So: allow roots to be DECLARED. Same guards, no env diff, and the declaration
+# normally comes from the CLUSTER PROFILE the user already selected — a curated
+# artefact carrying a verification status (#97) — so the common case is zero
+# typing and zero admin.
+#
+# WHAT IS DELIBERATELY UNCHANGED: the guards. A declared root goes through the
+# same realpath, the same denylist, the same shallow-system-path refusal and the
+# same max_roots ceiling as a derived one. Forking those would be the
+# weaker-of-the-pair defect this project keeps recording, and the declaration
+# being "trusted" is not a reason to skip them — a profile can carry a typo, and
+# `/usr/lib` bound read-only over the container's own libraries breaks the
+# session either way.
+
+@dataclass(frozen=True)
+class DeclaredRoot:
+    """One software root, and WHERE THE USER SHOULD BE TOLD IT CAME FROM.
+
+    A path needs its configuration origin so a user who wants to change a
+    bind knows whether to edit project config, pick another cluster profile,
+    or talk to the site administrator.
+    """
+    path: str
+    origin: str          # "cluster profile" | "your config" | "site policy"
+
+
+def declared_software_root_binds(
+    roots: list[DeclaredRoot],
+    *,
+    site_ceiling: list[str],
+    min_depth: int = _DEFAULT_MIN_DEPTH,
+    max_roots: int = _DEFAULT_MAX_ROOTS,
+) -> tuple[list[dict[str, str]], list[tuple[str, str]], dict[str, str]]:
+    """Read-only identity binds for roots that were DECLARED, not derived.
+
+    Returns (binds, dropped, origins):
+      binds   — [{"source","target","mode":"ro"}], target == source
+      dropped — [(realpath, reason)] for anything refused, so the caller can
+                SAY SO rather than silently binding less than was asked for
+      origins — realpath -> origin label, for the user-facing listing
+
+    READ-ONLY IS NOT A PARAMETER. There is no argument that makes these
+    writable, so no caller can get it wrong and no config key can be added
+    later without editing this function deliberately. Cluster software is the
+    site's, not the session's.
+
+    `site_ceiling` IS REQUIRED, and required for a reason. It is the root-owned
+    `mounts.cluster_software_roots` list, and when it is non-empty a declared
+    root must sit inside it. A caller that forgot to pass it would silently let
+    a user-editable cluster profile bind outside what an administrator allowed
+    — so omitting it is a TypeError rather than a default that quietly means
+    "no restriction". Pass `[]` to say, deliberately, that this site set none.
+
+    Never raises for a bad root — a typo in a profile drops that root with a
+    reason and leaves the rest working. It DOES raise on exceeding max_roots,
+    matching the derived path: silently truncating yields a binary the agent
+    cannot find and no error to explain it.
+
+    `min_depth` IS DOING REAL WORK AND ALSO COSTS SOMETHING, so it is written
+    down rather than left as a number. At 2 it refuses `/home` — which on a
+    shared cluster would bind every user's home directory read-only into the
+    container, and `_is_sensitive_home` would not stop it (that only covers the
+    CURRENT user's own credential dirs; see #168). It equally refuses a bare
+    `/apps`, which is a real software root on real clusters. The depth is
+    measured on the LITERAL path, so `/apps` is refused even where it is a
+    symlink to a deep `/vast/.../apps`.
+
+    That trade is not obviously right and is NOT settled: loosening it needs a
+    reason to believe `/home` stays refused, and lowering the floor is not that
+    reason. Left strict, and the refusal says which rule bit, so a user who
+    meets it can name their real path instead of guessing.
+    """
+    kept: dict[str, str] = {}          # realpath -> origin
+    dropped: list[tuple[str, str]] = []
+    for r in roots:
+        raw = (r.path or "").strip()
+        if not raw:
+            continue
+        if not raw.startswith("/"):
+            dropped.append((raw, f"not an absolute path (from {r.origin})"))
+            continue
+        rp = _realpath(raw)
+        unsafe, why = is_unsafe_module_tree_source(raw)
+        if unsafe:
+            dropped.append((rp, f"{why} (from {r.origin})"))
+            continue
+        if _depth(os.path.normpath(raw)) < min_depth:
+            dropped.append((rp, f"shallower than min_depth={min_depth} "
+                                f"(from {r.origin})"))
+            continue
+        # CONTAIN THE REALPATH, NOT THE SPELLING. This used to accept a root
+        # whose LITERAL path sat inside the ceiling — but the bind SOURCE is
+        # the realpath (see `kept.setdefault(rp, ...)` below), so a symlink
+        # inside the ceiling pointing anywhere bound its TARGET, outside, and
+        # did not even appear in `dropped`. For example, a symlink inside
+        # <ceiling>/apps can target <outside-ceiling>/software; checking only
+        # the declared spelling would bind that target on either runtime.
+        #
+        # The literal branch existed for a real case that must keep working:
+        # a ceiling REACHED THROUGH a symlink, which is what pytest's tmp_path
+        # looks like on macOS (/var/... -> /private/var/...). Resolving the
+        # CEILING instead of trusting the declared spelling keeps that and
+        # closes the escape. This is the mechanism `_unacceptable_reason`
+        # already uses on the derived path (prefixes AND real_prefixes) — the
+        # two spellings of one containment rule had diverged, with nothing
+        # comparing them.
+        _ceiling_real = [_realpath(p) for p in site_ceiling]
+        if site_ceiling and not (_within_prefix(rp, site_ceiling)
+                                 or _within_prefix(rp, _ceiling_real)):
+            # An administrator who set a ceiling has restricted this, and a
+            # cluster profile — which ships with botainer or is user-editable —
+            # must not reopen it. Precedence is one-way, the same rule the
+            # ceiling itself follows.
+            dropped.append((rp, f"outside the site policy ceiling "
+                                f"mounts.cluster_software_roots (from "
+                                f"{r.origin})"))
+            continue
+        if not os.path.isdir(rp):
+            # A declared root that does not exist is the single most likely
+            # real-world case: a profile written for a sibling cluster, or a
+            # path that moved. SAY SO — binding nothing and staying quiet is
+            # how "I enabled it and nothing happened" becomes an evening.
+            dropped.append((rp, f"does not exist on this host (from {r.origin})"))
+            continue
+        kept.setdefault(rp, r.origin)
+
+    ordered = sorted(kept)
+    if len(ordered) > max_roots:
+        raise SoftwareRootBindError(
+            f"software roots: {len(ordered)} declared roots exceed "
+            f"max_roots={max_roots}: {ordered}. Refusing rather than silently "
+            f"truncating — a dropped root yields a binary the agent cannot "
+            f"find, with no error to explain it. Narrow the list in your "
+            f"cluster profile or config."
+        )
+    binds = [{"source": p, "target": p, "mode": "ro"} for p in ordered]
+    return binds, sorted(dropped), {p: kept[p] for p in ordered}

@@ -69,7 +69,7 @@ def test_a_live_shared_session_elsewhere_is_found(tmp_path, live):
     _session(tmp_path, "aaaa", plugins=["agent-claude-shared", "git"], alive=True,
              root="/work/other-project", host="login1", runtime="apptainer")
 
-    holders = ce.live_shared_holders(_FakePaths(tmp_path), exclude_uuid="bbbb")
+    holders = ce.live_shared_holders(_FakePaths(tmp_path), agent_family="claude", exclude_uuid="bbbb")
 
     assert len(holders) == 1, holders
     assert holders[0]["project_root"] == "/work/other-project"
@@ -81,7 +81,7 @@ def test_a_live_shared_session_elsewhere_is_found(tmp_path, live):
 def test_this_project_is_not_reported_against_itself(tmp_path, live):
     _session(tmp_path, "aaaa", plugins=["agent-claude-shared"], alive=True)
 
-    holders = ce.live_shared_holders(_FakePaths(tmp_path), exclude_uuid="aaaa")
+    holders = ce.live_shared_holders(_FakePaths(tmp_path), agent_family="claude", exclude_uuid="aaaa")
 
     assert holders == [], "restarting your own project must not warn"
 
@@ -92,21 +92,21 @@ def test_an_isolated_session_elsewhere_does_not_warn(tmp_path, live):
     ignored."""
     _session(tmp_path, "aaaa", plugins=["agent-claude", "git"], alive=True)
 
-    assert ce.live_shared_holders(_FakePaths(tmp_path), exclude_uuid="z") == []
+    assert ce.live_shared_holders(_FakePaths(tmp_path), agent_family="claude", exclude_uuid="z") == []
 
 
 def test_a_broker_session_elsewhere_does_not_warn(tmp_path, live):
     """Broker never holds the refresh token, so it cannot revoke anyone."""
     _session(tmp_path, "aaaa", plugins=["agent-claude-broker"], alive=True)
 
-    assert ce.live_shared_holders(_FakePaths(tmp_path), exclude_uuid="z") == []
+    assert ce.live_shared_holders(_FakePaths(tmp_path), agent_family="claude", exclude_uuid="z") == []
 
 
 def test_an_ENDED_session_does_not_warn(tmp_path, live):
     _session(tmp_path, "aaaa", plugins=["agent-claude-shared"], alive=True,
              ended="2026-08-17T11:00:00Z")
 
-    assert ce.live_shared_holders(_FakePaths(tmp_path), exclude_uuid="z") == [], (
+    assert ce.live_shared_holders(_FakePaths(tmp_path), agent_family="claude", exclude_uuid="z") == [], (
         "a finished session still holds a record; warning about it would fire "
         "on every launch, which trains the user to ignore the warning")
 
@@ -116,7 +116,7 @@ def test_a_DEAD_session_does_not_warn(tmp_path, monkeypatch):
     monkeypatch.setattr(liveness, "is_session_alive", lambda rec: False)
     _session(tmp_path, "aaaa", plugins=["agent-claude-shared"], alive=False)
 
-    assert ce.live_shared_holders(_FakePaths(tmp_path), exclude_uuid="z") == []
+    assert ce.live_shared_holders(_FakePaths(tmp_path), agent_family="claude", exclude_uuid="z") == []
 
 
 def test_unreadable_bookkeeping_never_blocks_a_launch(tmp_path, live):
@@ -126,25 +126,32 @@ def test_unreadable_bookkeeping_never_blocks_a_launch(tmp_path, live):
     d.mkdir(parents=True)
     (d / "spec.json").write_text("{ not json")
 
-    assert ce.live_shared_holders(_FakePaths(tmp_path), exclude_uuid="z") == []
+    assert ce.live_shared_holders(_FakePaths(tmp_path), agent_family="claude", exclude_uuid="z") == []
 
 
 def test_the_start_banner_leads_with_the_constraint():
     """The banner is on EVERY launch and used to sell the mode on the one
     thing it cannot do: 'One login, used by every shared-mode project'.
 
-    Asserted on the emitted string, not on source text.
+    THIS TEST USED TO LIE ABOUT ITSELF. Its docstring said "Asserted on the
+    emitted string, not on source text", and the body did
+    `inspect.getsource(start.callback)` and grepped it — a docstring in
+    `start()` would have satisfied it. The assertion-shapes gate could not see
+    that, because the grep went through an intermediate variable whose name was
+    not on its list (#199, fixed the same day).
+
+    The banner is now a pure function returning its lines, so this calls it.
     """
-    import inspect
+    from botainer.cli.start import shared_mode_banner
 
-    from botainer.cli import start as start_cli
-
-    src = inspect.getsource(start_cli.start.callback)
-    banner = src[src.index("Auth mode: SHARED"):src.index("Auth mode: SHARED") + 400]
-    assert "ONE SESSION AT A TIME" in banner, (
-        "the start banner does not state the defining constraint of the mode")
-    assert "used by every shared-mode " "project on this machine" not in banner, (
-        "the banner still leads with the sharing claim that mis-sold the mode")
+    lines = shared_mode_banner()
+    assert lines, "the banner is empty"
+    assert "ONE SESSION AT A TIME" in lines[0], (
+        "the banner does not LEAD with the defining constraint of the mode; "
+        f"its first line is {lines[0][:80]!r}")
+    assert not any("used by every shared-mode project on this machine" in ln
+                   for ln in lines), (
+        "the banner still carries the sharing claim that mis-sold the mode")
 
 
 # ── the part that was UNTESTED, which is how a crash shipped two days ago ──
@@ -178,7 +185,7 @@ def test_the_prompt_actually_runs_and_names_the_other_project(
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
     monkeypatch.setattr("click.confirm", lambda *a, **k: True)
 
-    c.confirm_no_other_shared_session(_fake_project(tmp_path))
+    c.confirm_no_other_shared_session(_fake_project(tmp_path), agent_family="claude")
 
     err = capsys.readouterr().err
     assert "/work/other" in err, f"did not name the other project: {err!r}"
@@ -194,7 +201,7 @@ def test_answering_no_stops_the_launch(tmp_path, monkeypatch):
     monkeypatch.setattr("click.confirm", lambda *a, **k: False)
 
     with pytest.raises(SystemExit) as ei:
-        c.confirm_no_other_shared_session(_fake_project(tmp_path))
+        c.confirm_no_other_shared_session(_fake_project(tmp_path), agent_family="claude")
     assert "keeps the credential" in str(ei.value)
 
 
@@ -204,7 +211,7 @@ def test_answering_yes_proceeds(tmp_path, monkeypatch):
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
     monkeypatch.setattr("click.confirm", lambda *a, **k: True)
 
-    c.confirm_no_other_shared_session(_fake_project(tmp_path))   # no raise
+    c.confirm_no_other_shared_session(_fake_project(tmp_path), agent_family="claude")   # no raise
 
 
 def test_non_interactive_warns_but_never_hangs(tmp_path, monkeypatch, capsys):
@@ -218,7 +225,7 @@ def test_non_interactive_warns_but_never_hangs(tmp_path, monkeypatch, capsys):
         raise AssertionError("prompted with no tty — this would hang a job")
     monkeypatch.setattr("click.confirm", _boom)
 
-    c.confirm_no_other_shared_session(_fake_project(tmp_path))
+    c.confirm_no_other_shared_session(_fake_project(tmp_path), agent_family="claude")
     assert "continuing" in capsys.readouterr().err
 
 
@@ -226,31 +233,89 @@ def test_no_holders_says_nothing_at_all(tmp_path, monkeypatch, capsys):
     from botainer.cli import _common as c
     _real_holder(monkeypatch, [])
 
-    c.confirm_no_other_shared_session(_fake_project(tmp_path))
+    c.confirm_no_other_shared_session(_fake_project(tmp_path), agent_family="claude")
 
     assert capsys.readouterr().err == "", "warned when nothing was running"
 
 
-def test_both_start_and_hpc_submit_call_the_same_helper():
-    """Sibling drift, as a test. The check was added to start.py and NOT to
-    `hpc submit` — the guard on the laptop path, nothing on the cluster path,
-    which is the product. Asserted with AST so a comment cannot satisfy it."""
-    import ast
-    import inspect
+def test_hpc_submit_ACTUALLY_WARNS_not_merely_calls_the_helper(
+        tmp_path, monkeypatch):
+    """PRESENCE IS NOT EFFECT, and the old version of this test proved it.
 
-    from botainer.cli import hpc as hpc_cli
-    from botainer.cli import start as start_cli
+    It walked the AST of `cli/hpc.py` looking for a call to
+    `confirm_no_other_shared_session` and asserted one existed. One did. It was
+    also DEAD: the surrounding block resolved the project's plugin list through
+    `config.load_project_config`, a name that does not exist on that module
+    (`load_config` does), so the `AttributeError` was raised before the argument
+    was even evaluated and swallowed by a blanket `except Exception`. `_fam`
+    was therefore ALWAYS None and the guard NEVER RAN on the cluster path — the
+    exact sibling drift this file was written to prevent, re-introduced by the
+    commit that fixed it, and invisible to a test that asked only whether the
+    call was written down.
 
-    for mod, label in ((start_cli, "botainer start"), (hpc_cli, "hpc submit")):
-        calls = [
-            n for n in ast.walk(ast.parse(inspect.getsource(mod)))
-            if isinstance(n, ast.Call)
-            and isinstance(n.func, ast.Attribute)
-            and n.func.attr == "confirm_no_other_shared_session"
-        ]
-        assert calls, (
-            f"{label} does not call confirm_no_other_shared_session — a "
-            f"shared-auth session can start there with no check")
+    So this one drives `botainer hpc submit` and asserts the SENTENCE the user
+    would see. A rename back to a nonexistent attribute fails it.
+    """
+    from click.testing import CliRunner
+
+    from botainer.core import identity
+    from botainer.state import dir as state_dir
+
+    monkeypatch.setenv("MY_BOTAINER", str(tmp_path / "root"))
+    monkeypatch.delenv("BOTAINER_STATE_ROOT", raising=False)
+    paths = state_dir.ensure_user_state_dir(create_if_missing=True)
+
+    # A .sif must EXIST or compose refuses before the guard is reached — which
+    # is itself a queue item: three surfaces that launch nothing are blocked by
+    # a check that exists for launching. Contents are irrelevant; the resolver
+    # tests is_file() and nothing more.
+    sif = paths.apptainer_sif_path("agent-claude")
+    sif.parent.mkdir(parents=True, exist_ok=True)
+    sif.write_bytes(b"NOT-A-REAL-SIF" * 100)
+
+    # Shared mode's pre_session refuses without a credential, so the fixture
+    # has to be a REAL install, not the minimum that reaches the code path.
+    shared = paths.root / "shared-auth" / "agent-claude"
+    shared.mkdir(parents=True, exist_ok=True)
+    cred = shared / ".credentials.json"
+    cred.write_text('{"claudeAiOauth":{"accessToken":"sk-ant-oat' + "M" * 70
+                    + '","refreshToken":"sk-ant-ort' + "M" * 70
+                    + '","expiresAt":9999999999999}}')
+    cred.chmod(0o600)
+
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    from botainer.core import config as cfgm
+    cfgm.write_initial_config(proj, agent="claude", force=True)
+    identity.init_project(proj, agent="claude", force=True, non_interactive=True)
+    import yaml
+    cfg_path = proj / ".botainer" / "config.yaml"
+    data = yaml.safe_load(cfg_path.read_text())
+    data["plugins_enabled"] = ["agent-claude-shared"]
+    cfg_path.write_text(yaml.safe_dump(data, sort_keys=False))
+
+    # Another project holding the shared claude credential RIGHT NOW.
+    # APPTAINER, not docker, and that is not incidental: `live_shared_holders`
+    # deliberately skips a docker record when `docker` is not on PATH, because a
+    # login node has none and one stale record would otherwise warn forever.
+    # That cry-wolf guard is correct; a docker fixture here would be testing the
+    # wrong thing. Apptainer+Slurm is cluster-wide, so it is trusted across
+    # hosts — which is exactly the case `hpc submit` cares about.
+    _session(paths.state_dir, "b" * 8, plugins=["agent-claude-shared"],
+             alive=True, runtime="apptainer", host="some-other-login-node")
+    monkeypatch.setattr(
+        "botainer.state.liveness.is_session_alive", lambda rec: True)
+
+    monkeypatch.chdir(proj)
+    res = CliRunner().invoke(
+        __import__("botainer.cli.main", fromlist=["cli"]).cli,
+        ["hpc", "submit", "--dry-run", "--time", "60",
+         "--partition", "day", "--account", "acct"])
+
+    assert "already using the shared" in res.output, (
+        "`hpc submit` did not warn about a second concurrent shared-auth "
+        "session. The guard is present in the source and dead at runtime — "
+        f"which is what an AST test cannot see.\n{res.output}")
 
 
 def test_a_docker_record_from_another_machine_is_ignored(tmp_path, monkeypatch):
@@ -262,5 +327,30 @@ def test_a_docker_record_from_another_machine_is_ignored(tmp_path, monkeypatch):
     _session(tmp_path, "aaaa", plugins=["agent-claude-shared"], alive=True,
              host="somebody-elses-laptop")
 
-    assert ce.live_shared_holders(_FakePaths(tmp_path), exclude_uuid="z") == [], (
+    assert ce.live_shared_holders(_FakePaths(tmp_path), agent_family="claude", exclude_uuid="z") == [], (
         "a docker session recorded on a DIFFERENT machine was treated as live")
+
+
+def test_a_live_claude_session_does_not_block_starting_codex(tmp_path):
+    """A Claude shared session must not produce a Codex credential collision.
+
+    The stores are per agent family: shared-auth/agent-claude and
+    shared-auth/agent-codex use separate provider credentials. Matching every
+    agent-*-shared plugin would report an unrelated session as a conflicting holder.
+    The liveness scan must filter by the requested family."""
+    from botainer.state import credential_events as ce
+
+    _session(tmp_path, "aaaa", plugins=["agent-claude-shared"], alive=True,
+             root="/work/claude-project", host="login1", runtime="apptainer")
+
+    assert ce.live_shared_holders(
+        _FakePaths(tmp_path), agent_family="codex", exclude_uuid="zzzz") == [], (
+        "a live agent-claude-shared session was reported as a conflict for a "
+        "CODEX launch — different provider, different credential, different "
+        "account. Nothing codex does can log that session out."
+    )
+    # ...and the same records still conflict for the agent they belong to.
+    assert ce.live_shared_holders(
+        _FakePaths(tmp_path), agent_family="claude", exclude_uuid="zzzz"), (
+        "scoping the scan to one agent broke the case it exists for"
+    )

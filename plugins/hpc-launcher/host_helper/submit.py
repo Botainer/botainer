@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """hpc-launcher submit — write a sbatch script and submit it.
 
-Easy / clear / transparent / clean (per user direction):
+Interface:
 - ONE command. No subcommand chain.
 - `--dry-run` shows the exact sbatch script (transparent).
 - Auto-detects cluster defaults via ~/.botainer/cluster.yaml. Unknown cluster
@@ -28,6 +28,7 @@ import re as _re
 import shlex
 import subprocess
 import sys
+from typing import NamedTuple
 import time
 from pathlib import Path
 
@@ -172,6 +173,32 @@ def _parse_gres_to_gpus(s: str) -> tuple[int, str | None]:
     )
 
 
+def emit_partition_warnings(plan, *, stream) -> None:
+    """Write what this partition COSTS to `stream`. Never raises.
+
+    A separate named function rather than an inline block so the emission can
+    be driven directly in a test — the first version was buried inside
+    `_do_submit`, where the only reachable test path was `--dry-run`, and
+    `--dry-run` is precisely the mode that skips the consent prompt this is
+    supposed to precede. A test that can only run the mode where the bug is
+    absent is not a test of the bug.
+
+    `plan.partition` is the EFFECTIVE partition (config.yaml > flag > cluster
+    default); that is why this lives in the helper and not in `botainer hpc
+    submit`, which knows only the flag.
+    """
+    try:
+        from botainer.hpc.partition_warnings import (  # type: ignore[import-not-found]
+            partition_warnings,
+        )
+        from botainer.state import cluster_profile as _cp  # type: ignore[import-not-found]
+
+        for line in partition_warnings(plan.partition, _cp.active_profile()):
+            stream.write(f"hpc-launcher: {line}\n")
+    except Exception:                                            # noqa: BLE001
+        pass                            # a warning must never block a launch
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     p = argparse.ArgumentParser(prog="botainer hpc submit")
     p.add_argument("--mode", choices=("submit", "attach", "here"), default=None,
@@ -208,6 +235,30 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                    help="Slurm-style `gpu:N` or `gpu:<type>:N` (alias for "
                         "--gpus + --gpu-type)")
     p.add_argument("--image", default=None, help="Override apptainer .sif path")
+    # HPC PARITY (queue 118): the three one-shot overrides `botainer start` has.
+    # `_sbatch_token` is the same validator the other free-text flags use, so a
+    # flag-shaped or control-char value is refused here rather than reaching an
+    # #SBATCH line or an apptainer argv. --agent is additionally re-checked by
+    # SubmissionPlan.__post_init__ (`_reject_traversal_agent`), because it is
+    # interpolated into credential paths.
+    p.add_argument("--agent", type=_sbatch_token("--agent"), default=None,
+                   help="Run this submission with a different agent")
+    # The history sentence is written out here rather than imported: this
+    # launcher runs on login nodes where `botainer` may not be importable, which
+    # is the whole reason it is a standalone script. A test pins that this help
+    # keeps saying it, so it cannot drift back to credentials-only while the
+    # four botainer-side commands say more.
+    p.add_argument("--auth-mode", type=_sbatch_token("--auth-mode"), default=None,
+                   help="One-shot auth-mode override for this submission. "
+                        "Selects the agent's whole config directory (credential "
+                        "AND history/settings); nothing is carried into it and "
+                        "config.yaml is not modified.")
+    p.add_argument("--auth-profile", type=_sbatch_token("--auth-profile"),
+                   default=None,
+                   help="One-shot auth-profile override for this submission. "
+                        "Selects the agent's whole config directory (credential "
+                        "AND history/settings); nothing is carried into it and "
+                        "config.yaml is not modified.")
     return p.parse_args(argv)
 
 
@@ -240,6 +291,52 @@ def _refuse_unenforceable_network(plan: SubmissionPlan) -> int:
         )
         return 4
     return 0
+
+
+def _refuse_broker_on_hpc(plan: SubmissionPlan) -> int:
+    """Refuse broker auth on the sbatch path BEFORE the broker starts.
+
+    Compose already refuses it — but at the wrong moment. The claude broker's
+    `pre_session` hook contributes a `unix-socket` bind when the runtime is
+    apptainer (`start_broker.py:416,450`), and `_refuse_cross_node_binds` rejects
+    exactly that with `unsupported-runtime-feature`. MEASURED with the real
+    function on a synthetic spec: a `unix-socket` bind is refused, the same bind
+    stored `rw` is NOT — a socket recorded with the wrong mode walks straight
+    past this check, which is why the guard below keys on the plugin name rather
+    than on a bind the hook has not contributed yet. Codex's broker is loopback
+    TCP and is caught by the same check's port rule.
+
+    THE PROBLEM IS THE ORDER. That refusal is at `composition.py:2983`, AFTER
+    `run_pre_session_hooks` at `:2974`. So following the old path cost a user:
+    config rewritten → broker daemon started → host-side OAuth refresh, which can
+    ROTATE the refresh token and log every other holder out → refusal, no
+    session. The product's own dry-run text says that rotation is not undone by
+    the teardown. `_refuse_proxy_on_hpc` has guarded the proxy mode here since
+    the Codex review; broker had no equivalent, which the refuting review of the
+    row-70 consent text found while checking where that paragraph renders.
+
+    So this runs beside the proxy guard, before any hook: a mode that cannot work
+    here must not first touch the credential it would break.
+    """
+    brokers = [p for p in plan.plugins_enabled
+               if p.startswith("agent-") and p.endswith("-broker")]
+    if not brokers:
+        return 0
+    sys.stderr.write(
+        f"hpc-launcher: refusing — broker auth ({', '.join(brokers)}) cannot run "
+        f"on the HPC sbatch path at v0.1. The broker talks to the agent over a "
+        f"node-local channel (a unix socket, or loopback TCP for codex) and the "
+        f"compute node is not the login node, so the cross-node bind check "
+        f"refuses the session.\n"
+        f"  REFUSED HERE, ON PURPOSE, BEFORE THE BROKER STARTS: letting compose "
+        f"refuse it means the broker has already run a host-side OAuth refresh, "
+        f"which can ROTATE your refresh token and log your other projects out — "
+        f"for a session that then does not launch.\n"
+        f"  Broker mode DOES work on a compute node: `salloc ...` then "
+        f"`botainer start --runtime apptainer` inside the allocation.\n"
+        f"  Or for the sbatch path: `botainer auth use shared` (or `isolated`).\n"
+    )
+    return 2
 
 
 def _refuse_proxy_on_hpc(plan: SubmissionPlan) -> int:
@@ -322,7 +419,15 @@ def _print_login_node_confirmation(plan: SubmissionPlan) -> None:
 def main() -> int:
     args = parse_args(sys.argv[1:])
     project_root = Path(os.environ.get("BOTAINER_PROJECT_ROOT", os.getcwd()))
-    plan = make_plan(project_root)
+    # The three go to make_plan, NOT into the `overrides` dict below: --agent
+    # has to be known before `_resolve_apptainer_image` picks the .sif, or the
+    # job would run one agent's entrypoint out of another agent's image.
+    plan = make_plan(
+        project_root,
+        agent_override=args.agent,
+        auth_mode_override=args.auth_mode,
+        auth_profile_override=args.auth_profile,
+    )
     # Apply one-shot CLI overrides on top of config + cluster defaults.
     overrides: dict[str, object] = {}
     if args.mode:
@@ -357,6 +462,11 @@ def main() -> int:
     # Re-audit #13 (LOW): refuse BEFORE running the module-load hook below — that
     # hook spawns a subprocess + mkdirs a state dir, all wasted if we then refuse.
     if not args.dry_run:
+        # The guards below judge `plan.plugins_enabled`, which `make_plan` got by
+        # ASKING `composition.apply_plugin_overrides` — the same function compose
+        # calls. There is no launcher-side derivation left to disagree with it,
+        # and no re-asking here: a plan is frozen at make_plan and the answer
+        # cannot have changed since, because nothing between has run.
         net_rc = _refuse_unenforceable_network(plan)
         if net_rc != 0:
             return net_rc
@@ -365,6 +475,12 @@ def main() -> int:
         proxy_rc = _refuse_proxy_on_hpc(plan)
         if proxy_rc != 0:
             return proxy_rc
+        # Beside the proxy guard and for the same reason, except that the cost of
+        # being late here is a ROTATED REFRESH TOKEN: compose refuses broker on
+        # this path only after the broker hook has started and refreshed.
+        broker_rc = _refuse_broker_on_hpc(plan)
+        if broker_rc != 0:
+            return broker_rc
 
     # Recon T-D: pre-submit credential-presence gate. On submit/here (a real
     # launch), if the active agent has no credential on the host in either
@@ -425,7 +541,11 @@ def main() -> int:
     from botainer.inspect import capability_summary  # type: ignore[import-not-found]
     try:
         spec, agent_argv = composition.compose_agent_exec_for_hpc(
-            project_root, image_override=(plan.apptainer_image or None),
+            project_root,
+            image_override=(plan.apptainer_image or None),
+            agent_override=plan.agent_override,
+            auth_mode_override=plan.auth_mode_override,
+            auth_profile_override=plan.auth_profile_override,
         )
     except Refused as exc:
         sys.stderr.write(f"refused: {exc}\n")
@@ -438,6 +558,26 @@ def main() -> int:
         "session_dir": session_dir,
     })
 
+    # #109: what this partition COSTS, said BEFORE the consent prompt.
+    #
+    # `preemptible` and `exclusive` have been on PartitionSpec since ~40 real
+    # sites were transcribed, and until now only the job-profile GENERATOR read
+    # them — so the two facts that make a partition choice expensive or
+    # destructive were never surfaced where they apply.
+    #
+    # POSITION IS THE WHOLE POINT, and the first version of this got it wrong:
+    # emitted inside `_do_submit`, the line landed AFTER `_consent` had already
+    # asked "Launch this session? [y/N]" and been answered. A cost disclosed
+    # after the decision is not a disclosure. It sits here, before the mode
+    # dispatch, so every path that places work on a partition — submit, here,
+    # and attach — shows it, on dry-run as well as for real.
+    #
+    # Emitted HERE rather than in `botainer hpc submit` because `plan.partition`
+    # is the EFFECTIVE value: the CLI knows only the --partition flag, so a
+    # partition set in .botainer/config.yaml would have been warned about
+    # wrongly or not at all.
+    emit_partition_warnings(plan, stream=sys.stderr)
+
     def _consent(interactive: bool) -> bool:
         """Login-node consent surface (the compute node has no TTY). Show the
         SLURM scheduler resources, then the REAL capability disclosure from the
@@ -447,37 +587,109 @@ def main() -> int:
         _print_login_node_confirmation(plan)
         return capability_summary.print_and_maybe_confirm(
             spec, quiet=False, as_json=False,
-            auto_yes=(args.yes or not interactive),
+            # THE FACT ONLY THIS CALLER HAS. The credential paragraph's
+            # host-side advice differs here: broker mode is refused on the
+            # sbatch path (the unix-socket bind cannot cross nodes) AFTER the
+            # broker has already started and possibly rotated the token, so the
+            # summary must not send a cluster user to `auth use broker`. It used
+            # to infer this from `spec.runtime`, which is also apptainer for
+            # `start --runtime apptainer` inside an salloc — where broker works.
+            on_sbatch_path=True,
+            # The two facts, kept apart. `--yes` is consent; having no
+            # terminal is not. Merging them let a show-only here/attach
+            # satisfy the first-launch gate on the user's behalf.
+            pre_authorised=args.yes, interactive=interactive,
         )
 
+    # Composition invokes pre_session hooks so their bind and environment
+    # contributions appear in the generated sbatch script. Those hooks can
+    # write state and start host processes, even for a dry run. Until a separate
+    # preview-safe hook path exists, every exit without a launch must tear down
+    # what it started and disclose these effects. Compose already does this on
+    # its cross-node refusal path; the cleanup below covers the other exits.
+    _torn_down: list[bool] = []
+
+    def _teardown() -> None:
+        # RUN ONCE. Idempotence is what lets the dispatch result be judged at a
+        # SINGLE site below instead of at every early return: calling it twice
+        # would run this project's post_session hooks twice, and a hook that
+        # stops a daemon is not required to survive being told twice.
+        if _torn_down:
+            return
+        _torn_down.append(True)
+        try:
+            composition.run_post_session_hooks(spec)
+        except Exception as exc:      # teardown is best-effort, like compose's
+            sys.stderr.write(
+                f"hpc-launcher: post_session cleanup after a non-launching "
+                f"compose reported: {exc}\n")
+
+    outcome: Outcome
     if plan.submission_mode == "submit":
         # HPC-IMPL #7: per-project concurrency cap. Refuse early if
         # `plugins.hpc-launcher.max_concurrent_jobs` is set and this
         # project already has that many jobs queued or running.
         cap_check_rc = _refuse_if_concurrency_cap_exceeded(plan, args.dry_run)
         if cap_check_rc != 0:
+            _teardown()
             return cap_check_rc
         if not args.dry_run:
             if not _consent(interactive=True):
                 sys.stderr.write("hpc-launcher: aborted (no confirmation).\n")
+                _teardown()
                 return 3
             # Pre-bind mkdir: apptainer refuses to launch on a missing bind
             # source (compose already created the state subtree/session dir;
             # this creates the HOST-ONLY SLURM --output dir + the S1 tripwire).
             plan.prepare_host_paths()
-        return _do_submit(plan, spec, dry_run=args.dry_run)
-    if plan.submission_mode == "attach":
+        outcome = _do_submit(plan, spec, dry_run=args.dry_run)
+    elif plan.submission_mode == "attach":
         if not args.dry_run:
             _consent(interactive=False)
             plan.prepare_host_paths()
-        return _do_attach(plan, args.jobid, dry_run=args.dry_run)
-    if plan.submission_mode == "here":
+        outcome = _do_attach(plan, args.jobid, dry_run=args.dry_run)
+    elif plan.submission_mode == "here":
         if not args.dry_run:
             _consent(interactive=False)
             plan.prepare_host_paths()
-        return _do_here(plan, dry_run=args.dry_run)
-    sys.stderr.write(f"unknown submission_mode: {plan.submission_mode}\n")
-    return 1
+        outcome = _do_here(plan, dry_run=args.dry_run)
+    else:
+        sys.stderr.write(f"unknown submission_mode: {plan.submission_mode}\n")
+        _teardown()
+        return 1
+    # THE ONE PLACE THAT DECIDES. Before this, `_teardown()` was a closure in
+    # this function and the three dispatch functions could not reach it, so
+    # every non-launching return inside them — no partition, `sbatch` missing,
+    # AND SBATCH REJECTING THE JOB, which is the common real-cluster case —
+    # left whatever a pre_session hook had started running. Six exits, none of
+    # them able to call the cleanup that existed a few lines above them.
+    #
+    # The fix is not six more calls. `Outcome` makes "did anything start?" a
+    # field every return must fill in, so a new early return cannot skip the
+    # question, and the answer is judged here, once.
+    if not outcome.launched:
+        _teardown()
+    rc = outcome.rc
+
+    if args.dry_run:
+        # SAY WHAT THE DRY RUN LEFT BEHIND. It composed for real, so it wrote
+        # host state; a user who reads "dry run" and finds a new session
+        # directory has been told something false by omission.
+        _teardown()
+        sys.stderr.write(
+            f"\nhpc-launcher: --dry-run COMPOSED THIS SESSION FOR REAL (that is "
+            f"what makes the script above accurate), so it ran this project's "
+            f"pre_session hooks and wrote host state:\n"
+            f"  session dir: {plan.session_dir}\n"
+            f"  Nothing was submitted, and anything a hook STARTED has been "
+            f"torn down.\n"
+            f"  BUT A PREVIEW IS NOT CREDENTIAL-INERT. In shared auth mode, if "
+            f"this project's credential file is newer than the shared one, the "
+            f"reconcile copies it OVER your shared login (the hook says so, "
+            f"loudly, when it happens). In broker mode, starting the broker can "
+            f"refresh and ROTATE your refresh token, which logs other holders "
+            f"out. Neither is undone by the teardown above.\n")
+    return rc
 
 
 def _refuse_if_concurrency_cap_exceeded(
@@ -559,7 +771,31 @@ def _refuse_if_concurrency_cap_exceeded(
     return 0
 
 
-def _do_submit(plan: SubmissionPlan, spec, *, dry_run: bool) -> int:
+class Outcome(NamedTuple):
+    """What a dispatch function DID, not merely what it returned.
+
+    `rc` alone cannot answer "did anything start?" — 0 means both "submitted"
+    and "printed a dry run", and a non-zero rc means both "sbatch rejected it"
+    and "the session ran and exited non-zero". `main()` has to tell those apart
+    to know whether to tear down what a pre_session hook started, so the answer
+    is a FIELD every return must fill in rather than something inferred from a
+    number. A new early return cannot silently skip the question.
+
+    `launched=True` means something OUTLIVES this command and owns what the
+    hooks set up — which is exactly one case: a job accepted by `sbatch`. It
+    runs later on a compute node, so a host helper a pre_session hook started
+    may be needed for its lifetime and must not be torn down here.
+
+    Everything else is False, including the two SYNCHRONOUS paths: when `srun`
+    or `apptainer exec` returns, the session is over and post_session is due —
+    the same moment `botainer start` runs it. And every `--dry-run`, which
+    prints and starts nothing.
+    """
+    rc: int
+    launched: bool
+
+
+def _do_submit(plan: SubmissionPlan, spec, *, dry_run: bool) -> Outcome:
     if not plan.partition:
         sys.stderr.write(
             "hpc-launcher: refusing to submit without a partition.\n"
@@ -567,7 +803,7 @@ def _do_submit(plan: SubmissionPlan, spec, *, dry_run: bool) -> int:
             "--partition <X>, or run `botainer hpc setup` (bundled profiles set "
             "one).\n"
         )
-        return 4
+        return Outcome(4, launched=False)
     # Account is OPTIONAL — do NOT force it. Many clusters give each user a
     # DEFAULT Slurm account, so requiring one was pure friction. to_sbatch_argv
     # omits --account when unset, letting Slurm apply the user's default; if the
@@ -585,10 +821,10 @@ def _do_submit(plan: SubmissionPlan, spec, *, dry_run: bool) -> int:
             "#       execs the agent entrypoint directly (composed on this login\n"
             "#       node) — no botainer runs inside the container.\n"
         )
-        return 0
+        return Outcome(0, launched=False)
     if not have_slurm():
         sys.stderr.write("hpc-launcher: `sbatch` not on PATH; not on a Slurm cluster.\n")
-        return 5
+        return Outcome(5, launched=False)
     sessions_dir = plan.state_root / "state" / plan.project_uuid / "sessions"
     sessions_dir.mkdir(parents=True, exist_ok=True)
     submit_dir = sessions_dir / "_submit-scripts"
@@ -624,7 +860,10 @@ def _do_submit(plan: SubmissionPlan, spec, *, dry_run: bool) -> int:
     if completed.stderr:
         sys.stderr.write(completed.stderr)
     if completed.returncode != 0:
-        return completed.returncode
+        # SBATCH REJECTED THE JOB — the common real-cluster exit, and the
+        # one that leaked for longest: nothing was queued, so whatever a
+        # hook started has no job to serve.
+        return Outcome(completed.returncode, launched=False)
     match = _SBATCH_JOBID_RE.search(completed.stdout or "")
     if match:
         jobid = match.group(1)
@@ -670,19 +909,55 @@ def _do_submit(plan: SubmissionPlan, spec, *, dry_run: bool) -> int:
             "\n# hpc-launcher: could not parse jobid from sbatch stdout. "
             "See the message above; check with `squeue -u $USER`.\n"
         )
-    return 0
+    # Submitted. The job runs LATER on a compute node, so a host helper a
+    # hook started may be needed for its lifetime: do NOT tear down.
+    return Outcome(0, launched=True)
 
 
-def _do_attach(plan: SubmissionPlan, jobid: str | None, *, dry_run: bool) -> int:
+
+def _attached_job_still_running(jobid: str) -> bool:
+    """Is this Slurm job still alive? Used ONLY to tell a departed viewer from
+    a finished session in `_do_attach`.
+
+    FAILS TOWARD TEARDOWN, deliberately. No squeue, a timeout, a non-zero exit
+    or an unparseable answer all return False, which preserves exactly today's
+    behaviour. Of the two ways to be wrong, silently skipping the shared
+    credential reconcile is the worse one — it produces a cross-project "login
+    expired" days later with nothing pointing at the cause, and it has already
+    been shipped and fixed once. Running the reconcile a little early is
+    visible and recoverable.
+    """
+    if not have_slurm():
+        return False
+    try:
+        result = subprocess.run(
+            ["squeue", "-j", str(jobid), "--noheader", "--format=%T"],
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        sys.stderr.write(
+            "hpc-launcher: warning: could not determine whether job "
+            f"{jobid} is still running; treating the session as ended.\n")
+        return False
+    if result.returncode != 0:
+        return False
+    # squeue prints nothing for a job that has left the queue. Any live state
+    # (RUNNING, COMPLETING, ...) means the session is still there.
+    return bool(result.stdout.strip())
+
+
+def _do_attach(plan: SubmissionPlan, jobid: str | None, *, dry_run: bool) -> Outcome:
     jobid = jobid or plan.existing_jobid
     if not jobid:
         sys.stderr.write("hpc-launcher --mode=attach requires --jobid or SLURM_JOB_ID env.\n")
-        return 4
+        return Outcome(4, launched=False)
     # Consent (posture + resources) already shown by main()'s _consent().
     if plan.nudge_enabled:
         # #56 + cluster-nudge fix: the batch agent runs inside a
-        # `screen -dmS botainer-<jobid>` on the compute node (see _common.py's
-        # run_section) — the SAME screen `botainer nudge` delivers into. REATTACH
+        # screen session named `botainer-<jobid>` on the compute node (see
+        # _common.py's run_section, which creates it nonforking with `-D -m`
+        # so the batch process IS the session) — the SAME screen `botainer
+        # nudge` delivers into. REATTACH
         # to it so what you see IS the running agent (and what you nudge). Pure
         # argv, no shell. If the screen is gone (job ended), screen -r exits
         # cleanly. Only when nudge/screen was NOT enabled do we fall back to a
@@ -698,24 +973,58 @@ def _do_attach(plan: SubmissionPlan, jobid: str | None, *, dry_run: bool) -> int
     if dry_run:
         sys.stdout.write("# hpc-launcher --dry-run (attach):\n")
         sys.stdout.write("  " + " ".join(shlex.quote(a) for a in argv) + "\n")
-        return 0
+        return Outcome(0, launched=False)
     if not have_slurm():
         sys.stderr.write("hpc-launcher: `srun` not on PATH; not on a Slurm cluster.\n")
-        return 5
-    return subprocess.run(argv, check=False).returncode
+        return Outcome(5, launched=False)
+    # IS THE SESSION OVER, OR DID THE VIEWER JUST GO AWAY? Those are different
+    # questions and this used to conflate them.
+    #
+    # The old comment here said "`srun` is synchronous, so by the time it
+    # returns the agent has exited". TRUE on the else-branch above, where srun
+    # runs the agent itself. FALSE on the nudge branch — the only branch anyone
+    # attaches on — where srun is running `screen -r`, which returns the moment
+    # you are DETACHED. And nobody detaches on purpose: a sleeping laptop, a
+    # dropped VPN, a closed lid or an SSH timeout all do it, which is precisely
+    # what screen exists to survive. So on that branch a return is the ORDINARY
+    # case and says nothing about the agent.
+    #
+    # `launched=False` reaches the single teardown site in main(), which runs
+    # this project's post_session hooks — including the shared-credential
+    # reconcile — against a session that is still running. Viewer detachment
+    # must therefore be distinguished from workload completion.
+    #
+    # THE OBVIOUS FIX IS WRONG AND WAS ALREADY TRIED. Returning `launched=True`
+    # unconditionally skipped that reconcile entirely: a refresh inside the
+    # container was never promoted to the shared login, silently, which is the
+    # cross-project "login expired" symptom the hook exists to prevent. So this
+    # cannot be "never tear down"; it has to tell the two cases apart.
+    #
+    # SLURM IS THE AUTHORITY, and the 79a56bc lifetime fix is what makes it
+    # exact: the batch process IS the screen session now (`exec screen -D -m`),
+    # so "the job is alive" and "the session is alive" are the same fact. Before
+    # that fix they could diverge and this check would not have been sound.
+    rc = subprocess.run(argv, check=False).returncode
+    if plan.nudge_enabled and _attached_job_still_running(jobid):
+        # The agent is still on the node. Leaving the viewer is not session end,
+        # so post_session must NOT run; it belongs to `hpc stop` / job end.
+        return Outcome(rc, launched=True)
+    return Outcome(rc, launched=False)
 
 
-def _do_here(plan: SubmissionPlan, *, dry_run: bool) -> int:
+def _do_here(plan: SubmissionPlan, *, dry_run: bool) -> Outcome:
     if plan.existing_jobid is None and not dry_run:
         sys.stderr.write("hpc-launcher --mode=here: not inside a Slurm allocation.\n")
-        return 4
+        return Outcome(4, launched=False)
     # Consent (posture + resources) already shown by main()'s _consent().
     argv = plan.to_apptainer_argv()
     if dry_run:
         sys.stdout.write("# hpc-launcher --dry-run (here):\n")
         sys.stdout.write("  " + " ".join(shlex.quote(a) for a in argv) + "\n")
-        return 0
-    return subprocess.run(argv, check=False).returncode
+        return Outcome(0, launched=False)
+    # THE SESSION IS OVER — same as attach: `apptainer exec` is synchronous, so
+    # post_session runs now, matching `botainer start`. See `_do_attach`.
+    return Outcome(subprocess.run(argv, check=False).returncode, launched=False)
 
 
 if __name__ == "__main__":

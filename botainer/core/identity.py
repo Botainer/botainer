@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import datetime
 import sys
+import unicodedata
 import uuid as _uuid
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -111,25 +112,103 @@ def now_iso8601_utc() -> str:
     return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def validate_project_name(name: str | None) -> str | None:
+    """Normalize an optional cosmetic name before any initialization writes.
+
+    Names are stored as data, never paths or commands. The filter covers the
+    remaining presentation gap: native list output prints the name in a terminal.
+    Keep Unicode text, including ordinary right-to-left letters, but not control
+    sequences, directional overrides, or line separators that can spoof rows.
+    """
+    if name is None:
+        return None
+    if not isinstance(name, str):
+        raise Refused(RefusalCategory.CONFIG_INVALID,
+                      "project name must be text")
+    forbidden_bidi = {"LRE", "RLE", "LRO", "RLO", "PDF", "LRI", "RLI", "FSI", "PDI"}
+    if any(unicodedata.category(char) in {"Cc", "Cs", "Zl", "Zp"}
+           or unicodedata.bidirectional(char) in forbidden_bidi for char in name):
+        raise Refused(
+            RefusalCategory.CONFIG_INVALID,
+            "project name must be one line without control characters or directional overrides",
+        )
+    name = name.strip()
+    if not name or len(name) > 200:
+        raise Refused(RefusalCategory.CONFIG_INVALID,
+                      "project name must contain 1 to 200 characters after trimming whitespace")
+    return name
+
+
 def init_project(
     project_root: Path,
     *,
     agent: str,
     force: bool,
     non_interactive: bool,
+    name: str | None = None,
 ) -> InitResult:
-    """Initialize or recognize the project's identity."""
+    """Initialize or recognize the project's identity.
+
+    `force` does NOT apply to the identity — see the branch below. It records
+    that a forced re-init happened; the overwriting it names is the CONFIG's,
+    done by the caller.
+
+    `non_interactive` is accepted for signature parity with the CLI and is not
+    read: nothing in this function prompts, so the promise it makes ("refuse if
+    any prompt would be required") is vacuously kept. Filed as its own queue row
+    rather than dropped, because removing it touches every call site.
+    """
+    name = validate_project_name(name)
     project_root = project_root.resolve()
     paths = state_dir.ensure_user_state_dir(create_if_missing=True)
     existing = read_project_id(project_root)
 
-    if existing and not force:
+    if existing:
+        # A FORCED INIT REWRITES THE CONFIG; IT NEVER RE-MINTS THE IDENTITY.
+        #
+        # (Flag spelling deliberately absent: every other flag this module
+        # names is a `botainer start` flag, and a test asserts exactly that —
+        # so naming an `init` flag here is the layer breach, not the test being
+        # blunt. The CLI owns flag names; this owns the behaviour.)
+        #
+        # This condition used to be `existing and not force`, so a forced init
+        # fell through to the mint path below and called write_project_id()
+        # without overwrite=True — hitting the O_EXCL guard on every project
+        # that has a project-id, which is every project a forced init is for.
+        # Measured through the real CLI: exit 2, "project-id already exists ...
+        # (concurrent init race). ... do not overwrite." — accusing the user of
+        # a race they had not run, and refusing the one thing they had asked
+        # for. The config was never rewritten either, because that refusal
+        # happens before write_initial_config() is reached, so the flag's whole
+        # documented purpose ("Overwrite existing Main/.botainer/ contents")
+        # had never once executed.
+        #
+        # RE-MINTING IS NOT THE ALTERNATIVE READING. A fresh UUID orphans this
+        # project's state dir — sessions/, data/ (which holds the credential in
+        # isolated and shared modes) and packages/ — with nothing left pointing
+        # at it. Deliberately giving a copy its own identity is the clone/fork
+        # path in resolve_identity(), and that one asks first.
+        #
+        # THE RACE GUARD IS UNAFFECTED: in a genuine parallel init both
+        # processes read `existing is None`, so neither takes this branch and
+        # the loser still refuses below. Its wording becomes TRUE for the first
+        # time — after this change, reaching it really does mean a race.
         uid = _validate_uuid(existing)
         proj_paths = state_dir.ensure_project_dirs(paths, uid)
         meta = state_dir.read_meta(proj_paths)
+        if name is not None:
+            meta["display_name"] = name
         meta = state_dir.append_path_history(meta, str(project_root))
         meta.setdefault("created_at", now_iso8601_utc())
         meta["updated_at"] = now_iso8601_utc()
+        if force:
+            # `force` would otherwise be a parameter this function accepts and
+            # never reads — the shape that invites a later reader to "fix" the
+            # dead argument by wiring it back to the mint path, which is the
+            # bug above. It leaves a fact instead: this project's config.yaml
+            # was reset, and when. `doctor` and the upgrade question both want
+            # to know that a config is not the one the project was born with.
+            meta["last_forced_reinit"] = now_iso8601_utc()
         state_dir.write_meta(proj_paths, meta)
         return InitResult(project_id=uid, state_dir=proj_paths.base, was_existing=True)
 
@@ -143,6 +222,8 @@ def init_project(
         "updated_at": now_iso8601_utc(),
         "path_history": [str(project_root)],
     }
+    if name is not None:
+        meta_new["display_name"] = name
     meta = meta_new
     state_dir.write_meta(proj_paths, meta)
     return InitResult(project_id=new_uid, state_dir=proj_paths.base, was_existing=False)
@@ -154,6 +235,7 @@ def resolve_identity(
     identity_accept: bool = False,
     fork: bool = False,
     prompt_fn: Callable[[str], str] | None = None,
+    record: bool = True,
 ) -> tuple[str, Path]:
     """Return (uuid, state_dir_path), handling the clone/fork prompt.
 
@@ -241,6 +323,35 @@ def resolve_identity(
         return uid, proj_paths.base
 
     # Ambiguous.
+
+    # A QUERY MUST NOT ANSWER THIS QUESTION. (#231) `status`, `attach`, `stop`
+    # and `nudge` need the uuid to FIND things; they are not the moment to
+    # decide whether this checkout is a move or a second copy. They used to pass
+    # `identity_accept=True` unconditionally — which means "the user passed
+    # --accept-identity-change", and none of those four commands HAS that flag.
+    # So they took the moved branch without asking, appended this path to
+    # path_history, and because `last_known` then equals `here` the guard never
+    # fired again FOR ANY COMMAND, including `start`. One `cp -a` plus one
+    # `botainer status` and the copy was permanently attached to the original's
+    # credentials with the prompt disarmed. §4ck asserts that copies are
+    # prompted or refused; that claim was false for those four.
+    #
+    # Passing `identity_accept=False` instead would be wrong in a different way:
+    # the refusal names `--accept-identity-change` and `--fork`, flags these
+    # commands do not have (the #130 class — output naming commands that do not
+    # exist). So the answer is to ANSWER NOTHING: return the uuid, write no
+    # meta, and say plainly what was seen and which command decides.
+    if not record:
+        sys.stderr.write(
+            f"[botainer] note: this directory and {last_known!r} both exist and "
+            f"carry the same project id. Showing the project's existing state; "
+            f"nothing was recorded.\n"
+            f"    If this is a COPY that should be its own project, run "
+            f"`botainer start --fork` here.\n"
+            f"    If you MOVED it, run `botainer start --accept-identity-change` "
+            f"here.\n")
+        return uid, proj_paths.base
+
     if fork and identity_accept:
         raise Refused(
             RefusalCategory.IDENTITY_AMBIGUOUS,

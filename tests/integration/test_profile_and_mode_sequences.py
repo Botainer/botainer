@@ -389,14 +389,34 @@ def test_quota_driven_account_switch_keeps_the_conversation(tmp_path):
 
 # ── --auth-profile, end to end through composition ──
 
-def _init_composable(proj: Path) -> None:
+def _init_composable(proj: Path, *, mode: str = "shared") -> None:
     """A project compose_session will accept: mock runtime + an image override,
     so the test exercises the profile path rather than the image-resolution
-    refusal."""
+    refusal.
+
+    THE AUTH MODE IS PINNED, not inherited. These tests seed a HOST-WIDE
+    credential under `shared-auth/`, which only shared mode reads — so they were
+    silently depending on `policy.default_auth_mode` being `shared`. When the
+    default moved to `isolated` (2026-08-31) the isolated hook looked for a
+    per-project credential, found none, and refused: the test broke for a reason
+    that had nothing to do with what it tests.
+
+    A test whose fixture depends on a global default is testing the default as
+    much as its subject. Naming the mode here makes the dependency explicit and
+    keeps the next default change from moving these tests again.
+    """
     from botainer.cli.init import do_init
     do_init(proj, agent="claude", runtime="mock", quiet=True)
     cfg = proj / ".botainer" / "config.yaml"
-    cfg.write_text(cfg.read_text() + "\nimage: ubuntu:24.04\n")
+    import re
+    suffix = "" if mode == "isolated" else f"-{mode}"
+    # The generated line carries a trailing comment ("# captured from
+    # policy.default_auth_mode at init time; ..."), so match the plugin NAME at
+    # a word boundary rather than the whole line.
+    text, n = re.subn(r"^(  - agent-claude)(?=\s|$)", rf"\1{suffix}",
+                      cfg.read_text(), count=1, flags=re.M)
+    assert n == 1, "init no longer writes `  - agent-claude` — fixture is stale"
+    cfg.write_text(text + "\nimage: ubuntu:24.04\n")
 
 
 def test_auth_profile_override_reaches_the_real_hooks(tmp_path, monkeypatch):

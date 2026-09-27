@@ -163,7 +163,7 @@ def test_build_probe_plan_rw_extra_bind_probed_as_write_rw_not_ro() -> None:
     /scratch, shared-auth, agent profile dir). The probe kind must come from the
     bind's MODE — an RW bind gets write_rw (expect writable), NOT the old
     hardcoded write_ro that made every session FAIL a bogus 'data-ro writable'
-    (the Grace 6-FAIL false alarm)."""
+    (the false alarm this regression prevents)."""
     from botainer.core.spec import BindMode
     from botainer.preflight.checks import build_probe_plan, PreflightCheck, US
     binds = [

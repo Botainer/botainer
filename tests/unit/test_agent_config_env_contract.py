@@ -1,7 +1,7 @@
 """An agent plugin that BINDS a config dir must also SAY WHERE IT IS.
 
-The bug this file exists to stop, reported: "I logged in. started the
-session and codex asks me to log in. Something is fucked up."
+A successful login can still be followed by another login prompt when
+the launched agent searches a different config directory.
 
 The login had worked. The credential was on disk, 0600, and `agent-codex-shared`
 bound it correctly to /home/agent/.codex. But nothing told codex to look there —

@@ -1,31 +1,12 @@
-"""The broker never runs unless the user enabled a broker plugin.
+"""Broker hooks run only when a broker plugin is enabled.
 
-USER DIRECTIVE: *"we're never using broker without user approving it
-(normally by activating that plugin). So, if there's anything else you're doing
-that uses a broker (e.g., to rotate keys), make sure the user agrees. If you're
-just moving files around it's not a problem."*
+A broker holds a real credential and can make requests with it. Enabling
+`agent-claude-broker` or `agent-codex-broker` is the authorization gate for that
+behavior. Ordinary credential-file management must not implicitly start one.
+Credential-refresh diagnostics require their own explicit consent.
 
-WHY THIS IS A CONSENT PROPERTY, NOT TIDINESS. The broker holds the user's OAuth
-refresh token and makes API calls with it. Those calls BILL THE USER'S
-SUBSCRIPTION (see DN-011 — the "API Usage Billing"
-label is cosmetic; the charge lands on the Max subscription), and the
-arrangement sits in a ToS grey zone that is still an open question with
-Anthropic (#81). Spending someone's subscription, in a grey area, without them
-asking for it, is not a thing a launcher may decide on their behalf.
-
-So enabling `agent-claude-broker` / `agent-codex-broker` is the consent gate,
-and it must be the ONLY door. The distinction the user drew is exact: moving
-credential FILES around is ordinary launcher work; making REQUESTS with the
-credential is not.
-
-WHAT MAKES THIS STRUCTURAL RATHER THAN A RULE. Broker machinery lives in
-`botainer/broker/`, and the only code that may reach it is a broker plugin's
-hooks — which run only when that plugin is in `plugins_enabled`. Nothing in the
-launcher core imports it, so there is no path from an ordinary session to a
-broker request. These tests keep that true; without them the property is merely
-an accident of the current code, and the next author who needs "just a token
-refresh" would reach for `oauth_refresh` without ever seeing this reasoning.
-"""
+These tests check the import boundary: broker machinery belongs behind the
+broker plugin hooks rather than an ordinary launcher's import path."""
 from __future__ import annotations
 
 import ast

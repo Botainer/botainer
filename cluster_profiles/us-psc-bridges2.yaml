@@ -53,6 +53,7 @@ slurm:
   default_time_minutes: 60         # vendor: "walltime defaults to 1 hour" (GPU); RM family default is 30 min, so 60 is a safe, round middle ground, not a vendor figure for every partition
   partitions:
     RM:
+      exclusive: true
       # EXCLUSIVE: allocates one or more WHOLE 128-core/256GB nodes and
       # bills for all of it regardless of how much you actually use.
       max_time_minutes: 4320        # 72h (raised from 48h, Jan 2024)
@@ -65,6 +66,7 @@ slurm:
       max_cpus: 64
       max_memory_gb: 256            # node total; a shared job gets a proportional slice
     RM-512:
+      exclusive: true
       # EXCLUSIVE: one of the 16 special RM nodes with 512GB RAM instead of
       # 256GB. Same 128 cores as regular RM, same whole-node billing trap.
       max_time_minutes: 4320        # 72h
@@ -79,6 +81,7 @@ slurm:
       max_cpus: 96
       max_memory_gb: 4096
     GPU:
+      exclusive: true
       # EXCLUSIVE: full-node jobs get every CPU, all memory, and all GPUs on
       # the node(s) you're allocated. Node specs vary by GPU type — see
       # agent_hints for the per-type core/memory breakdown; no single

@@ -75,7 +75,7 @@
     (regex #"^/Users/[^/]+/Desktop")
     (regex #"^/Users/[^/]+/Downloads")
     (regex #"^/Users/[^/]+/Dropbox")
-    ;; Corporate Dropbox folders (e.g. "Acme Inc Dropbox", "Yale University Dropbox")
+    ;; Organization-managed Dropbox folders (for example, "Acme Inc Dropbox")
     (regex #"^/Users/[^/]+/[^/]+ Dropbox")
     (regex #"^/Users/[^/]+/MyLnk")
     ;; macOS Keychain

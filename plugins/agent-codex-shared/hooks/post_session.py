@@ -1,35 +1,15 @@
 #!/usr/bin/env python3
-"""Push a token refreshed INSIDE the container back to the shared store, at exit.
+"""Reconcile a container-refreshed Codex credential at session exit.
 
-THE COUNTERPART THAT WAS NEVER WRITTEN. agent-claude-shared got this hook on
-2026-07-28, for a bug reported from a real cluster session: shared mode symlinks
-each project's credential into one shared file, but the agent refreshes with a
-temp file plus `rename()`, and `rename()` REPLACES a symlink with a regular
-file. The first in-container refresh detaches that project from the shared
-store — it keeps the fresh token locally, the shared store keeps the stale one.
+A client can replace a credential symlink with a regular file when refreshing
+through a temporary file and rename. The project then holds the newer token,
+while the shared store retains the old one. Reconciliation at startup alone
+leaves other projects using that older token until this project starts again.
 
-`pre_session` repairs that, but only at session START. So the repair landed the
-next time you started THAT SAME project. Start a DIFFERENT project in between
-and it symlinks to the stale shared file and reports a login failure, while the
-first project carries on working. Two projects, identical config, opposite
-behaviour, and nothing to explain it.
-
-codex has had that bug the entire time, because the fix was applied to one
-plugin and not its twin. That is the sibling-drift pattern (#136): three
-hardenings claude received and codex did not, each found years later by
-accident. The structural answer is one reconcile both plugins call; until that
-lands, this hook calls `pre_session.reconcile_shared_credential` VERBATIM so the
-two cannot disagree about what a valid back-fill is.
-
-NO NEW TRUST SURFACE. Every check stays where it was: the same-account
-`account_id` gate, the API-key-is-never-back-fillable rule, the fail-closed
-lock. Nothing here decides what is valid — only WHEN the existing decision runs.
-
-RESIDUAL GAP, stated rather than implied: a session killed outright (scancel,
-OOM, node failure) runs no exit hook, so its refresh still waits for that
-project's next start. Bounded and self-healing — unlike before, where it waited
-indefinitely.
-"""
+This hook calls pre_session.reconcile_shared_credential, reusing its account
+identity checks, API-key exclusion and locking. It is best-effort at exit;
+a killed session runs no exit hook and must wait for the next startup repair.
+This does not establish provider-side refresh-concurrency guarantees."""
 from __future__ import annotations
 
 import os

@@ -1,18 +1,12 @@
-"""`botainer auth doctor` must distinguish the two shared-mode failure modes.
+"""`botainer auth doctor` distinguishes shared-credential file states.
 
-Context:  a user reported "yesterday's project works, today's says
-login expired". Three explanations were produced from reading code and all three
-were wrong. This command exists so the next such report is answered from disk
-state instead of from theory, and these tests pin the two diagnoses apart:
+A replaced symlink and divergent credential contents are different diagnoses.
+The former can arise when atomic replacement leaves a per-project regular file;
+the latter can indicate independently refreshed copies. Neither local observation
+alone establishes whether the server will accept the credential.
 
-  1. SYMLINK BROKEN — rename() replaced a project's symlink into the shared
-     store with a private regular file. Confirmed, observed.
-  2. TOKEN DIVERGENCE — holders carry different refresh tokens, which is what
-     rotation would look like. NOT confirmed; this command is how we find out.
-
-They need opposite fixes (re-link vs. abandon multi-holder for the broker), so
-reporting one when the other is true is worse than reporting nothing.
-"""
+These tests check that the diagnostic inspects file state and reports the two
+conditions separately instead of inferring either from an expired-login message."""
 from __future__ import annotations
 
 import json
@@ -321,14 +315,63 @@ def test_an_unchanged_access_token_is_inconclusive_not_a_result(host) -> None:
     assert "NO ROTATION" not in out, "reported a result from a run that never happened"
 
 
-def test_restore_puts_the_original_back(host) -> None:
+def test_restore_REFUSES_to_put_back_a_token_rotation_has_killed(host) -> None:
+    """INVERTED, not loosened. This test used to PIN THE DEFECT.
+
+    It armed, replaced the credential with a DIFFERENT refresh token — which is
+    exactly what a real refresh does — ran `restore`, and asserted the original
+    token came back. That is the behaviour a credential-tzar refutation showed
+    is destructive: EF-1 measured that a rotated-away refresh token returns
+    HTTP 400, so putting it back logs the credential OUT. `check` printed
+    "restore if needed" directly under ROTATION CONFIRMED, so the product
+    invited the user to do it at the one moment it was fatal. In broker mode
+    the target is the host-wide shared store, i.e. every project.
+
+    The property was never "restore reproduces the old bytes"; it was "the undo
+    is safe". Those had silently diverged, and the test was pinning the letter
+    against the spirit. It now asserts the safe outcome, which is strictly
+    stronger — it fails both on the old whole-file copy AND on any future
+    change that writes a token back.
+    """
     (host["beta"] / ".credentials.json").write_text(_cred(_SECRET, 5))
     _rt("arm")
     cred = _armed_path(host)
-    original = _json_refresh(cred)
-    cred.write_text(_cred(_OTHER, 1))
+    cred.write_text(_cred(_OTHER, 1))          # a refresh happened; token rotated
+
+    out = _rt("restore")
+
+    assert _json_refresh(cred) == _OTHER, (
+        "restore overwrote the live rotated token with the dead one")
+    assert "nothing here to undo" in out, out
+
+
+def test_restore_puts_the_EXPIRY_back_when_nothing_rotated(host) -> None:
+    """The legitimate undo, which must keep working.
+
+    Same token, so the backdated expiry is the only thing `arm` changed and the
+    only thing there is to put back.
+    """
+    import json as _json
+
+    def _expiry(p: Path) -> int:
+        return _json.loads(p.read_text())["claudeAiOauth"]["expiresAt"]
+
+    (host["beta"] / ".credentials.json").write_text(_cred(_SECRET, 5))
+    # Read the original from whichever file `arm` will choose, rather than
+    # assuming it is in the future: this fixture's shared store is deliberately
+    # already expired, and `arm` prefers the shared store.
+    _rt("arm")
+    cred = _armed_path(host)
+    backup = Path(_json.loads(
+        (host["root"] / "rotation-test.json").read_text())["backup"])
+    original = _expiry(backup)
+    assert _expiry(cred) != original, "setup failed: arm did not backdate"
+
     _rt("restore")
-    assert _json_refresh(cred) == original
+
+    assert _expiry(cred) == original, "the original expiry was not put back"
+    assert _json.loads(cred.read_text())["claudeAiOauth"]["refreshToken"] == (
+        _SECRET), "restore altered the token while restoring an expiry"
 
 
 def _json_refresh(path: Path) -> str:

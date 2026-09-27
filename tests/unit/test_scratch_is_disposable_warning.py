@@ -1,40 +1,13 @@
-"""What the two surfaces say about /scratch must match where /scratch IS.
+"""Scratch warnings must describe the filesystem actually bound as `/scratch`.
 
-User directive, then a correction from the user  that
-inverted half of it.
+Its host path is `<state_root>/state/<uuid>/scratch`, with the state root selected
+by `$MY_BOTAINER` (default `~/.botainer`). A cluster profile's scratch template is
+informational; it does not select this bind source.
 
-ROUND 1. Two surfaces were each wrong in their own way:
-  * AGENT_HINTS said "the user may delete this at any time" — the wrong THREAT
-    if a filesystem purges on a schedule; "the user may" invites "so as long as
-    I don't, it stays".
-  * The session-start summary said NOTHING, so nobody was told at the one
-    moment they are reading.
-
-ROUND 2 — the fix was itself wrong, and these tests are why it
-survived. The user asked: *"isn't 'our' scratch stored on cluster scratch?"*
-It is not:
-
-    /scratch's host side  = <state_root>/state/<uuid>/scratch
-    state_root            = $MY_BOTAINER, default ~/.botainer
-    scratch.template      = the cluster's purged filesystem — DISPLAY ONLY,
-                            never a bind source
-
-So "AUTO-DELETED after ~60 days by the cluster" was false by default on a
-cluster ($HOME is not purged) and false on a laptop (nothing deletes it ever).
-It was true only when MY_BOTAINER points into cluster scratch — the one
-configuration the storage design refuses, because it purges credentials too.
-
-An inverted warning is worse than a missing one: a user who believes the
-directory self-cleans never goes looking for the GBs it is accumulating.
-
-THE TESTING LESSON, which is why this docstring is long: round 1's test
-asserted `days == 60` after monkeypatching a profile with
-`scratch_cleanup_days = 60`. That is a test of PLUMBING — "does the number
-reach the string" — and it passed for a sentence that was false in the real
-layout, because the fixture never asked WHERE the directory was. Presence of
-the number is not truth of the claim. Every test below pins the claim to the
-bind path, not to the profile.
-"""
+A profile's purge interval therefore cannot establish that this directory is
+purged. On persistent storage it accumulates until explicitly removed. Tests
+must relate the warning to the actual bind path, not just check that a configured
+cleanup interval reaches an output string."""
 from __future__ import annotations
 
 from pathlib import Path

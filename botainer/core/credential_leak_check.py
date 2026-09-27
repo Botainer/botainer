@@ -182,10 +182,16 @@ def check_env_for_leaks(env: dict[str, str], *, source: str) -> None:
             f"{sorted(matches)}.\n"
             f"  Passing credentials via container env is unsafe — the agent "
             f"can read them.\n"
-            f"  → For Anthropic: enable the `agent-claude-proxy` plugin "
-            f"(real key stays on host).\n"
+            f"  → For Anthropic: use BROKER mode — `botainer auth use "
+            f"broker`. The real token stays host-side and the container sees "
+            f"a sentinel.\n"
             f"  → For per-agent credentials: use the agent plugin's `login` "
             f"command (e.g. `botainer plugin agent-claude login`).\n"
+            # Deliberately NOT naming proxy mode. `auth use proxy` says it
+            # makes every session refuse to start, and the reason is THIS
+            # CHECK: the proxy hands the agent an ephemeral ANTHROPIC_API_KEY
+            # and the guard rejects that name on principle. Recommending it
+            # here sent the user in a circle.
             f"  → If you really need to pass this env (e.g. it's not actually "
             f"a credential), rename it to something not matching the credential "
             f"patterns or file an issue."

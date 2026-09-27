@@ -1,24 +1,10 @@
-"""`botainer hpc setup` must say how much to trust the profile it just wrote.
+"""HPC setup prints profile provenance on every successful selection path.
 
-THE DEFECT (onboarding tzar). `_echo_profile_trust` was built for
-the maintainer's directive "clearly mark what's tested and not tested". It had
-two callers: the single-autodetect branch, and `hpc info`.
-
-The three branches where the USER IS GUESSING — an explicit `--profile`, the
-ambiguous-hostname prompt, and the no-match `example` fallback — all skipped it
-and landed on `✓ wrote cluster profile`, then printed `partition: standard`,
-`Lmod: /etc/profile.d/lmod.sh` and a scratch policy as bare fact. The file
-itself recorded `status: community-contributed, source: documentation example
-only`.
-
-So the trust label appeared when botainer was CONFIDENT and vanished when it
-was GUESSING. A stranger presses Enter, gets a green tick, and submits against
-a partition that may not exist.
-
-The fix is structural, and this test is what pins it: the label prints at the
-ONE point every branch reaches — immediately after the write — so a fourth way
-to choose a profile cannot silently skip it.
-"""
+Autodetection, explicit selection, ambiguous-hostname selection and the example
+fallback all reach the same post-write disclosure. The label must distinguish
+measured profile facts from documentation-derived or example values. A successful
+file write does not establish that its partitions, module paths or storage policy
+match the site."""
 from __future__ import annotations
 
 import os

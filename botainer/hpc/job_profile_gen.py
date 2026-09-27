@@ -9,9 +9,9 @@ name, walltime ceiling, memory limit and GPU type for ~40 sites. It also ships
 
 and `botainer init` contained no reference to `cluster`, `partition` or
 `job_profiles` at all. So the product knew the answer and asked the user to go
-find it — the reported symptom was a user asking for help writing the config
-file for CPU and GPU jobs on their cluster, alongside a
-`job-profiles`-vs-`job_profiles` typo that failed silently.
+re-enter information already present in the profile. Generating a starter
+block avoids that duplication; the generated configuration still requires local
+review and the exact `job_profiles` key.
 
 FOUR RULES make this trustworthy rather than merely convenient:
 

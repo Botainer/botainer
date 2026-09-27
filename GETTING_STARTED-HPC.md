@@ -210,12 +210,58 @@ mv botainer-agent-claude.sif $MY_BOTAINER/images/
 
 The `hpc build` subcommand wraps the workflow for you.
 
+**If you have built through botainer before on this cluster, run one more
+command after copying:**
+
+```sh
+botainer image forget agent-claude
+```
+
+`botainer hpc build` and `botainer image build` record the `.sif`'s sha256 when
+they build it, and `start` / `hpc submit` refuse an image whose hash no longer
+matches — that check is what catches an image replaced out from under you. A
+`.sif` you built elsewhere and copied in is, correctly, not the one botainer
+hashed, so it is refused until you say the replacement was deliberate.
+`image forget` drops the recorded hash: the file in place is then accepted and
+**no longer verified**, until you build it through botainer again.
+
+If this is a fresh cluster install with nothing recorded yet, skip it — there
+is nothing to forget, and the command will tell you so.
+
 ## 5. Log in — on the cluster, nothing to copy
 
 The login is headless-friendly: run it **on the cluster**, open the link it prints
 in any browser (your laptop's is fine), and **paste the authorization code back**
 into the terminal. The credential is created on the cluster — you do NOT copy any
 file from your laptop.
+
+### Pick a mode first — the example below is not the default
+
+`botainer init` gives a project **`isolated`**: its own credential, its own
+login. The worked example in this section uses **`shared`** instead, so running
+it is a deliberate change, not a continuation.
+
+| | log in | run at the same time |
+|---|---|---|
+| **`isolated`** — what `init` gives you | once per project | as many sessions as you like |
+| **`shared`** — the example below | once, for all projects | **one session at a time**, across every shared-mode project |
+
+Neither is more correct. The login here is a paste-a-code exchange, so `shared`
+saves repeating it for each project; the price is the concurrency limit, and on
+a cluster that is easy to hit, because a submitted job keeps running while you
+start something else. **If you expect overlapping jobs and sessions, take
+`isolated`.** If you work on one thing at a time, `shared` is less setup.
+
+#### Staying on the default (`isolated`)
+
+```sh
+cd /path/to/your/project
+botainer plugin agent-claude login            # prints a link; paste the code back
+```
+
+Nothing else to do — `init` already put the project in this mode.
+
+#### Switching to `shared`
 
 ```sh
 # On the cluster login node (after the .sif is built — §4):
@@ -241,15 +287,6 @@ If you want several at once, that is what `broker` mode is for
 (`botainer auth use broker`): the credential stays on the host and the container
 never holds it. Broker has not been exercised on a real cluster, so on HPC treat
 it as untested; `shared` and `isolated` are the modes with cluster mileage.
-
-<details>
-<summary>Per-project (isolated) login instead of shared</summary>
-
-```sh
-cd /path/to/your/project
-botainer plugin agent-claude login            # same: prints a link; paste the code back
-```
-</details>
 
 <details>
 <summary>Fallback: copy a credential file from your laptop (rarely needed)</summary>
@@ -308,7 +345,7 @@ Slurm-style aliases (`--time 02:00:00` / `--time 2h`, `--cpus-per-task`,
 form internally.
 
 `botainer hpc submit` prints a capability summary on the **login node**
-and asks for confirmation BEFORE submitting (codex 45#4). After
+and asks for confirmation BEFORE submitting. After
 confirmation, `--yes` is automatically threaded into the in-container
 `botainer start` so it doesn't block on its own prompt where there's
 no TTY. On success the command parses sbatch's stdout for the jobid
@@ -413,7 +450,7 @@ botainer nudge "continue"                # injects "continue\n" into agent's pro
 botainer nudge --in 30m "rate limit clears in 30 min"   # schedule via at(1)
 ```
 
-§A19: this works by `srun --overlap`-ing into the running step on the
+This works by `srun --overlap`-ing into the running step on the
 compute node and running `screen -S botainer-<jobid> -X stuff -- ...`
 against the host-side screen session the sbatch script created. The
 `nudge` plugin must be enabled. (Previously: in-container tmux socket;
@@ -487,7 +524,7 @@ plugins_enabled:
   - git
   - hpc-launcher
   - hpc-modules               # bind login-node modules into container
-  - nudge                     # host-side screen-based input injection (§A19)
+  - nudge                     # host-side screen-based input injection
 
 plugins:
   hpc-launcher:

@@ -1,12 +1,9 @@
 """Regression test: plugin .py scripts run under sys.executable
 (botainer's Python), not the system Python via shebang.
 
-real-host failure on Grace: `botainer hpc submit` died
-with `ModuleNotFoundError: No module named 'yaml'`. Root cause: the
-plugin's submit.py was invoked via the kernel-honored shebang
-`#!/usr/bin/env python3`, which resolved to /usr/bin/python3 on
-Grace — a system Python without botainer's deps (pyyaml, click,
-pydantic).
+Invoking a Python plugin through `#!/usr/bin/env python3` can select
+a system interpreter without botainer's dependencies, causing imports
+such as `yaml` to fail. Dispatch must use botainer's interpreter.
 
 This test pins: when a plugin script ends in .py, the dispatch
 argv MUST start with sys.executable, NOT the script path. This

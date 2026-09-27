@@ -5,7 +5,7 @@ DN-036): `botainer hpc build`
 once wrote `<plugin>.sif` while `botainer image build` wrote
 `botainer-<plugin>.sif` and the hpc-launcher resolver expected the
 prefixed form. The drift meant a freshly-built .sif sat at a path the
-launcher never looked at — a 15-minute wasted rebuild on Grace.
+launcher never looked at, so rebuilding did not resolve the launch failure.
 
 The two botainer-side writers now route through one helper
 (`StatePaths.apptainer_sif_path`). The hpc-launcher host_helper is

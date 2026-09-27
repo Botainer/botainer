@@ -70,8 +70,10 @@ slurm:
       max_cpus: 112
       max_memory_gb: 990
     serial_requeue:
+      preemptible: true
       max_time_minutes: 4320        # PREEMPTIBLE — can be requeued any time
     gpu_requeue:
+      preemptible: true
       max_time_minutes: 4320        # PREEMPTIBLE
     unrestricted:
       max_time_minutes: 525600      # 365 days

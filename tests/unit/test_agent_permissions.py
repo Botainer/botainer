@@ -219,12 +219,66 @@ def _spec_with_perms(perms: str):
 
 def test_summary_discloses_bypass_loudly() -> None:
     out = capability_summary.render_multiline(_spec_with_perms("bypass"))
-    assert "BYPASS" in out
+    assert "bypass" in out.lower()
     assert "UNATTENDED" in out
-    assert "no prompts" in out.lower()
+    assert "nothing will ask" in out.lower()
 
 
-def test_summary_discloses_prompt_and_batch_warning() -> None:
+def test_the_banner_never_asserts_what_the_agent_will_do() -> None:
+    """REPLACES `test_summary_discloses_prompt_and_batch_warning`, WHICH PINNED
+    A FALSE CLAIM IN PLACE.
+
+    That test asserted the banner said "DEADLOCK" for the non-bypass posture.
+    The full sentence was: "the agent asks before consequential actions; needs
+    a TTY — an unattended/batch job would DEADLOCK at the first prompt."
+
+    botainer appends NOTHING about approvals in that mode, so both halves were
+    claims about a third-party binary's behaviour. If the agent's own default
+    is a selective mode rather than ask-about-everything, the first half is
+    false — and so is the deadlock warning, which is the half that matters on a
+    cluster, because it may tell you a batch job will hang when it will not.
+
+    The test is inverted rather than deleted: the banner must now state what
+    BOTAINER did (the appended argv, which botainer knows) and must NOT predict
+    the agent's behaviour (which it does not). A future edit that re-introduces
+    a behavioural promise fails here.
+    """
     out = capability_summary.render_multiline(_spec_with_perms("prompt"))
-    assert "PROMPT" in out
-    assert "DEADLOCK" in out
+
+    # It still names the posture the user set, in their own words.
+    assert "prompt" in out, f"the banner no longer says which posture is set:\n{out}"
+
+    # It states what botainer did — the checkable half.
+    assert "botainer appended" in out, (
+        f"the banner does not say what botainer actually appended, which is the "
+        f"only part of this it knows for certain:\n{out}")
+
+    # And it does NOT predict the agent.
+    assert "DEADLOCK" not in out.upper(), (
+        f"the banner predicts a deadlock. botainer appends nothing in this "
+        f"mode, so it cannot know that:\n{out}")
+    assert "asks before consequential" not in out, (
+        f"the banner asserts the agent asks. botainer appends nothing in this "
+        f"mode, so that is the AGENT's choice, not botainer's:\n{out}")
+
+
+def test_the_bypass_banner_does_not_name_a_remedy_that_breaks_codex() -> None:
+    """THE DEFAULT BANNER USED TO HAND THE READER A BROKEN INSTRUCTION.
+
+    `bypass` is the shipped default, so its branch is the one nearly every user
+    sees. It ended: "set `agent_permissions: prompt` in .botainer/config.yaml to
+    restore per-action prompts."
+
+    Measured on codex-cli 0.145.0: following that does not restore prompts. It
+    produces an agent that starts, warns once, and then fails every command,
+    because codex's own sandbox cannot start inside a container. The remedy
+    broke the session it claimed to fix — the #130 class (shipped output naming
+    commands that do not exist), one step worse, because this command runs.
+
+    The banner must not print a config-change remedy it cannot stand behind for
+    the agent actually in use.
+    """
+    out = capability_summary.render_multiline(_spec_with_perms("bypass"))
+    assert "agent_permissions: prompt" not in out, (
+        f"the default banner still tells the reader to set `prompt`, which on "
+        f"codex produces an agent that cannot run a command:\n{out}")

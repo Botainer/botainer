@@ -14,7 +14,7 @@ What this hook does:
    per-project profile) — the file `botainer auth login` wrote. NOT the host's
    native ~/.claude / macOS Keychain (unreadable anyway).
 2. Mint a per-session sentinel (tenant + nonce).
-3. Spawn `python3 -m botainer.broker.daemon_main` as a detached child, on a
+3. Spawn isolated `python3 -I -B -m botainer.broker.daemon_main` as a detached child, on a
    per-session unix socket under the session scratch dir. The daemon reads the
    real credential host-side, injects the real Bearer on the outbound leg, and
    optionally refreshes the OAuth token host-side (writing rotated tokens back
@@ -138,14 +138,12 @@ def _free_tcp_port(host: str) -> int:
         return int(s.getsockname()[1])
 
 
-def _tcp_accepting(host: str, port: int) -> bool:
-    """True once the broker is accepting connections on (host, port)."""
-    import socket as _socket
-    try:
-        with _socket.create_connection((host, port), timeout=0.2):
-            return True
-    except OSError:
-        return False
+# NO _tcp_accepting HERE, DELIBERATELY. Readiness used to be "connect to the
+# port; any answer means ready" — which a process that squatted the ephemeral
+# port between _free_tcp_port()'s close and the daemon's bind satisfies on the
+# first try. The daemon then dies with EADDRINUSE and the container spends the
+# session talking to the squatter, reported as a successful start. Readiness is
+# the daemon's own BOTAINER-BROKER-READY marker; see botainer/broker/readiness.py.
 
 
 _DEFAULT_UPSTREAM = "https://api.anthropic.com"
@@ -186,6 +184,62 @@ def _trusted_destinations(*, testing: bool, env) -> tuple[str, str, str]:
         env.get("BOTAINER_BROKER_TOKEN_ENDPOINT_OVERRIDE", ""),
         env.get("BOTAINER_BROKER_CLIENT_ID_OVERRIDE", ""),
     )
+
+
+#: Credential filenames, kept in step with `botainer.core.history_carry`'s
+#: CREDENTIAL_FILENAMES. A hook runs as a subprocess and cannot rely on
+#: botainer being importable, so this is a deliberate local copy; the test
+#: pins the two together so they cannot drift.
+_CREDENTIAL_FILENAMES = frozenset({
+    ".credentials.json",
+    "api_key",
+    "auth.json",
+})
+
+
+def _credential_names_under(root):
+    """Credential-NAMED files anywhere under `root`, recursively.
+
+    A DELIBERATE THIRD COPY of `botainer.core.history_carry.
+    credential_files_under`. A hook runs as a subprocess with no guarantee that
+    `botainer` is importable, so it cannot share the real one — which is exactly
+    how copies drift, and drift in this scan is the defect the whole
+    broker-state thread is about. `tests/unit/test_broker_state_scans_agree.py`
+    drives this function, its codex twin and the library original against one
+    fixture set and fails if any of the three disagrees. The copy is allowed;
+    diverging silently is not.
+
+    Recursive because the profile directory is bound WHOLE — nesting changes
+    nothing about what the container can read. `.pre-shared` included because
+    this project's own docs say those backups ARE credentials.
+    """
+    wanted = set(_CREDENTIAL_FILENAMES) | {
+        f"{n}.pre-shared" for n in _CREDENTIAL_FILENAMES}
+    found = []
+    stack = [root]
+    seen = set()
+    while stack:
+        d = stack.pop()
+        try:
+            real = d.resolve()
+        except OSError:
+            continue
+        if real in seen:
+            continue
+        seen.add(real)
+        try:
+            entries = sorted(d.iterdir())
+        except OSError:
+            continue
+        for e in entries:
+            try:
+                if e.is_dir():
+                    stack.append(e)
+                elif e.name in wanted:
+                    found.append(e)
+            except OSError:
+                continue
+    return sorted(found)
 
 
 def _resolve_state_root(state_dir: Path) -> Path:
@@ -245,8 +299,10 @@ def _resolve_credential_path(
 # Add a key here only after confirming it carries no credential surface.
 INHERITABLE_ENV_KEYS = frozenset({
     "PATH", "HOME", "LANG", "LC_ALL", "TZ", "TMPDIR",
-    # The daemon is spawned as `sys.executable -m botainer.broker.daemon_main`,
-    # so it must be able to import botainer from the same interpreter/venv.
+    # Retained compatibility context. The daemon uses isolated Python (-I),
+    # so PYTHONPATH does NOT select its imports. Its interpreter must contain
+    # the intended installed Botainer; a parent-only source override is not
+    # inherited by re-execution. VIRTUAL_ENV is descriptive, not a selector.
     "PYTHONPATH", "VIRTUAL_ENV",
 })
 
@@ -326,7 +382,9 @@ def main() -> int:
     tenant_id = (record.get("project_uuid")
                  or os.environ.get("BOTAINER_PROJECT_UUID")
                  or session_id)[:16]
-    tenant_id = "".join(c for c in tenant_id if c.isalnum() or c in "_-") or "session"
+    # NO LOCAL SANITISER. make_sentinel owns the charset, so this cannot drift
+    # from what is_sentinel accepts — which is exactly what the isalnum() filter
+    # that used to be here had done (#216).
     nonce = secrets.token_hex(16)  # 128-bit: the sentinel doubles as the TCP token
     # Import the sentinel maker from the INSTALLED botainer package (the trust
     # anchor). We deliberately do NOT add project_root to sys.path: the project
@@ -417,6 +475,27 @@ def main() -> int:
     # host-side) at /home/agent/.claude, and point CLAUDE_CONFIG_DIR at it.
     broker_state_dir = state_dir / "data" / "agent-claude" / "broker-state" / profile
     broker_state_dir.mkdir(parents=True, exist_ok=True)
+    # Broker state is intended to hold history rather than real credentials,
+    # but a restored backup or older layout can leave a credential file here.
+    # Warn before exposing that directory to the container. This is advisory:
+    # it does not remove the file or refuse the launch.
+    #
+    # `auth profiles` inspects both the profile and broker-state directories.
+    # `auth status` and `auth doctor` do not cover this location, so their
+    # absence reports cannot substitute for this launch-time check.
+    _leaked = ([str(f.relative_to(broker_state_dir))
+                for f in _credential_names_under(broker_state_dir)]
+               if broker_state_dir.is_dir() else [])
+    if _leaked:
+        print(
+            "[agent-claude-broker] WARNING: broker-state holds "
+            + ", ".join(_leaked)
+            + " — this directory is bound into the container and is supposed "
+            "to hold NO credential. In broker mode the container should only "
+            "ever see a sentinel. Inspect it: "
+            f"{broker_state_dir}",
+            file=sys.stderr,
+        )
     try:
         os.chmod(broker_state_dir, 0o700)
     except OSError:
@@ -438,7 +517,15 @@ def main() -> int:
     # injected credential) are never logged.
     session_dir = state_dir / "sessions" / session_id
     session_dir.mkdir(parents=True, exist_ok=True)
-    debug_log = session_dir / "broker-debug.log"
+    # THE FILENAME CARRIES THE PLUGIN, so an unattributable broker error cannot
+    # exist. Both brokers used to write `broker-debug.log` and
+    # `broker-daemon.err` into the SAME per-session directory, with nothing in
+    # either name or content saying which one. Both also do OAuth refresh, so
+    # even the error text does not distinguish them.
+    #
+    # Include the plugin name to avoid filename collisions and identify which
+    # broker produced a diagnostic, even when both report OAuth errors.
+    debug_log = session_dir / "agent-claude-broker-debug.log"
 
     # Build the daemon env from scratch (don't inherit tainted shell vars); pass
     # through only the minimal runtime vars + the transport + credential vars.
@@ -470,7 +557,7 @@ def main() -> int:
     # Capture the daemon's stderr to a host-side 0600 file so that when it fails
     # closed at startup (the common case: expired token, no refresh configured)
     # we can surface the daemon's OWN specific reason instead of a generic guess.
-    daemon_err = session_dir / "broker-daemon.err"
+    daemon_err = session_dir / "agent-claude-broker-daemon.err"
     _err_fd = None
     try:
         _err_fd = os.open(str(daemon_err),
@@ -480,10 +567,10 @@ def main() -> int:
         _err_fd = None
     try:
         proc = subprocess.Popen(
-            [sys.executable, "-m", "botainer.broker.daemon_main"],
+            [sys.executable, "-I", "-B", "-m", "botainer.broker.daemon_main"],
             env=broker_env,
             stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,   # the READY marker is read from here
             stderr=(_err_fd if _err_fd is not None else subprocess.DEVNULL),
             start_new_session=True,
         )
@@ -510,11 +597,6 @@ def main() -> int:
     tmp = record_path_p.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(record, indent=2, sort_keys=True), encoding="utf-8")
     os.replace(tmp, record_path_p)
-
-    # Wait for the listener so the adapter doesn't race it, and fail fast with a
-    # clear message if the daemon exits during startup (fail-closed credential).
-    def _ready() -> bool:
-        return sock_path.exists() if is_unix else _tcp_accepting(tcp_host, tcp_port)
 
     def _daemon_died() -> int:
         # Surface the daemon's OWN reason (last stderr line) — the common case is
@@ -546,19 +628,33 @@ def main() -> int:
         return 2
 
     import time as _t
-    for _ in range(60):
-        if _ready():
-            break
+    # L4 SAID THIS AND DID NOT DO IT. The note here read "Confirm OUR daemon is
+    # the one listening before handing the container the base_url" — and the
+    # only code under it was `if proc.poll() is not None`, which asks whether
+    # the process is alive, not whether it owns the port. A comment claiming a
+    # check nobody performs is the defect class this repo keeps finding; the
+    # marker below makes the sentence true.
+    # READINESS IS THE DAEMON'S OWN WORD, not "a port answers". Both hooks
+    # used to connect to the port and treat any answer as success — so a
+    # process that grabbed the ephemeral port between _free_tcp_port()'s close
+    # and the daemon's bind satisfied the check on iteration 0, the daemon then
+    # died with EADDRINUSE, and the container talked to the squatter for the
+    # whole session. See botainer/broker/readiness.py for what this does and
+    # does NOT fix.
+    from botainer.broker.readiness import wait_for_ready
+    _ok, _why = wait_for_ready(proc, (f"socket={sock_path}" if is_unix else f"tcp={tcp_host}:{tcp_port}"), timeout=30.0)
+    if not _ok:
         if proc.poll() is not None:
             return _daemon_died()
-        _t.sleep(0.05)
-    # L4: _ready() can go true because ANOTHER local process won the ephemeral
-    # TCP port between _free_tcp_port() and the daemon's bind (the daemon then
-    # exits on the bind failure). Confirm OUR daemon is the one listening before
-    # handing the container the base_url. (Host is trusted, so this is
-    # defense-in-depth against integrity/DoS, not credential leak.)
-    if proc.poll() is not None:
-        return _daemon_died()
+        # Alive but never reported ready: do not leave it holding the real
+        # credential on a live socket while we walk away.
+        try:
+            proc.terminate()
+        except OSError:
+            pass
+        print("[agent-claude-broker] broker did not become ready: %s" % _why,
+              file=sys.stderr)
+        return 2
 
     print(json.dumps({
         "version": "plugin-contribution-v1",

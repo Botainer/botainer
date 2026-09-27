@@ -128,6 +128,8 @@ def _register_subcommands() -> None:
     cli.add_command(inspect.inspect)
     cli.add_command(where.where)
     cli.add_command(dry_run.dry_run)
+    from botainer.cli import shell as shell_cmd
+    cli.add_command(shell_cmd.shell)
     cli.add_command(access.access)
     cli.add_command(doctor.doctor)
     cli.add_command(policy.policy)
@@ -180,6 +182,17 @@ def main(argv: list[str] | None = None) -> int:
         cli.main(args=args, prog_name="botainer")
     except SystemExit as exc:  # click always exits this way in standalone mode
         code = exc.code if isinstance(exc.code, int) else (0 if not exc.code else 1)
+    except Exception as exc:  # noqa: BLE001 — narrowed immediately below
+        # A REFUSAL MUST NEVER REACH THE USER AS A TRACEBACK, even from a command
+        # that forgot `@handle_refusals`. Two had: `botainer list` and
+        # `botainer image list` printed 43 and 47 lines of Python at a user whose
+        # only mistake was pointing MY_BOTAINER at /project — while `doctor`, on
+        # the same state root, printed the refusal and its remedy. Decorating
+        # those two would have fixed those two; this makes the next one
+        # impossible. `render_refusal` re-raises anything that is not a refusal,
+        # so a genuine crash still shows its traceback.
+        from botainer.cli._refusal_handler import render_refusal
+        code = render_refusal(exc)
     _maybe_tip_footer(code, args)
     return code
 

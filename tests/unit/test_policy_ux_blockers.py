@@ -82,3 +82,65 @@ def test_doctor_flags_an_invalid_policy_instead_of_green_ticking_it(
     assert rows, "doctor no longer reports on policy.yaml at all"
     assert rows[0].severity == "err", f"doctor still blesses an invalid policy: {rows[0]}"
     assert "policy-v1" in (rows[0].remediation or ""), rows[0]
+
+
+# ── B4: `policy set` reported success while changing nothing ───────────────
+#
+# Same family as B1-B3 above: the tool you reach for is the one that misleads
+# you. Observed by running it — widening `plugins.allowed_tiers` to include
+# `third-party` printed `✓ policy.yaml updated`, and `policy show` still said
+# `['first-party']`, and the install it was meant to unblock still refused.
+# The write DOES land in your file; the site ceiling wins, so the effective
+# value never moves. A command that reports success while changing nothing is
+# worse than one that refuses — it sends you off to debug the wrong thing.
+#
+# There was already a warning for three SITE-ONLY fields, but that is a
+# hand-maintained list and this class is every INTERSECTED field in the
+# widening direction. So the check asks the real `intersect()` what the
+# effective value would BE rather than consulting a list — a field added
+# later is covered with nothing to remember.
+
+def _policy_at(tmp_path, monkeypatch):
+    import yaml
+    monkeypatch.setenv("MY_BOTAINER", str(tmp_path / "state"))
+    from botainer.state import dir as sd
+    root = sd.ensure_user_state_dir(create_if_missing=True).root
+    (root / "policy.yaml").write_text(yaml.safe_dump({"version": "policy-v1"}))
+    return root / "policy.yaml"
+
+
+def _run_policy_set(key: str, value: str):
+    from click.testing import CliRunner
+    from botainer.cli.policy import policy
+    # `input="n"` — decline the write. The warning has to fire BEFORE the
+    # confirm, or it is an explanation delivered after the decision.
+    return CliRunner().invoke(policy, ["set", key, value], input="n\n")
+
+
+def test_widening_a_capped_field_says_it_will_not_take_effect(tmp_path,
+                                                              monkeypatch) -> None:
+    _policy_at(tmp_path, monkeypatch)
+    res = _run_policy_set("plugins.allowed_tiers",
+                          '["first-party","third-party"]')
+    out = res.output
+    assert "NOT take effect" in out, (
+        "widening a ceiling-capped field printed no warning — the user is "
+        "told the write succeeded and the effective value never moves"
+    )
+    # Naming BOTH values is the point: "won't work" without saying what you
+    # will actually get leaves the user guessing.
+    assert "first-party" in out and "third-party" in out
+    # And it must point at the command that tells the truth.
+    assert "policy show" in out
+
+
+def test_tightening_stays_quiet(tmp_path, monkeypatch) -> None:
+    """Narrowing genuinely takes effect, so there is nothing to warn about.
+
+    Pinned because the lazy way to pass the test above is to warn on every
+    set — which would make this a permanently-firing warning, the scenery
+    problem this project has already been bitten by.
+    """
+    _policy_at(tmp_path, monkeypatch)
+    res = _run_policy_set("plugins.allowed_tiers", "[]")
+    assert "NOT take effect" not in res.output

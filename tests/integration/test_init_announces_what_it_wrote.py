@@ -21,9 +21,9 @@ had just been written:
   3. the printed next-step `auth login --shared … # matches this project's
      shared mode`
 
-The true line was plain; the false ones were bold and persistent. The user runs
-the printed login, starts, and the agent asks them to log in — verbatim the
-maintainer's report.
+The true line was plain; the false ones were bold and persistent. Following
+the incorrect login instructions authenticates a different mode from the
+one launch uses, so the agent can request login again.
 
 WHY THIS RUNS IN-PROCESS. The first version of this file drove `init` as a
 subprocess and PASSED WITH BOTH HALVES OF THE FIX REVERTED — vacuously, because

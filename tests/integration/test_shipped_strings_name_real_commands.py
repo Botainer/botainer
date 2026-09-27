@@ -18,8 +18,8 @@ typo-suggestion for a command they did not type.
 The rest were ordinary rot: `plugin install` (real: `plugin add`), `plugin
 remove` (real: `plugin disable`), `config show` (real: `config explain`),
 `image rebuild` (real: `image build --no-cache`), `botainer browser gateway`
-(real: `botainer plugin browser gateway`), and `bot1 ...` — the maintainer's
-local shell alias, which does not exist for anyone else.
+(real: `botainer plugin browser gateway`), and `bot1 ...` — a local shell
+alias that is not provided by a standard installation.
 
 WHY AN AST PASS AND NOT A GREP. One of the nine was invisible to a line scan:
 
@@ -176,7 +176,7 @@ def test_every_botainer_command_we_print_exists() -> None:
 
 
 def test_no_shipped_CODE_tells_a_user_to_run_bot1() -> None:
-    """`bot1` is the maintainer's local shell alias for the v0.1 binary. A
+    """`bot1` is a local shell alias some installs use for the v0.1 binary. A
     released user has no such command, so every occurrence is an instruction
     that cannot be followed.
 

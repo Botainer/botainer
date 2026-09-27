@@ -22,6 +22,27 @@ host-code-execution vectors that the overlay alone cannot neutralize.
 `mode: off` contributes nothing (the agent has rw on `.git/`); the start banner
 is expected to warn (DN-028 §7).
 
+TO CONSIDER WHEN THIS PLUGIN IS NEXT WORKED ON — the rest of the clone-risk
+class. This plugin currently guards the git-specific execution vectors
+(`core.hooksPath`, `core.sshCommand`, `core.fsmonitor`, `.git/hooks`). A clone
+carries others that act when something runs them, and they are the same class
+rather than separate surfaces:
+
+    .mcp.json              MCP servers, i.e. tool names + descriptions into the
+                           model's schema (ALLOWED by decision 2026-08-27 — see
+                           docs/CAPABILITY-SURFACE.md §4at for why singling it
+                           out would cost the feature and buy little)
+    package.json           `postinstall` and friends, on `npm install`
+    Makefile / configure   whatever the agent is asked to run
+    pyproject / setup.py   arbitrary code on build or editable install
+    .envrc, .vscode/, .devcontainer/
+
+None is an escape — under `bypass` the agent already runs commands in the cage.
+They are content that STEERS. Worth deciding here whether this plugin's remit is
+"git's own execution vectors" (today) or "what a clone brings", because the
+second is a different and larger job, and the answer changes what belongs in
+this file. Mitigation research is tracked separately.
+
 This runs on the host as the user (like every pre_session hook). The overlay
 binds are applied by the adapter on the docker/direct path; on the HPC sbatch
 path plugin-contributed binds share the general outer-argv routing limitation
@@ -84,8 +105,37 @@ _DANGEROUS_SUBSECTION_KEYS: set[tuple[str, str]] = {
 _DANGEROUS_SECTIONS = {"include", "includeif"}
 
 
+# YAML 1.1 parses these BARE words as booleans, not strings. `off` -> False.
+#
+# This was a live defect, measured 2026-08-31: the refusal below tells the user
+# "or set plugins.git.mode=off to opt out (you then own the risk)", they write
+# exactly that, YAML hands us False, the old `mode in ("guarded", "off")` test
+# rejects it, and the fallback silently returns "guarded". The documented escape
+# hatch never worked, and the `if mode == "off"` branch was unreachable for
+# anyone following the instructions.
+#
+# It failed SAFE, which is why nobody noticed — and that is not a reason to
+# downgrade it. A remedy the product NAMES and that silently does nothing
+# teaches the user the product is broken, and the next thing they try is
+# dropping `git` from plugins_enabled, which removes the guard entirely.
+#
+# The project already knew about this trap: botainer/cli/config_cmd.py and
+# botainer/cli/policy.py both enumerate on/On/ON/off/Off/OFF/yes/no for exactly
+# this reason, and config_cmd's --raw help says "Useful for 'no', 'yes', 'off',
+# '0' that would otherwise coerce". The handling existed in the CLI and not in
+# the plugin that prints the value in its own error text.
+_OFF_SPELLINGS = {False, "off", "false", "no", "0", 0, "disabled"}
+
+
 def _read_mode(project_root: Path) -> str:
-    """Read plugins.git.mode from .botainer/config.yaml. Default 'guarded'."""
+    """Read plugins.git.mode from .botainer/config.yaml. Default 'guarded'.
+
+    NORMALISES rather than matching exact strings, because the value the user is
+    TOLD to write (`off`) does not survive YAML as a string. Anything meaning
+    off is off; anything unrecognised is guarded, and says so on stderr instead
+    of silently choosing the safe branch — a silent fallback to the safe value
+    is what hid the original bug for as long as it lasted.
+    """
     cfg_path = project_root / ".botainer" / "config.yaml"
     if not cfg_path.exists():
         return "guarded"
@@ -95,7 +145,16 @@ def _read_mode(project_root: Path) -> str:
         return "guarded"
     git_cfg = ((data.get("plugins") or {}).get("git") or {})
     mode = git_cfg.get("mode", "guarded")
-    return mode if mode in ("guarded", "off") else "guarded"
+    if isinstance(mode, str):
+        mode = mode.strip().lower()
+    if mode in _OFF_SPELLINGS:
+        return "off"
+    if mode in ("guarded", True, "on", "true", "yes"):
+        return "guarded"
+    sys.stderr.write(
+        f"git: plugins.git.mode={mode!r} is not a value I recognise; using "
+        f"'guarded'. Write `mode: off` to opt out, or remove the line.\n")
+    return "guarded"
 
 
 def _dangerous_git_config_keys(config_path: Path) -> list[str]:

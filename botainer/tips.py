@@ -20,7 +20,7 @@ Design:
 - Rotation is SEQUENTIAL via a persisted index so the user cycles through all tips
   over successive runs (better coverage than random, which repeats and skips).
 
-RULE — tips point, they never adjudicate (user-corrected twice). A tip
+RULE — tips point, they never adjudicate. A tip
 may state a FACT ("the caged agent acts autonomously", "files the agent writes are
 untrusted") and POINT to the security surface ("see docs/BROWSER.md"). A tip must
 NOT render a comparative or absolute SAFETY VERDICT ("safe", "safer", "protects",
@@ -180,12 +180,9 @@ def print_tip_footer(enabled: set[str] | None) -> None:
 
 # ── the RULE above, as a check ──
 #
-# A FILTER, and it must be read as one. The RULE at the top of this module came
-# from the maintainer catching two shipped safety verdicts by hand,
-# and until now it was enforced by nothing at all: it lived in a docstring here
-# and in a comment above ManifestModel._validate_user_tips, while that validator
-# checked non-empty, charset and length only. A tip reading "The viewer is SAFER
-# and PROTECTS your clipboard" was accepted unmodified.
+# A FILTER, and it must be read as one. Non-empty text, character restrictions
+# and a length limit cannot enforce the editorial rule against safety verdicts.
+# Validate both core and plugin tips for the known verdict phrases.
 #
 # WHAT THIS DOES NOT DO, stated plainly because a filter documented as a
 # guarantee is the same class of error as a false safety verdict. The project
@@ -204,11 +201,8 @@ def print_tip_footer(enabled: set[str] | None) -> None:
 #   sit. Same move as run_hook(agent_writable_roots=…) being a required
 #   parameter so omitting it is a TypeError. Tracked; not done.
 #
-# Until then this catches the literal words that caused all four known
-# incidents, on BOTH surfaces — core tips AND every installed plugin's
-# user_tips. The gate that existed walked BASE_TIPS only, while both of the
-# maintainer's catches were in plugins/browser/botainer-plugin.yaml. A check
-# that covers only the half where the incident did not happen is scenery.
+# Apply the filter to both BASE_TIPS and installed plugins' user_tips.
+# Covering only core tips leaves the plugin surface unchecked.
 
 _VERDICT_WORDS = (
     "safe", "safer", "safest", "secure", "securely", "protects", "protected",

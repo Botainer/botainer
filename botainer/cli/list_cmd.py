@@ -36,6 +36,8 @@ def list_(as_json: bool, verbose: bool) -> None:
                 "paths": list(p.paths),
                 "sessions_dir_count": p.sessions_dir_count,
                 "last_session_at": p.last_session_at,
+                # Empty means UNKNOWN, not running — see state/dir.py.
+                "last_session_ended_at": p.last_session_ended_at,
                 "last_session_runtime": p.last_session_runtime,
             }
             for p in projects

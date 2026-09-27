@@ -167,15 +167,10 @@ def test_every_run_hook_call_site_surfaces_stderr():
 def _realistic_shared_dir(root: Path) -> None:
     """A shared dir as it exists on a REAL install, not a minimal one.
 
-    My first version of `test_a_healthy_session_produces_no_output` created
-    only `.credentials.json`, measured zero bytes, and I committed a claim that
-    surfacing hook stderr could never become noise. A real shared dir also holds
-    `.claude.json` — symlinked there by this very hook — and the broker's
-    refresh lockfile. Against that, the leak canary fired on EVERY start.
-
-    So the "healthy session is silent" property was true of my fixture and false
-    of reality. Third time in two days that an unrealistic fixture produced a
-    confident wrong answer; hence this helper, used by every test below.
+    A shared directory includes credential data, the agent config symlink
+    and the broker refresh lock. Omitting the latter files can make the
+    healthy-session silence check pass while the real hook emits warnings.
+    All tests below use the same representative fixture.
     """
     now = int(time.time() * 1000)
     d = root / "shared-auth" / "agent-claude"

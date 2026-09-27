@@ -7,6 +7,7 @@ read user config or env directly.
 
 from __future__ import annotations
 
+import subprocess
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -32,6 +33,9 @@ class RuntimeHandle:
     id: str
     pid: int | None = None
     extras: dict[str, str] = field(default_factory=dict)
+    # In-memory ownership of the original runtime client. Never serialized into
+    # session records: a PID alone cannot recover an already-reaped exit result.
+    process: subprocess.Popen | None = field(default=None, repr=False, compare=False)
 
 
 class Adapter(Protocol):

@@ -9,6 +9,11 @@
 # The agent container sees ONLY:
 #   - OPENAI_API_KEY=BROKER-SENTINEL.tenant=<id>.nonce=<hex>.NOT-A-REAL-CREDENTIAL
 #   - OPENAI_BASE_URL=http://<host-reachable>:<port>/v1
+#   - $CODEX_HOME/config.toml — a `model_providers` entry pointing codex at that
+#     same endpoint. THIS is what routes codex; OPENAI_BASE_URL does not (codex
+#     ignores it for model calls, on both auth paths — measured against codex
+#     0.153.2 on 2026-09-04). No auth.json is written, so nothing in the cage
+#     holds or tries to refresh a token.
 #
 # Every OpenAI request from the container goes to the broker daemon over a
 # per-session loopback TCP port. The broker STRIPS the container's sentinel
@@ -28,7 +33,14 @@
 #     token host-side (auth.openai.com, rotated refresh token persisted) and
 #     rewrite to the ChatGPT backend chatgpt.com/backend-api/codex with the OAuth
 #     Bearer + chatgpt-account-id. Request body forwarded verbatim (codex sends
-#     the same Responses-API body to both backends). See CAPABILITY-SURFACE §4ap.
+#     a standard Responses-API body to a custom provider — OBSERVED; that
+#     chatgpt.com accepts that same body is ASSUMED and is the one leg of this
+#     path no test can exercise without a real subscription).
+#     See CAPABILITY-SURFACE §4ap.
+#
+# BOTH MODES LOOK IDENTICAL FROM INSIDE: one plain API-key provider, one key.
+# Which upstream the request is forwarded to is decided host-side from the login
+# store. The container is never told, and never needs to know.
 #
 # TRANSPORT: TCP-only. The Codex CLI has no unix-socket support (unlike Claude
 # Code's ANTHROPIC_UNIX_SOCKET), so even under apptainer the broker listens on
@@ -52,10 +64,10 @@ mutually_exclusive_with:
   - agent-codex
   - agent-codex-shared
 description: |
-  NOT WORKING at v0.1.0 — do not enable. Its hooks shipped
-  non-executable so this plugin has never run on any platform, and the
-  first real attempt after that was fixed still failed. Use
-  agent-codex-shared, which is verified on macOS and HPC.
+  Codex account-login broker: credentials stay host-side and the client uses a
+  local broker endpoint. Exact-candidate runtime qualification is incomplete;
+  token renewal, model coverage and HPC transport need further testing.
+  See docs/CAPABILITY-SURFACE.md for the implementation and its limitations.
 
   Credential broker for the Codex agent: keeps your real OpenAI API key on the
   host (in the broker daemon) and hands the container only a provably-fake

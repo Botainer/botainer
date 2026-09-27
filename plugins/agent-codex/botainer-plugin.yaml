@@ -21,7 +21,7 @@ runtimes:
   - docker
   - apptainer
 
-# AUTH-PRODUCT-PLAN.md §1: this plugin is Mode A (isolated) of the
+# internal design note DN-040 §1: this plugin is Mode A (isolated) of the
 # openai family. Other modes are reserved as agent-codex-shared
 # (Mode B, planned for v0.1.x) and agent-codex-proxy (Mode C, planned).
 auth_family: openai

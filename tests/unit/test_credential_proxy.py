@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import socket as _socket
 import subprocess
 import sys
@@ -692,8 +693,27 @@ def test_proxy_watchdog_shuts_down_when_launcher_pid_disappears(tmp_path: Path) 
 
 
 def test_stop_proxy_hook_kills_recorded_pid(tmp_path: Path) -> None:
-    """post_session reads runtime_handle.proxy.pid and sends SIGTERM."""
-    # Spawn a long-lived process we can SIGTERM.
+    """post_session reads runtime_handle.proxy.pid and sends SIGTERM.
+
+    #205 — THIS TEST WAS LOAD-FLAKY AND BLOCKED A COMMIT. It passed 3/3 alone
+    and failed when a second pytest run was going. The cause was not the
+    behaviour: the timeouts below exist to stop a HANG from wedging the suite,
+    and at 10s/5s they had quietly become assertions about SPEED. Spawning a
+    Python process that imports botainer, on a loaded box, can exceed ten
+    seconds; `subprocess.run` then raises TimeoutExpired and the test errors
+    while the code under test is fine.
+
+    So the guards are generous now, and the ASSERTIONS got stricter rather than
+    looser — the fix for a flaky test must not be to ask it less:
+
+      was: `sleeper.returncode != 0`   — passes if ANYTHING killed it
+      now: `== -signal.SIGTERM`        — the hook sent SIGTERM, specifically
+
+    A timeout that fires is now reported as "the hook did not finish", which is
+    a real failure worth seeing, not an opaque TimeoutExpired traceback.
+    """
+    # A long-lived process we can SIGTERM. Killed in the `finally` regardless of
+    # outcome — the old version leaked a `sleep 60` on every failure.
     sleeper = subprocess.Popen(["sleep", "60"])
     session_dir = tmp_path / "sessions" / "ses12345abc"
     session_dir.mkdir(parents=True)
@@ -723,17 +743,34 @@ def test_stop_proxy_hook_kills_recorded_pid(tmp_path: Path) -> None:
         Path(__file__).resolve().parents[2]
         / "plugins" / "agent-claude-proxy" / "hooks" / "stop_proxy.py"
     )
-    proc = subprocess.run(
-        [sys.executable, str(hook)],
-        env={
-            **os.environ,
-            "BOTAINER_SESSION_RECORD_PATH": str(record_path),
-        },
-        capture_output=True,
-        text=True,
-        timeout=10,
-    )
-    assert proc.returncode == 0
-    # The sleeper should have been signaled by now.
-    sleeper.wait(timeout=5)
-    assert sleeper.returncode != 0  # SIGTERM exit
+    try:
+        try:
+            proc = subprocess.run(
+                [sys.executable, str(hook)],
+                env={
+                    **os.environ,
+                    "BOTAINER_SESSION_RECORD_PATH": str(record_path),
+                },
+                capture_output=True,
+                text=True,
+                # HANG GUARD, not a speed assertion. See the docstring.
+                timeout=120,
+            )
+        except subprocess.TimeoutExpired:
+            raise AssertionError(
+                "stop_proxy.py did not finish within 120s — that is a hang, "
+                "not slowness") from None
+        assert proc.returncode == 0, proc.stderr
+        try:
+            sleeper.wait(timeout=60)      # hang guard, not a speed assertion
+        except subprocess.TimeoutExpired:
+            raise AssertionError(
+                f"the hook exited 0 but pid {sleeper.pid} is still alive after "
+                f"60s — it did not signal the recorded pid") from None
+        assert sleeper.returncode == -signal.SIGTERM, (
+            f"expected SIGTERM (-{int(signal.SIGTERM)}), got "
+            f"{sleeper.returncode} — something killed it, but not this hook")
+    finally:
+        if sleeper.poll() is None:
+            sleeper.kill()
+            sleeper.wait(timeout=10)

@@ -204,8 +204,8 @@ class BotainerCredentialBroker:
     # (``sk-ant-oat…``) is only accepted when accompanied by this beta flag.
     # Claude Code, when it thinks it is talking to a custom endpoint via
     # ANTHROPIC_AUTH_TOKEN, may NOT send it — so the broker guarantees it. See
-    # the broker prototype HANDOFF.md ("requires Authorization: Bearer <token>
-    # PLUS anthropic-beta: oauth-2025-04-20"). The daemon MERGES this into any
+    # the broker prototype's own notes: it requires Authorization: Bearer
+    # <token> PLUS anthropic-beta: oauth-2025-04-20. The daemon MERGES it into any
     # anthropic-beta the client already sent (it never overwrites feature flags).
     OAUTH_BETA = "oauth-2025-04-20"
 

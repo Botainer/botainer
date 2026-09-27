@@ -65,9 +65,15 @@ proxy does not start at all; neither is usable. `botainer auth login`.
 | mode | where the credential lives | concurrent sessions |
 |---|---|---|
 | **broker** | on the **host**. The container never holds it; a host-side process answers on its behalf. | yes — several at once |
-| **shared** | one host-wide login, copied into each project. The container can read **and overwrite** it. | **one at a time** — see below |
+| **shared** | one host-wide login, **linked** into each project — the per-project file is a symlink to the one shared file, so the container can read **and overwrite** what every shared project uses. | **one at a time** — see below |
 | **isolated** | a separate login per project, in that project's state dir. Container can read and overwrite it. | yes, but you log in per project |
 | **proxy** | ⚠ **NOT FUNCTIONAL at v0.1.0**, and refused outright on the sbatch path. | — |
+
+Those shared-mode symlinks point at the path the credential has *inside* the
+container, so on a login node `ls -L` reports them as broken. That is by
+design — the directory ships a `README.shared-mode.txt` saying so. Do not
+"repair" them; the next launch relinks them anyway. The same one file backs
+every auth profile, so `--auth-profile` does not partition a shared login.
 
 **On a cluster, `shared` is the one that bites.** The token rotates when it
 refreshes, so a second live shared-mode session invalidates the first one's
@@ -188,6 +194,9 @@ Notes:
 
 ```bash
 botainer image list    # see what's built
+botainer image list --verify   # …and hash each .sif against the recorded digest.
+                               #   Worth doing after copying a .sif between hosts:
+                               #   plain `list` does NOT compare anything.
 ```
 
 **Next:** §5 — init your project.
@@ -204,7 +213,7 @@ cd /scratch/$USER/my-project    # or wherever your project lives
 botainer init --agent claude
 ```
 
-The init prints a banner with the auth mode (default: shared) and
+The init prints a banner with the auth mode (default: isolated) and
 "Next:" commands. **Read it.**
 
 Edit `.botainer/config.yaml` to tune for your project. Minimum viable
@@ -215,10 +224,10 @@ agent: claude
 profile: default
 runtime: apptainer
 
-resources:
-  cpu: 4
-  memory_mb: 16384
-  time_minutes: 240
+# NOTE: no top-level `resources:` block here, deliberately. `resources.cpu` and
+# `resources.memory_mb` are docker-only, and setting either REFUSES an
+# apptainer launch. Size the cluster job under `plugins.hpc-launcher` below —
+# that is what the sbatch request is built from.
 
 plugins_enabled:
   - agent-claude-shared        # or agent-claude if isolated mode
@@ -364,10 +373,13 @@ agent to do something without re-prompting from the start.
 host — no docker exec, no in-container state.
 
 **On HPC:** the agent is on a compute node; you're on the login node.
-The sbatch script that `botainer hpc submit` writes wraps
-`apptainer exec ...` in `screen -dmS botainer-${SLURM_JOB_ID}` on
-the compute node, then polls `screen -ls` to keep the Slurm step
-alive while the agent runs. For nudge to work cross-node:
+The sbatch script that `botainer hpc submit` writes runs
+`apptainer exec ...` inside a screen session named
+`botainer-${SLURM_JOB_ID}` on the compute node, using screen's
+nonforking mode (`exec screen -D -m -S ...`). The batch process IS
+that session, so the Slurm step lives exactly as long as the agent
+does — no separate wait loop, and no window between starting the
+session and noticing it exists. For nudge to work cross-node:
 
 ```bash
 # From login node (after `botainer hpc submit`):

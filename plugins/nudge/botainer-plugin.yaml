@@ -3,7 +3,7 @@
 # poking the agent after a rate limit clears, or scheduling reminders
 # via at(1).
 #
-# Per FEATURE-PARTITION-LOCKED.md §A19: this plugin uses a HOST-side
+# Per internal design note DN-041 §A19: this plugin uses a HOST-side
 # `screen` session that wraps the docker/apptainer runtime call. The
 # screen session lives OUTSIDE the container; nudges are delivered via
 # `screen -S botainer-<sid> -X stuff "<text>\n"` from any shell on
@@ -70,7 +70,7 @@ contributes:
     ⚠ nudge: host-side screen session (`screen -X stuff`); anyone with
       shell access to this host can inject input into the agent's prompt.
 
-  # Per FEATURE-PARTITION-LOCKED.md §A19: no entrypoint_wrap.
+  # Per internal design note DN-041 §A19: no entrypoint_wrap.
   # The host-side `screen -dmS botainer-<sid>` wrap is added by the
   # launcher (botainer/core/composition.py launch() path) when the
   # nudge plugin is enabled — NOT as a plugin contribution. Reason:
@@ -81,7 +81,7 @@ contributes:
   # No mount_target_prefixes: nudge needs nothing inside the container.
 
 hooks: []
-  # Per FEATURE-PARTITION-LOCKED.md §A19: the prior pre_session /
+  # Per internal design note DN-041 §A19: the prior pre_session /
   # post_session hooks (prepare_socket.py / cleanup_socket.py) were
   # for the retired in-container tmux socket design. Host-side screen
   # is created by the launcher in composition.launch() and torn down

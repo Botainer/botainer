@@ -20,11 +20,13 @@ import shutil
 import sys
 import uuid as _uuid
 from pathlib import Path
+from typing import Callable, NamedTuple
 
 from botainer.adapters.apptainer import ApptainerAdapter
 from botainer.adapters.base import Adapter, RuntimeHandle
 from botainer.adapters.docker import DockerAdapter
 from botainer.adapters.mock import MockAdapter
+from botainer.core import agent_permissions
 from botainer.core import config as config_module
 from botainer.core import identity
 from botainer.core import policy as policy_module
@@ -90,6 +92,21 @@ def sort_entrypoint_wraps(
 _REAL_RUNTIMES = frozenset({"docker", "apptainer"})
 
 
+def _agent_family(name: str) -> str | None:
+    """Which vendor's CLI is behind this plugin name.
+
+    Module level, not nested in `compose_session`, because two things now need
+    it and they sit ~200 lines apart: the permission gate (which mode does this
+    agent understand) and the argv append (which flags does that mode mean).
+    A nested copy in the second would drift from the first.
+    """
+    if name.startswith("agent-claude"):
+        return "anthropic"
+    if name.startswith("agent-codex"):
+        return "openai"
+    return None
+
+
 def compose_session(
     project_root: Path,
     *,
@@ -100,10 +117,11 @@ def compose_session(
     auth_profile_override: str | None = None,
     agent_override: str | None = None,
     image_override: str | None = None,
+    reset_null_anchor: bool = False,
 ) -> SessionSpec:
     """Build a SessionSpec for `botainer start`/`inspect`/`dry-run`.
 
-    auth_mode_override: per AUTH-PRODUCT-PLAN.md, one-shot in-memory
+    auth_mode_override: per internal design note DN-040, one-shot in-memory
     swap of which auth-family plugin variant is enabled for THIS
     composition. None = use whatever the config says. Otherwise:
     isolated/shared/proxy — we substitute the matching plugin in each
@@ -136,13 +154,11 @@ def compose_session(
     site_policy = policy_module.load_site_policy()
     effective_policy = policy_module.intersect(site_policy, user_policy)
 
-    # Apply in-memory auth-mode override (insecure-defaults H3).
-    # Agent first: it decides WHICH family is in play, and the auth-mode swap
-    # below operates on whatever ends up enabled.
-    if agent_override is not None:
-        cfg = _apply_agent_override_in_memory(cfg, agent_override)
-    if auth_mode_override is not None:
-        cfg = _apply_auth_mode_override_in_memory(cfg, auth_mode_override)
+    # WHICH PLUGINS THIS SESSION ACTIVATES — one function, so a second caller
+    # cannot derive a different answer (see `apply_plugin_overrides`).
+    cfg = apply_plugin_overrides(
+        cfg, agent_override=agent_override,
+        auth_mode_override=auth_mode_override)
     if auth_profile_override is not None:
         # Same discipline as the auth-mode override: IN MEMORY ONLY. Writing it
         # to disk and restoring at exit cannot survive SIGKILL/OOM, and would
@@ -150,10 +166,6 @@ def compose_session(
         from botainer.core.spec import validate_profile_name
         cfg = cfg.model_copy(
             update={"profile": validate_profile_name(auth_profile_override)})
-
-    # Exactly one agent plugin is activated, whatever plugins_enabled lists.
-    # Runs AFTER both overrides so it filters against the final agent choice.
-    cfg = _activate_only_the_selected_agent(cfg)
 
     # 3. Runtime choice.
     runtime = _resolve_runtime(cfg.runtime, runtime_choice)
@@ -198,8 +210,20 @@ def compose_session(
     # also NEUTRALIZES the original threat model (an attacker-dropped file is
     # deleted before launch instead of merely alarmed about). Fail closed only if
     # the reset itself fails.
+    #
+    # ...BUT ONLY WHEN SOMETHING IS ACTUALLY GOING TO LAUNCH. `compose_session`
+    # is the shared front end for `start` AND for `inspect`, `dry-run`, `access`
+    # and `selftest`. Resetting here meant a PREVIEW command recursively deleted
+    # host state — `botainer inspect`, whose entire promise is to show you what
+    # would happen without doing it, rm -rf'd everything under
+    # data/<uuid>/null-bind-anchor/. (#227)
+    #
+    # The default is FALSE, deliberately: a caller that forgets gets the
+    # non-mutating behaviour, and a launch that forgets fails loudly at the
+    # refusal below rather than silently deleting. The unsafe direction requires
+    # someone to type the argument.
     try:
-        leftover = list(null_anchor.iterdir())
+        leftover = list(null_anchor.iterdir()) if reset_null_anchor else []
     except OSError:
         leftover = []
     for _p in leftover:
@@ -209,10 +233,22 @@ def compose_session(
             else:
                 _p.unlink()
         except OSError as exc:
+            # DO NOT GUESS WHY. This used to assert "leftover from a prior
+            # session" as a FACT and then hand the user an internal path, which
+            # reads as "delete this". The commonest cause is the opposite of a
+            # leftover: a session for this project is RUNNING RIGHT NOW and its
+            # container has this directory bound, so the host cannot remove it.
+            # Reported 2026-09-04 — the user was about to `sudo rm -rf` state a
+            # live session owned, on botainer's own say-so.
+            #
+            # We can just look. The launcher already records every session and
+            # `state.liveness` already answers "is it alive"; nothing consulted
+            # them here. Only on the failure path, so the happy path pays
+            # nothing.
             raise Refused(
                 RefusalCategory.MOUNT_PATH_NULL_BIND_VIOLATED,
-                f"could not reset botainer's internal masking dir at {null_anchor} "
-                f"(leftover from a prior session): {exc}",
+                _null_anchor_refusal(null_anchor, proj_paths.sessions_dir,
+                                     session_id, exc),
             ) from None
     if leftover:
         sys.stderr.write(
@@ -268,7 +304,7 @@ def compose_session(
     # NOTE the failure mode this replaces. Every source used to be checked
     # against the state root, so the first component to move made the guard
     # refuse a perfectly legitimate bind — the dispatcher failed EVERY cycle
-    # with [mount-source-denied] on the maintainer's cluster (d734529). Adding
+    # with [mount-source-denied] on a production cluster (d734529). Adding
     # a component here without its root does that again, silently, at launch.
     def _own_root(root):
         return root.resolve() if root is not None else _state_root_resolved
@@ -464,54 +500,17 @@ def compose_session(
                 f"or `botainer plugin add <path>` for third-party.\n"
             )
 
-    # AUTH-PRODUCT-PLAN.md §1: enforce single-mode-per-family.
-    # Sharp-edges F8: use auth_family as primary check (more robust
-    # than mutually_exclusive_with which depends on plugin authors
-    # to declare reciprocally). If a manifest fails to load, REFUSE
-    # rather than skip (was silent-skip; an attacker could ship a
-    # malformed manifest to bypass the exclusion).
-    from botainer.plugins.manifest import load_manifest
-    family_to_enabled: dict[str, list[str]] = {}
-    for inst in list_installed():
-        if inst.name not in enabled:
-            continue
-        try:
-            man = load_manifest(inst.plugin_dir)
-        except Refused as exc:
-            raise Refused(
-                RefusalCategory.PLUGIN_MANIFEST_INVALID,
-                f"enabled plugin {inst.name!r} has invalid manifest: {exc}. "
-                f"Cannot proceed without manifest to check exclusion rules.",
-            ) from exc
-        if man.auth_family:
-            family_to_enabled.setdefault(man.auth_family, []).append(inst.name)
-        # Also honor mutually_exclusive_with (catches non-auth-family
-        # exclusions or third-party-declared conflicts).
-        for sibling in man.mutually_exclusive_with:
-            if sibling in enabled and sibling != inst.name:
-                # Determine the right hint: if both have an auth_family,
-                # hint at `auth use`; otherwise generic plugin disable.
-                hint = (
-                    "Pick one with `botainer auth use <mode>`"
-                    if man.auth_family
-                    else "Disable one with `botainer plugin disable <name>`"
-                )
-                raise Refused(
-                    RefusalCategory.PLUGIN_HOOK_FAILED,
-                    f"plugins {inst.name!r} and {sibling!r} are mutually "
-                    f"exclusive. {hint}.",
-                )
-    # Refuse if any family has >1 enabled member (catches author-
-    # oversight cases where mutually_exclusive_with isn't symmetric).
-    for fam, plugins in family_to_enabled.items():
-        if len(plugins) > 1:
-            raise Refused(
-                RefusalCategory.PLUGIN_HOOK_FAILED,
-                f"{len(plugins)} plugins enabled in auth_family={fam!r}: "
-                f"{sorted(plugins)}. Exactly one per family allowed. "
-                f"Use `botainer auth use <isolated|shared|proxy> "
-                f"--family {fam}` to pick.",
-            )
+    # internal design note DN-040 §1: enforce single-mode-per-family.
+    #
+    # MOVED to botainer/plugins/selection.py, unchanged, so that `plugin
+    # enable` and `config check` can run the SAME check instead of letting the
+    # user discover the conflict at launch. Behaviour here is identical: the
+    # same manifests, the same refusal text, the same fail-closed on an
+    # unloadable manifest (sharp-edges F8). Copying it would have been the
+    # #218 defect — a second implementation that agrees on day one and drifts
+    # after — so there is exactly one, with three callers.
+    from botainer.plugins.selection import check_family_exclusion
+    check_family_exclusion(enabled)
     plugin_hooks: list[HookSpec] = []
     contributed_capabilities: list[CapabilityGrant] = []
     sidecars: list[SidecarSpec] = []
@@ -644,8 +643,32 @@ def compose_session(
         for prefix in man.contributes.mount_target_prefixes:
             if prefix.startswith("/workspace/.botainer/"):
                 target = prefix.rstrip("/")
+                # #221: bind a DEDICATED SUBDIRECTORY, never the plugin data dir
+                # itself. `history_dir_for` roots every auth mode of a family at
+                # data/<bare-agent>/{profiles,broker-state}/<profile>/ — and for
+                # the ISOLATED plugin, whose name IS the bare agent name, that
+                # made data/agent-claude/ both "this plugin's settings dir" and
+                # "this family's whole credential store". Binding it exposed
+                # EVERY profile's .credentials.json to a session that had
+                # selected one, defeating the point of separate auth profiles;
+                # refresh tokens last months (EF-1), so it is a durable
+                # credential for another account.
+                #
+                # STRUCTURAL: `plugin-settings/` is a SIBLING of `profiles/` and
+                # `broker-state/`, so it can never be their ancestor — for any
+                # plugin, present or future. The two escapes today
+                # (agent-claude-shared has a differently-named data dir,
+                # agent-codex declares no prefix) were accidents of naming, not
+                # decisions, so a fix aimed at the one plugin that tripped would
+                # leave the trap armed.
+                #
+                # Additive: no credential moves, nothing migrates. Nothing reads
+                # this bind in-container today (plugin_data_dir is referenced in
+                # exactly one place — here), so narrowing it costs nothing.
+                plugin_settings = plugin_data / "plugin-settings"
+                plugin_settings.mkdir(parents=True, exist_ok=True)
                 bind = Bind(
-                    source=str(plugin_data),
+                    source=str(plugin_settings),
                     target=target,
                     mode=BindMode.RO,
                     provenance=Provenance.PLUGIN,
@@ -731,7 +754,21 @@ def compose_session(
         # host-side screen wrap, no in-tree plugin currently uses
         # template placeholders in its entrypoint_wrap.command.
         # Each command is taken as-is and stored as an immutable tuple.
-        if man.contributes.entrypoint_wrap is not None:
+        # CREDENTIALS-ONLY PLUGINS CONTRIBUTE NO ENTRYPOINT. (#230) A family
+        # named in `inject_credentials` that is NOT the session's agent is here
+        # for its credential binds and env; running its wrap would put a second
+        # agent in the exec chain, which #111 refuses and which the user did not
+        # ask for. Everything else the plugin contributes still applies — that
+        # is the point of injecting it.
+        _fam = getattr(man, "auth_family", "")
+        _is_selected = inst.name == f"agent-{cfg.agent}" or inst.name.startswith(
+            f"agent-{cfg.agent}-")
+        _injected = {str(f).strip().removeprefix("agent-")
+                     for f in (getattr(cfg, "inject_credentials", None) or [])}
+        _creds_only = bool(_fam) and not _is_selected and any(
+            inst.name == f"agent-{f}" or inst.name.startswith(f"agent-{f}-")
+            for f in _injected)
+        if man.contributes.entrypoint_wrap is not None and not _creds_only:
             entrypoint_wraps_by_plugin[inst.name] = (
                 man.contributes.entrypoint_wrap.layer,
                 tuple(man.contributes.entrypoint_wrap.command),
@@ -875,15 +912,34 @@ def compose_session(
     port_forwards = _resolve_port_forwards(cfg, enabled, runtime)
 
     # 8. Resources.
+    _refuse_or_warn_on_gpu_request(cfg.resources.gpus, runtime)
     resources = ResourceSpec(
         cpu=cfg.resources.cpu,
         memory_mb=cfg.resources.memory_mb,
+        # #177: gpus DOES reach the adapters. Slurm allocating the device
+        # (`--gres`) and the container being able to see it (`--nv` /
+        # `--gpus`) are two separate things, and only the first was
+        # happening. See ResourceSpec's docstring for why #175's removal was
+        # right for the other scheduler fields and wrong for this one.
+        gpus=cfg.resources.gpus,
     )
-    # #175: HPC scheduling fields (time_minutes, gpus, gpu_type,
-    # partition, account) live on cfg.resources and are consumed by
-    # plugins/hpc-launcher/host_helper/submit.py at sbatch time —
-    # NOT via the SessionSpec. They were on ResourceSpec too but no
-    # adapter read them.
+    # #175 removed the PURE HPC scheduling fields (time_minutes, gpu_type,
+    # partition, account) from ResourceSpec because no adapter read them.
+    # That was right. `gpus` is deliberately NOT in that list any more (#177).
+    #
+    # THE REST OF WHAT THIS COMMENT USED TO SAY WAS FALSE (#232). It claimed
+    # those fields "are consumed by plugins/hpc-launcher/host_helper/submit.py
+    # at sbatch time". They are not consumed by anything, anywhere:
+    # `load_plugin_config` reads `plugins["hpc-launcher"]` and no host_helper
+    # file reads a top-level `resources` key. Observed on a rendered sbatch
+    # script — `resources.time_minutes: 999` produced the PLUGIN's --time, with
+    # no warning, and `config check` reported no issues.
+    #
+    # So `cfg.resources.{time_minutes,partition,account,gpu_type}` are
+    # accepted, validated, displayed and silently ignored. Only cpu/memory_mb
+    # are loud about it, and only because the apptainer adapter refuses. The
+    # wider dead-field class is tracked separately; this comment no longer
+    # asserts a consumer that does not exist.
 
     # 8b. Agent permission posture (#53 / T0-2). Resolve the project config
     # against the site-policy ceiling, fail-closed. Ordering (most → least
@@ -892,21 +948,126 @@ def compose_session(
     # (same shape as the network.mode ceiling above). cfg.agent_permissions is
     # already enum-validated at parse (config.py), and the ceiling at policy
     # parse; this is the cross-level intersection.
-    _PERM_RANK = {"prompt": 0, "bypass": 1}
-    _req_perm = cfg.agent_permissions
+    # THE FAMILY IS RESOLVED FIRST, because every question below is per-agent.
+    # Derived from the PRIMARY agent (`cfg.agent`), never by scanning `enabled`:
+    # `enabled` is a set, so a scan returns whichever agent plugin the hash
+    # order happened to put first. With one agent plugin that is harmless; with
+    # two it is a coin flip, and an audit probe measured exactly that
+    # (PYTHONHASHSEED 1-3,9,11,12 -> openai; 4-8,10 -> anthropic). The primary
+    # would randomly get the OTHER family's permission flags.
+    #
+    # _activate_only_the_selected_agent (#120) currently guarantees one agent
+    # plugin, so that is masked today rather than live — which is exactly why it
+    # is worth getting right now. Companions (#172) deliberately re-open that
+    # door, and a hash-order-dependent flag choice waiting behind it is a trap.
+    _fam = _agent_family(f"agent-{cfg.agent}") if cfg.agent else None
+    if _fam is None:
+        # No `agent:` set, or an agent this function does not know. Fall back to
+        # the scan so behaviour is unchanged for those cases — but sort first,
+        # so the fallback is at least deterministic.
+        _fam = next((f for n in sorted(enabled) if (f := _agent_family(n))), None)
+
+    # FOLDED FOR LOOKUPS ONLY. `prompt` is the legacy spelling of `default`, so
+    # every table lookup below must treat them as one. But `resolved_permissions`
+    # — and therefore `spec.agent_permissions` and the container's
+    # `BOTAINER_AGENT_PERMISSIONS` — keeps the USER'S OWN WORD. Folding it there
+    # would silently change a value that CAPABILITY-SURFACE §2 documents and
+    # that something in a container may already be reading, to buy nothing: the
+    # lookups are folded, so nothing downstream needs the canonical form.
+    _req_perm = agent_permissions.canonical(cfg.agent_permissions)
     _perm_ceiling = effective_policy.agent.max_permissions
-    if _PERM_RANK.get(_req_perm, 99) > _PERM_RANK.get(_perm_ceiling, -1):
+
+    # (a) Does the SELECTED agent have to refuse this mode outright? A mode the
+    #     agent HAS, that cannot work in a container, is refused with the
+    #     measurement as the reason rather than accepted-and-broken. Accepting
+    #     it would produce an agent that starts, warns once, and then fails
+    #     every command — which reads as "working" to everyone including the
+    #     user. See `agent_permissions.REFUSED`.
+    if (_why := agent_permissions.refusal_for(_fam, _req_perm)) is not None:
+        raise Refused(
+            RefusalCategory.CONFIG_INVALID,
+            f"agent_permissions={_req_perm!r} cannot be used here. {_why}",
+        )
+
+    # (b) Is it a word this agent knows at all? Parse-time validation accepted
+    #     the UNION of every agent's vocabulary because `agent:` was not settled
+    #     then (and `--agent` can still override it). Here it is settled, so a
+    #     cross-agent mistake — `acceptEdits` under codex — is caught and the
+    #     refusal names what THIS agent accepts.
+    #
+    #     REFUSE, do not no-op. The old code appended flags only for a known
+    #     family and silently appended nothing otherwise, so a deliberate
+    #     posture request could vanish without a word. That is the #128 defect
+    #     class, and the MCP-delivery check twenty lines below already refuses
+    #     for the same reason.
+    _known = agent_permissions.modes_for(_fam)
+    if _req_perm not in _known:
+        if not _known:
+            # An agent family with no table. `bypass`/`default` still carry a
+            # meaning we can honour by appending nothing; a specific mode name
+            # does not, because we would have to invent its flag.
+            if not agent_permissions.is_botainer_word(_req_perm):
+                raise Refused(
+                    RefusalCategory.CONFIG_INVALID,
+                    f"agent_permissions={_req_perm!r} names a mode of some "
+                    f"agent, but botainer has no permission table for agent "
+                    f"{cfg.agent!r}, so it cannot know which flag that is. Use "
+                    f"`bypass` or `default`, which mean the same thing for "
+                    f"every agent, or add a table for this agent family.",
+                )
+        else:
+            _legal = sorted(_known)
+            _also = sorted(agent_permissions.REFUSED.get(_fam or "", {}))
+            _tail = (f" ({', '.join(_also)} is a real {cfg.agent} mode that "
+                     f"botainer refuses — try it to see why.)" if _also else "")
+            raise Refused(
+                RefusalCategory.CONFIG_INVALID,
+                f"agent_permissions={_req_perm!r} is not something {cfg.agent} "
+                f"understands. This project selects agent {cfg.agent!r}, whose "
+                f"permission values are: {', '.join(_legal)}.{_tail} "
+                f"`bypass` and `default` mean the same thing for every agent; "
+                f"the rest are {cfg.agent}'s own mode names.",
+            )
+
+    # (c) The site-policy ceiling. This ranks TIERS, not modes — the modes do
+    #     not sort onto one line and pretending they do is how the old
+    #     `_PERM_RANK.get(v, 99)` came to refuse every new value. See
+    #     `agent_permissions.TIER_*` for the criterion (did botainer switch the
+    #     agent's own permission system off, or is it still on).
+    _req_tier = agent_permissions.tier_of(_fam, _req_perm)
+    if _req_tier is None:
+        # Only reachable for a family with no table, requesting a botainer
+        # word. Those never exceed any ceiling, because nothing is appended.
+        _req_tier = agent_permissions.TIER_AGENT_DECIDES
+    _ceiling_tier = agent_permissions.CAP_VALUES.get(_perm_ceiling)
+    if _ceiling_tier is None:
+        raise Refused(
+            RefusalCategory.POLICY_INVALID,
+            f"agent.max_permissions={_perm_ceiling!r} in the effective policy "
+            f"is not a ceiling botainer knows. Valid ceilings are: "
+            f"{', '.join(sorted(agent_permissions.CAP_VALUES))}. Run "
+            f"`botainer policy show` to see where this came from.",
+        )
+    if _req_tier > _ceiling_tier:
+        # Name a LEGAL VALUE FOR THIS AGENT, not the ceiling's tier name. The
+        # old message said "set agent_permissions to {ceiling}" — which was
+        # fine while the ceiling was also a mode, and becomes a command that
+        # does not work the moment the two vocabularies separate.
+        _under = sorted(
+            m for m in _known
+            if (agent_permissions.tier_of(_fam, m) or 0) <= _ceiling_tier
+        ) or ["default"]
         raise Refused(
             RefusalCategory.CAPABILITY_DENIED_BY_POLICY,
-            f"agent_permissions={_req_perm!r} is denied: the effective policy "
-            f"caps agent.max_permissions at {_perm_ceiling!r}. A caged agent may "
-            f"run at or below the ceiling only. Set the project's "
-            f"agent_permissions to {_perm_ceiling!r}, or ask the cluster admin "
-            f"to raise agent.max_permissions in the root-owned "
-            f"/etc/botainer/policy.yaml. Run `botainer policy show` to see the "
-            f"ceiling + its source.",
+            f"agent_permissions={_req_perm!r} is denied: it switches "
+            f"{cfg.agent}'s own permission system off, and the effective policy "
+            f"caps agent.max_permissions at {_perm_ceiling!r} — meaning the "
+            f"agent's permission system must stay on. Values that are allowed "
+            f"here: {', '.join(_under)}. Or ask the cluster admin to raise "
+            f"agent.max_permissions in the root-owned /etc/botainer/policy.yaml. "
+            f"Run `botainer policy show` to see the ceiling + its source.",
         )
-    resolved_permissions = _req_perm
+    resolved_permissions = cfg.agent_permissions
 
     # 9. Env values — denylist check + credential-leak check.
     # The config `env:` is UNTRUSTED (git-shareable). It must be gated by the SAME
@@ -998,47 +1159,25 @@ def compose_session(
     # forwards "$@"), so no `.sif`/docker rebuild is needed to change the posture.
     # It is NOT a plugin `command_append` (which stays refused, #290): trusted
     # compose code selects from a FIXED first-party flag set by the agent family;
-    # a plugin cannot inject arbitrary agent flags. `prompt` appends nothing.
+    # a plugin cannot inject arbitrary agent flags. `default` appends nothing
+    # for claude, and for codex appends only the sandbox pin (its own sandbox
+    # cannot start in a container — see `botainer.core.agent_permissions`).
     # See CAPABILITY-SURFACE §4ab.
-    _AGENT_BYPASS_FLAGS: dict[str, tuple[str, ...]] = {
-        "anthropic": ("--dangerously-skip-permissions",),
-        "openai": ("--sandbox", "danger-full-access",
-                   "--ask-for-approval", "never"),
-    }
-
-    def _agent_family(name: str) -> str | None:
-        if name.startswith("agent-claude"):
-            return "anthropic"
-        if name.startswith("agent-codex"):
-            return "openai"
-        return None
+    #
+    # THE TABLE MOVED OUT of this function. `_AGENT_BYPASS_FLAGS` used to live
+    # here, keyed on family, holding only the bypass argv — and three other
+    # modules carried their own copy of the same two-word vocabulary, which
+    # drifted. There is now one table, in `agent_permissions`, read by compose,
+    # the policy cap, the launch banner and `config show`.
 
     # Flags appended to the INNERMOST wrap (the one that execs the agent CLI):
     # the in-cage permission posture (#53) + the governed MCP config (6b above).
     # Trusted compose selects both from FIXED sets; NOT a plugin command_append.
+    # `_fam` was resolved at the permission gate above, on the same rule.
     _append_flags: tuple[str, ...] = ()
-    # Derived from the PRIMARY agent (`cfg.agent`), never by scanning `enabled`.
-    # `enabled` is a set (see effective_enabled above), so a scan returns
-    # whichever agent plugin the hash order happened to put first. With one
-    # agent plugin that is harmless; with two it is a coin flip, and an audit
-    # probe measured exactly that: PYTHONHASHSEED 1-3,9,11,12 -> openai;
-    # 4-8,10 -> anthropic. The primary would randomly get the OTHER family's
-    # permission flags and the governed MCP config would randomly vanish.
-    #
-    # _activate_only_the_selected_agent (#120) currently guarantees one agent
-    # plugin, so this is masked today rather than live — which is exactly why
-    # it is worth fixing now. Companions deliberately re-open that door; a
-    # hash-order-dependent flag choice waiting behind it is a trap.
-    _fam = _agent_family(f"agent-{cfg.agent}") if cfg.agent else None
-    if _fam is None:
-        # No `agent:` set, or an agent this function does not know. Fall back to
-        # the scan so behaviour is unchanged for those cases — but sort first,
-        # so the fallback is at least deterministic.
-        _fam = next((f for n in sorted(enabled) if (f := _agent_family(n))), None)
-    if resolved_permissions == "bypass":
-        _bypass = _AGENT_BYPASS_FLAGS.get(_fam) if _fam else None
-        if _bypass:
-            _append_flags += _bypass
+    _perm_argv = agent_permissions.argv_for(_fam, resolved_permissions)
+    if _perm_argv:
+        _append_flags += _perm_argv
     # MCP delivery is PER AGENT FAMILY, and only one family has it. Claude Code
     # takes `--mcp-config <path> --strict-mcp-config`; codex reads
     # `[mcp_servers.*]` out of CODEX_HOME/config.toml and would ignore the file
@@ -1141,7 +1280,7 @@ def render_argv(spec: SessionSpec) -> list[str]:
 # PYTHONPATH/PERL5LIB/R_LIBS*/JULIA_* the hook self-allows) still FLOW through
 # the env_file today — they are path-discovery, not direct code-load, and
 # refusing them would break real modules. The curated path-var allowlist +
-# per-plugin cap gate that bounds them is #160 (DESIGN-160-module-binds.md).
+# per-plugin cap gate that bounds them is #160 (internal design note DN-002).
 # What is closed here is the force-code-load / command-override class below.
 _HOST_ENVFILE_EXEC_INJECTION = frozenset({
     # Dynamic-linker preload / audit / write-primitives (Linux).
@@ -1441,6 +1580,45 @@ def _validate_host_env_file(
     )
 
 
+def software_root_ceiling(effective_policy) -> tuple[list[str], str]:
+    """(prefixes, where-they-came-from) for the software-root bind ceiling.
+
+    EXTRACTED SO IT CAN BE TESTED THROUGH THE REAL CODE. Inline, the only way
+    to test the precedence was to restate the expression in a test — which
+    would have passed while the shipped logic said something else. The rule
+    below is the whole point of this function, so it must be the thing under
+    test.
+
+    PRECEDENCE IS ONE-WAY:
+
+      site policy sets a ceiling   -> that ceiling, always. The profile cannot
+                                      widen it. A site that has restricted this
+                                      has restricted it, and a cluster profile
+                                      (which ships with botainer, or is
+                                      user-editable) must not reopen what an
+                                      administrator closed.
+      site policy sets none        -> the cluster profile's software_roots, if
+                                      it declares any. This is #156: without it
+                                      a user with no sympathetic admin gets
+                                      nothing bound and no way to change that.
+      neither                      -> empty. The feature stays OFF, which is
+                                      the fail-closed default.
+
+    Never raises: no active profile is the normal case on a laptop.
+    """
+    ceiling = list(effective_policy.mounts.cluster_software_roots)
+    if ceiling:
+        return ceiling, "site policy"
+    try:
+        from botainer.state import cluster_profile as _cp
+        prof = _cp.active_profile()
+        if prof is not None and prof.software_roots:
+            return list(prof.software_roots), "cluster profile"
+    except Exception:            # noqa: BLE001 — a missing profile is normal
+        pass
+    return [], "site policy"
+
+
 def _software_root_binds_from_contribution(
     contribution: dict,
     *,
@@ -1537,8 +1715,19 @@ def _software_root_binds_from_contribution(
             f"mounts.cluster_software_roots ceiling).",
         )
 
-    # (2)+(3) derive under the SitePolicy ceiling. Empty ceiling → [] (OFF).
-    ceiling = list(effective_policy.mounts.cluster_software_roots)
+    # (2)+(3) derive under the ceiling.
+    #
+    # THE CEILING MAY COME FROM THE CLUSTER PROFILE (#156). It used to come
+    # only from the root-owned SitePolicy, which meant a user without a
+    # sympathetic site administrator got NOTHING bound and no way to change
+    # that — "hpc-modules has no answer for 'I have no admin'". The profile is
+    # a curated artefact the user already selected and which carries a
+    # verification status (#97), so it is a reasonable second source.
+    #
+    # PRECEDENCE IS DELIBERATE AND ONE-WAY: a site policy that sets a ceiling
+    # keeps it, and the profile cannot widen it. The profile only fills a
+    # ceiling nobody set. A site that has restricted this has restricted it.
+    ceiling, ceiling_origin = software_root_ceiling(effective_policy)
     try:
         result = derive_software_root_binds_verbose(baseline, loaded, ceiling)
     except SoftwareRootBindError as exc:
@@ -1556,17 +1745,26 @@ def _software_root_binds_from_contribution(
     # otherwise sees the module env "delivered" and assumes it works).
     if result.is_off:
         import sys as _sys
-        ceiling_desc = ceiling or "(empty — mounts.cluster_software_roots unset)"
+        ceiling_desc = (f"{ceiling} (from the {ceiling_origin})" if ceiling
+                        else "(none set — no site policy, no cluster profile)")
+        # TWO REMEDIES, and this message used to name only the first (#156).
+        # "An admin must…" is not a remedy for a user who has no admin, and
+        # telling someone the only fix is one they cannot perform is worse than
+        # telling them nothing: it ends the search.
         _sys.stderr.write(
             f"[botainer] WARNING: hpc-modules loaded software but NONE of its "
-            f"dirs are within the site policy ceiling {ceiling_desc}, so they "
+            f"dirs are within the software-root ceiling {ceiling_desc}, so they "
             f"are NOT bound into the container — module tools will be "
             f"UNREACHABLE by name.\n"
             f"  dropped: {', '.join(f'{d} ({why})' for d, why in result.dropped[:6])}"
             f"{' …' if len(result.dropped) > 6 else ''}\n"
-            f"  An admin must add the software root(s) to "
-            f"mounts.cluster_software_roots in the root-owned "
-            f"/etc/botainer/policy.yaml. (See docs/CAPABILITY-SURFACE.md §4h.)\n"
+            f"  Two ways to fix this, and you only need one:\n"
+            f"    - your CLUSTER PROFILE can list them under "
+            f"cluster.software_roots (needs no admin), or\n"
+            f"    - a site admin adds them to mounts.cluster_software_roots in "
+            f"the root-owned /etc/botainer/policy.yaml.\n"
+            f"  A site policy that sets a ceiling wins; the profile only fills "
+            f"one nobody set. (See docs/CAPABILITY-SURFACE.md §4h.)\n"
         )
 
     binds: list = []
@@ -1608,11 +1806,45 @@ def _agent_writable_bind_sources(spec) -> list[Path]:
     return out
 
 
+class HookRefusal(NamedTuple):
+    """One hook that did not run, for a caller that chose to survive it."""
+    plugin: str
+    when: str
+    message: str
+
+
+def _hook_failure_is_recoverable(exc: Refused, on_hook_error) -> bool:
+    """Whether `exc` may be reported-and-skipped instead of ending the call.
+
+    TWO KINDS OF REFUSAL COME OUT OF THE SAME LOOP, and collapsing them would
+    be a security bug:
+
+      * THE HOOK DID NOT RUN — non-zero exit, timeout, missing script. The
+        plugin contributed nothing, so the only loss is completeness, and a
+        PREVIEW may legitimately print a partial plan that says so.
+      * THE HOOK RAN AND WE REFUSED WHAT IT RETURNED — an out-of-envelope
+        bind, a denied env var, `command_append`. That is a decision that the
+        contribution is NOT ALLOWED, and softening it into a warning would let
+        a preview print a reassuring plan for a session the launcher would
+        refuse — or worse, teach a future caller that the refusal is advisory.
+        These always propagate, for every caller.
+
+    So only PLUGIN_HOOK_FAILED is recoverable, and only when the caller passed
+    a collector. `on_hook_error=None` — the default, and what `start` uses —
+    makes every refusal fatal, which is the behaviour that existed before this
+    parameter and the behaviour a real launch requires.
+    """
+    if on_hook_error is None:
+        return False
+    return getattr(exc, "category", None) == RefusalCategory.PLUGIN_HOOK_FAILED
+
+
 def run_host_pre_launch_hooks(
     spec: SessionSpec,
     *,
     hook_env_extra: dict[str, str] | None = None,
     module_env_delivery: str = "auto",
+    on_hook_error: "Callable[[HookRefusal], None] | None" = None,
 ) -> SessionSpec:
     """Execute all `host_pre_launch` hooks declared by enabled plugins.
 
@@ -1712,14 +1944,20 @@ def run_host_pre_launch_hooks(
     for hook in spec.hooks:
         if hook.when != "host_pre_launch":
             continue
-        result = plugin_hooks.run_hook(
-            plugin_name=hook.plugin,
-            hook_when="host_pre_launch",
-            script_path=Path(hook.script_path),
-            env=env,
-            agent_writable_roots=_agent_writable_bind_sources(spec),
-            timeout_seconds=hook.timeout_seconds,
-        )
+        try:
+            result = plugin_hooks.run_hook(
+                plugin_name=hook.plugin,
+                hook_when="host_pre_launch",
+                script_path=Path(hook.script_path),
+                env=env,
+                agent_writable_roots=_agent_writable_bind_sources(spec),
+                timeout_seconds=hook.timeout_seconds,
+            )
+        except Refused as exc:
+            if not _hook_failure_is_recoverable(exc, on_hook_error):
+                raise
+            on_hook_error(HookRefusal(hook.plugin, "host_pre_launch", str(exc)))
+            continue
         # #138: a successful hook's warnings used to be captured and dropped.
         plugin_hooks.surface_hook_stderr(result, hook.plugin, "host_pre_launch")
         contribution = result.parsed_contribution or {}
@@ -1839,6 +2077,21 @@ def run_host_pre_launch_hooks(
     )
     additional_binds.extend(inner_binds)
 
+    # DECLARED software roots (#171). Independent of any hook contribution —
+    # these come from the cluster profile, so they apply on a host with no
+    # module system at all, which is the whole point of #156's "I have no
+    # admin" case. Added here so they go through the same validate_mount_plan
+    # backstop as everything else below.
+    #
+    # This CALL is the feature. `_declared_software_root_binds` was previously
+    # correct, tested, and invoked by nothing, so #171 was written rather than
+    # delivered; the unit tests drive the function directly and so could not
+    # see that. Anything that deletes this line silently turns the feature off
+    # again with a green suite.
+    additional_binds.extend(_declared_software_root_binds(
+        spec=spec, effective_policy=effective_policy, inst_by_name=inst_by_name,
+    ))
+
     env_files_changed = list(spec.env_files) != new_env_files
     path_prepends_changed = (
         list(spec.module_env_path_prepends) != new_path_prepends
@@ -1913,8 +2166,8 @@ def _compute_inner_load_contribution(
     if not lmod_root:
         return [], {}
     # Check any enabled plugin declares the cap.
-    declaring = _find_inner_load_declaring_plugins(
-        spec=spec, inst_by_name=inst_by_name,
+    declaring = _plugins_declaring_cap(
+        "caps.modules_inner_load", spec=spec, inst_by_name=inst_by_name,
     )
     if not declaring:
         return [], {}
@@ -1991,12 +2244,18 @@ def _compute_inner_load_contribution(
     return binds, env
 
 
-def _find_inner_load_declaring_plugins(
-    *, spec, inst_by_name,
-) -> list[str]:
-    """Return the names of enabled plugins that declare
-    caps.modules_inner_load in their manifest. Empty list → cap not
-    granted to any plugin in this session."""
+def _plugins_declaring_cap(cap: str, *, spec, inst_by_name) -> list[str]:
+    """Enabled plugins whose manifest declares `cap`. Empty list -> not granted.
+
+    One implementation for both cap gates. The inner-load version was written
+    first and the declared-software-roots gate would have been a second copy of
+    the same loop — the sibling-drift shape this repo keeps paying for, where
+    one copy gets a hardening and the other does not.
+
+    A manifest that fails to load counts as NOT declaring. That is fail-closed
+    and it is the quiet half: an unreadable manifest must never grant a
+    capability by accident.
+    """
     from botainer.plugins.manifest import load_manifest
     declaring: list[str] = []
     for plugin_name in spec.plugins_enabled:
@@ -2005,14 +2264,149 @@ def _find_inner_load_declaring_plugins(
             continue
         try:
             man = load_manifest(inst.plugin_dir)
-        except Exception:
+        except Exception:                                        # noqa: BLE001
             continue
-        if "caps.modules_inner_load" in man.capabilities:
+        if cap in man.capabilities:
             declaring.append(plugin_name)
     return declaring
 
 
-def run_pre_session_hooks(spec: SessionSpec) -> SessionSpec:
+def declared_software_roots(effective_policy) -> "list":
+    """Software roots the user DECLARED, as opposed to ones a `module load`
+    revealed (#171). Returns a list of `DeclaredRoot`.
+
+    THE TWO SOURCES ARE NOT THE SAME KIND OF THING, and conflating them was the
+    mistake this function exists to avoid:
+
+      cluster profile `cluster.software_roots`   a DECLARATION — "these are the
+        directories my cluster's software lives in". Binding them is the point.
+
+      site policy `mounts.cluster_software_roots`   a CEILING — an administrator
+        drawing a limit. Reading it as a declaration would silently start
+        binding whole software trees at every site that already set one, which
+        is a behaviour change to someone else's security decision.
+
+    So only the profile is read here. The ceiling reaches the binding step as
+    the `site_ceiling` argument, where it can only ever REMOVE.
+
+    Never raises: no active profile is the normal state on a laptop, and a
+    profile that fails to load must not turn a working session into a
+    traceback.
+    """
+    from botainer.hpc.module_binds import DeclaredRoot
+    from botainer.state import cluster_profile as _cp
+    try:
+        prof = _cp.active_profile()
+    except Exception:                                            # noqa: BLE001
+        return []
+    roots = list(getattr(prof, "software_roots", ()) or ()) if prof else []
+    return [DeclaredRoot(str(r), "cluster profile") for r in roots]
+
+
+def _declared_software_root_binds(*, spec, effective_policy, inst_by_name) -> list:
+    """RO identity binds for DECLARED software roots — no `module load`, no
+    site administrator (#171 / #156).
+
+    Returns [] when the feature is OFF, which is every laptop and every cluster
+    where no profile declares roots. OFF is fail-closed: nothing is guessed
+    from directory names.
+
+    WHAT IS STILL REQUIRED, and why it is not friction for nothing: an enabled
+    plugin must declare `caps.modules_software_roots`, the same grant the
+    derived path checks. Dropping that would let any session bind cluster
+    directories without the capability ever having been tier-gated or
+    trust-locked. "The profile is trusted" is a statement about provenance, not
+    about authorisation.
+
+    THE GUARDS ARE NOT "the same guards as the derived path", which is what an
+    earlier docstring here said until it was RUN rather than read. Measured
+    2026-09-02: the declared path BINDS `/usr/share` and `/var/tmp` where the
+    derived path refuses them. The two use different guards on purpose —
+    `is_unsafe_module_tree_source` deliberately permits a deep system subtree so
+    a real Lmod install at `/usr/share/lmod/lmod` works, while the derived
+    path's `_unacceptable_reason` refuses all of `/usr` and `/var`. Writing
+    "the same guards" turned a narrower filter into a claimed guarantee, which
+    is the error class this project keeps recording.
+
+    THIS IS A FILTER, NOT A BOUNDARY. A declared root is exactly as narrow as
+    whoever wrote the profile made it. The STRUCTURAL part — the part no future
+    caller can get wrong — is that read-only is not a parameter.
+
+    Every refusal is SAID, not swallowed: a user who declared roots and got
+    silence has done the work and seen no result, which is #156's whole shape.
+    """
+    import sys as _sys
+
+    from botainer.hpc.module_binds import (
+        SoftwareRootBindError,
+        declared_software_root_binds,
+    )
+
+    roots = declared_software_roots(effective_policy)
+    if not roots:
+        # Nothing declared: silent. A laptop user does not need to be told
+        # about a feature that has no bearing on them.
+        return []
+
+    if not _plugins_declaring_cap("caps.modules_software_roots",
+                                  spec=spec, inst_by_name=inst_by_name):
+        print(
+            f"[botainer] NOTE: your cluster profile declares "
+            f"{len(roots)} software root(s), but no enabled plugin holds "
+            f"caps.modules_software_roots, so none are mounted.\n"
+            f"  Add `hpc-modules` to plugins_enabled in .botainer/config.yaml "
+            f"to bind them read-only. (You do NOT need to run `module load` — "
+            f"a declared root is bound directly.)",
+            file=_sys.stderr,
+        )
+        return []
+
+    ceiling, _origin = software_root_ceiling(effective_policy)
+    try:
+        raw, dropped, origins = declared_software_root_binds(
+            roots, site_ceiling=ceiling,
+        )
+    except SoftwareRootBindError as exc:
+        print(f"[botainer] declared software roots refused: {exc}",
+              file=_sys.stderr)
+        return []
+
+    if dropped:
+        print("[botainer] WARNING: declared software root(s) NOT mounted:",
+              file=_sys.stderr)
+        for path, reason in dropped:
+            print(f"    {path}: {reason}", file=_sys.stderr)
+
+    out: list = []
+    for d in raw:
+        origin = origins.get(d["source"], "cluster profile")
+        out.append(
+            Bind(
+                source=d["source"],
+                target=d["target"],
+                mode=BindMode.RO,
+                provenance=Provenance.PLUGIN,
+                provenance_detail=(
+                    f"declared software root, from {origin} (#171)"
+                ),
+                agent_rendering=AgentRendering.SHOWN,
+                # Same self-test label as the derived binds, so `botainer
+                # selftest` PROBES these read-only in the container rather than
+                # us asserting it. A read-only claim nothing observes at runtime
+                # is the class of assertion this project keeps finding wrong.
+                self_test="SELFTEST_MODULE_SOFTWARE_BIND",
+            )
+        )
+    return out
+
+
+
+
+def run_pre_session_hooks(
+    spec: SessionSpec,
+    *,
+    on_hook_error: "Callable[[HookRefusal], None] | None" = None,
+) -> SessionSpec:
     """Execute all `pre_session` hooks declared by enabled plugins.
 
     Hooks run on the host as the user (codex HIGH 4). Two responsibilities:
@@ -2036,7 +2430,15 @@ def run_pre_session_hooks(spec: SessionSpec) -> SessionSpec:
     contribution. Sharp-edges review HIGH-1/HIGH-2.
 
     Returns a (possibly new) SessionSpec with contributions merged.
-    Called only by `start` (not by `dry-run` / `inspect`).
+    CALLED BY `start` AND BY THE HPC COMPOSE PATH — including `hpc submit
+    --dry-run`, which composes for real so that the sbatch script it prints
+    is the script that would run. This line used to say "Called only by
+    `start` (not by `dry-run` / `inspect`)", which was FALSE for the half
+    with side effects and is the line a reader consults when deciding
+    whether a preview can mutate anything (measured 2026-09-13: a dry run
+    reached the shared-mode reconcile and copied a newer per-project token
+    over the shared master). `inspect` is the honest half: it does NOT run
+    hooks and prints a note saying so.
     """
     from botainer.core import credential_leak_check
     from botainer.core.spec import Bind, BindMode, EnvSpec
@@ -2078,19 +2480,25 @@ def run_pre_session_hooks(spec: SessionSpec) -> SessionSpec:
     for hook in spec.hooks:
         if hook.when != "pre_session":
             continue
-        result = plugin_hooks.run_hook(
-            plugin_name=hook.plugin,
-            hook_when="pre_session",
-            script_path=Path(hook.script_path),
-            env=env_vars,
-            agent_writable_roots=_agent_writable_bind_sources(spec),
-            timeout_seconds=hook.timeout_seconds,
-        )
+        try:
+            result = plugin_hooks.run_hook(
+                plugin_name=hook.plugin,
+                hook_when="pre_session",
+                script_path=Path(hook.script_path),
+                env=env_vars,
+                agent_writable_roots=_agent_writable_bind_sources(spec),
+                timeout_seconds=hook.timeout_seconds,
+            )
+        except Refused as exc:
+            if not _hook_failure_is_recoverable(exc, on_hook_error):
+                raise
+            on_hook_error(HookRefusal(hook.plugin, "pre_session", str(exc)))
+            continue
         # #138: a successful hook's warnings used to be captured and dropped.
         plugin_hooks.surface_hook_stderr(result, hook.plugin, "pre_session")
         contribution = result.parsed_contribution or {}
         # Task #290: REFUSE command_append from hooks at v0.1. The feature
-        # is documented (FEATURE-PARTITION-LOCKED.md A6) as needing an
+        # is documented (internal design note DN-041 A6) as needing an
         # envelope check before it can land. Without that, a plugin could
         # append '--dangerously-skip-permissions' or similar to the agent
         # entrypoint. Silently dropping these contributions is wrong —
@@ -2103,8 +2511,8 @@ def run_pre_session_hooks(spec: SessionSpec) -> SessionSpec:
                 f"is NOT supported at v0.1.0 because no per-arg envelope check "
                 f"exists yet (#290). A plugin appending --dangerously-skip-"
                 f"permissions or similar would bypass the agent's security "
-                f"flags. Remove the contribution; track via FEATURE-PARTITION-"
-                f"LOCKED.md A6 for v0.2.",
+                f"flags. Remove the contribution; this is tracked for "
+                f"v0.2 in the project's feature partition.",
             )
         # ── env contributions ──
         ctx_env = contribution.get("env") or {}
@@ -2459,6 +2867,55 @@ _LOOPBACK_RENDEZVOUS_HOSTS = (
 )
 
 
+def _refuse_or_warn_on_gpu_request(gpus: int, runtime: str) -> None:
+    """A GPU request that cannot be honoured must say so HERE, not at runtime.
+
+    #177 was the silent version of this: Slurm allocated a device and the
+    container could not see it, so the failure surfaced as "no CUDA device"
+    inside the agent, far from the flag that caused it. Rendering `--nv` /
+    `--gpus` fixes the case where a GPU exists. This covers the two where the
+    request cannot work at all.
+
+    macOS — REFUSE. Docker Desktop runs Linux in a VM with no NVIDIA
+    passthrough, and Apple-Silicon Metal is not exposed to Linux containers, so
+    `docker run --gpus` cannot work there under any configuration. Passing it
+    through means dockerd emits its own error, which the user then has to
+    decode; refusing here names the cause and the way out. (BELIEVED FROM
+    DOCUMENTATION, not measured — there is no Docker daemon in the dev
+    container. If a Mac ever does expose a GPU to Linux containers, this
+    refusal is the thing to revisit first.)
+
+    Linux — WARN, do not refuse. `--gpus` needs the NVIDIA Container Toolkit
+    on the host, and whether it is installed cannot be known at compose time
+    without calling the daemon. Refusing would break every correctly-configured
+    Linux GPU host; staying silent would reproduce #177's "far from the cause"
+    failure. So: say what is required, then let dockerd give the authoritative
+    answer at launch, where it names the flag.
+
+    Apptainer is not checked: `--nv` degrades to "no device visible" rather
+    than failing, and the cluster case is the one that is expected to work.
+    """
+    if not gpus:
+        return
+    if runtime == "docker" and sys.platform == "darwin":
+        raise Refused(
+            RefusalCategory.UNSUPPORTED_RUNTIME_FEATURE,
+            f"resources.gpus is {gpus}, but GPUs are not reachable from a "
+            f"container on macOS: Docker Desktop runs Linux in a VM with no "
+            f"NVIDIA passthrough, and Apple-Silicon GPUs are not exposed to "
+            f"Linux containers. Set `resources.gpus: 0` for local work, or run "
+            f"this project on a Linux host with an NVIDIA GPU, or on the "
+            f"cluster with `botainer hpc submit --gpus {gpus}`.",
+        )
+    if runtime == "docker":
+        print(
+            f"note: resources.gpus is {gpus}. Docker exposes GPUs only when the "
+            f"NVIDIA Container Toolkit is installed on this host; without it "
+            f"the container will fail to start and dockerd will name `--gpus`.",
+            file=sys.stderr,
+        )
+
+
 def _refuse_cross_node_binds(spec: SessionSpec) -> None:
     """Enforce the compose-at-submit cross-node contract on the HPC sbatch path.
 
@@ -2544,13 +3001,18 @@ def _refuse_cross_node_binds(spec: SessionSpec) -> None:
 
 
 def compose_agent_exec_for_hpc(
-    project_root: Path, *, image_override: str | None = None
+    project_root: Path,
+    *,
+    image_override: str | None = None,
+    agent_override: str | None = None,
+    auth_mode_override: str | None = None,
+    auth_profile_override: str | None = None,
 ) -> tuple[SessionSpec, list[str]]:
     """Compose a full apptainer session ON THE LOGIN NODE and return the
     `apptainer exec …` argv to bake into the sbatch script.
 
     This is the heart of the compose-at-submit restructure (design/
-    HPC-COMPOSE-AT-SUBMIT.md). The old sbatch path built a minimal bind set
+    internal design note DN-004). The old sbatch path built a minimal bind set
     by hand and deferred the real composition to `botainer start
     --in-container` INSIDE the .sif — but the agent images bundle only the
     agent CLI, not botainer, so that FATAL'd on the compute node. Instead we
@@ -2580,6 +3042,22 @@ def compose_agent_exec_for_hpc(
         runtime_choice="apptainer",
         identity_accept=True,
         image_override=image_override,
+        # HPC PARITY. This function has always CALLED compose_session — its own
+        # docstring says it runs "the identical composition the direct
+        # apptainer path runs" — but it declared only `image_override`, so the
+        # other three one-shot overrides were dropped at this wrapper. The
+        # laptop could say "run this project with codex tonight" and the
+        # cluster could not. Apptainer is a first-class peer to docker here,
+        # not a documentation afterthought: a capability the laptop path gains
+        # and the cluster path does not is a defect, not a backlog item.
+        # Each stays None unless the caller passed it, so an existing
+        # submission renders byte-identical argv.
+        agent_override=agent_override,
+        auth_mode_override=auth_mode_override,
+        auth_profile_override=auth_profile_override,
+        # The sbatch script this builds DOES launch a container, so the
+        # masking-dir reset belongs here for parity with `start`. (#227)
+        reset_null_anchor=True,
     )
     spec = run_host_pre_launch_hooks(
         spec,
@@ -2641,6 +3119,112 @@ def run_post_session_hooks(spec: SessionSpec) -> None:
         except Refused as exc:
             import sys
             sys.stderr.write(f"[botainer] post_session hook failed: {exc}\n")
+
+
+def _null_anchor_refusal(null_anchor: Path, sessions_dir: Path,
+                         this_session_id: str, exc: OSError) -> str:
+    """Explain a failed masking-dir reset by LOOKING, and say when it CANNOT tell.
+
+    THREE STATES, NOT TWO, and the third is the whole point.
+
+      LIVE    — a session for this project is running. Recommend attaching,
+                not deleting state that a live session may still own.
+      NONE    — the scan completed and every record was CONFIDENTLY dead.
+      UNKNOWN — anything else.
+
+    The first version of this function had only two states, and folded UNKNOWN
+    into NONE: `except Exception: live = []`, then "no session appears to be
+    running… removing it is safe: rm -rf". Review found what that costs, and it
+    is not hypothetical:
+
+      * `liveness.is_session_alive` returns False for an apptainer record with
+        no `slurm_jobid` — and the adapter only records one when SLURM_JOB_ID is
+        in the launching environment. A direct `botainer start` on a login node
+        or any plain apptainer host therefore reads as DEAD WHILE RUNNING, so
+        the destructive branch fires on the platform this project exists for.
+      * Every failure — unreadable state dir, corrupt record, wedged docker
+        daemon (a plausible CO-CAUSE of the error being handled) — became a
+        confident "nothing is running".
+
+    So an unknown must never produce a delete instruction. That is the same
+    rule the refusal itself is about: do not assert what you did not observe.
+
+    IT ALSO STOPS CLAIMING A CAUSE. Asserting "its container has this directory
+    bound" from nothing but "a session is alive" is the original defect wearing
+    a different sentence — the errno is reported instead, and the live session
+    is stated as a fact next to it rather than as the explanation.
+
+    Best-effort by construction: this runs INSIDE an error handler, so any
+    exception becomes UNKNOWN rather than propagating. A launch must not die
+    while explaining why it could not launch.
+    """
+    live: list = []
+    state = "none"
+    try:
+        from botainer.state import liveness as _liveness
+        from botainer.state import session_record as _sr
+        for r in _sr.list_sessions(sessions_dir):
+            if r.session_id == this_session_id or getattr(r, "ended_at", None):
+                continue
+            # An apptainer record with no jobid is UNDECIDABLE, not dead —
+            # is_session_alive returns False for it, which is right for its
+            # own callers and catastrophic for a message that would otherwise
+            # tell the user to delete things.
+            apt = getattr(r, "apptainer", None)
+            if r.runtime == "apptainer" and not getattr(apt, "slurm_jobid", ""):
+                state = "unknown"
+                continue
+            if _liveness.is_session_alive(r):
+                live.append(r)
+    except Exception:                                            # noqa: BLE001
+        state = "unknown"
+    if live:
+        state = "live"
+
+    head = (f"could not reset botainer's internal masking dir at "
+            f"{null_anchor}: {exc}")
+
+    if state == "live":
+        r = live[0]
+        ids = ", ".join(x.session_id for x in live[:3])
+        if r.runtime == "apptainer":
+            rejoin = f"  Rejoin it:  botainer hpc attach --jobid <jobid>\n"
+            end = f"  Or end it:  scancel <jobid>\n"
+        else:
+            rejoin = f"  Rejoin it:  botainer attach {r.session_id}\n"
+            end = f"  Or end it:  botainer stop {r.session_id}\n"
+        return (
+            f"{head}\n"
+            f"This project has a session RUNNING ({ids}). A running container "
+            f"holds this directory, which is the usual reason it cannot be "
+            f"reset.\n"
+            f"{rejoin}{end}"
+            f"  See them all: botainer status\n"
+            f"Do NOT delete {null_anchor} while that session is running."
+        )
+
+    if state == "unknown":
+        return (
+            f"{head}\n"
+            f"botainer could not determine whether another session for this "
+            f"project is still running, so it will not tell you to delete "
+            f"anything. Check with `botainer status` (and `squeue` if this is "
+            f"a cluster). If nothing is running, that directory is botainer's "
+            f"own scratch and is recreated empty on every launch; removing it "
+            f"loses no agent data."
+        )
+
+    from shlex import quote as _q
+    return (
+        f"{head}\n"
+        f"No session for this project is running, so this is most likely "
+        f"content left by one that crashed. botainer recreates this directory "
+        f"empty on every launch and stores nothing else inside it — the agent's "
+        f"own data lives in sibling directories:\n"
+        f"  rm -rf {_q(str(null_anchor))}\n"
+        f"If that is denied too, the content belongs to another user and needs "
+        f"elevated privileges to remove."
+    )
 
 
 def _prepare_nested_bind_placeholders(plan) -> None:
@@ -2769,9 +3353,7 @@ def attach(handle: RuntimeHandle) -> int:
 def _activate_only_the_selected_agent(cfg):
     """Keep exactly ONE agent plugin enabled: the one for `cfg.agent`.
 
-    FOUND BY THE USER,, and their framing was the right one: "In a
-    mode where we're not doing multi agent, codex cred leaks into claude???"
-    Yes. `botainer auth use <mode>` switches EVERY installed family by design,
+    `botainer auth use <mode>` switches every installed family by design,
     so a project ends up with `[agent-claude-shared, agent-codex-shared]`
     enabled. Composition then honoured BOTH, which produced two distinct
     failures from one cause:
@@ -2818,32 +3400,68 @@ def _activate_only_the_selected_agent(cfg):
             agent_plugins.add(inst.name)
 
     kept, dropped = [], []
+    # WHICH AGENT RUNS AND WHOSE CREDENTIALS ARE PRESENT ARE TWO DECISIONS.
+    # They were one, because one plugin object carries both the entrypoint wrap
+    # and the credential delivery. That weld is why `--agent` had to perform
+    # plugin surgery to switch (#220, #228 came out of that surgery) and why
+    # this function's own message talked to the user about credentials when
+    # they had only chosen an agent. #230 separates them:
+    #
+    #   agent: / --agent      WHICH AGENT STARTS. Never overridden, never
+    #                         inferred, never blocked.
+    #   inject_credentials:   WHOSE CREDENTIALS ARE BOUND, without their
+    #                         entrypoint running — so the running agent can
+    #                         invoke the other one.
+    #
+    # Naming the running agent in inject_credentials is a NO-OP, not an error:
+    # its credentials are bound regardless, so there is nothing to resolve.
+    injected = {str(f).strip() for f in getattr(cfg, "inject_credentials", []) or []}
+    injected = {f if f.startswith("agent-") else f"agent-{f}" for f in injected}
+
+    creds_only: list[str] = []
     for name in cfg.plugins_enabled:
-        if name in agent_plugins and not name.startswith(selected_prefix):
-            dropped.append(name)
-        else:
+        if name not in agent_plugins or name.startswith(selected_prefix):
             kept.append(name)
+            continue
+        # A non-selected family. Bound WITHOUT its entrypoint if asked for.
+        if any(name == f or name.startswith(f + "-") for f in injected):
+            kept.append(name)
+            creds_only.append(name)
+        else:
+            dropped.append(name)
+
+    if creds_only:
+        sys.stderr.write(
+            f"[botainer] injecting credentials for {', '.join(creds_only)} "
+            f"(inject_credentials). Their entrypoints are NOT used — "
+            f"{cfg.agent!r} is the agent for this session. The other agent's "
+            f"CLI is not in this image; `npm install -g <cli>` inside the "
+            f"session puts it in /packages and it persists.\n")
 
     if not dropped:
         return cfg
 
+    # DROPPED, AND WHY, AND THE TWO WAYS TO CHANGE IT. The old text named a flag
+    # and nothing else, so a user whose config asked for two agents was told
+    # what was not happening without being told which one-line edit picks which.
     sys.stderr.write(
-        f"[botainer] agent is {cfg.agent!r}; not activating "
-        f"{', '.join(dropped)} for this session (its credentials are NOT bound "
-        f"and its entrypoint is NOT used). Enter that agent with "
-        f"`botainer start --agent <name>`.\n")
+        f"[botainer] {cfg.agent!r} is the agent for this session, so "
+        f"{', '.join(dropped)} {'is' if len(dropped) == 1 else 'are'} not "
+        f"activated (entrypoint not used, credentials not bound).\n"
+        f"    To run that agent instead:  botainer start --agent <name>, or "
+        f"set `agent:` in .botainer/config.yaml\n"
+        f"    To keep {cfg.agent!r} but have that agent's credentials available "
+        f"so it can be called from inside:  add `inject_credentials: "
+        f"[<name>]` to .botainer/config.yaml\n")
     return cfg.model_copy(update={"plugins_enabled": kept})
 
 
 def _apply_agent_override_in_memory(cfg, agent: str):
     """Swap which AGENT plugin is enabled, for this composition only.
 
-    User,: "I start the project, I get claude, not codex! and start
-    --agent codex not recognized." `agent:` lived only in .botainer/config.yaml,
-    so entering the same project with the other agent meant hand-editing config
-    and editing it back. Meanwhile `start` already had one-shot overrides for
-    the NEIGHBOURING concept (--auth-mode, --auth-profile) — so this was an
-    inconsistency, not a decision.
+    A one-session agent override lets a project run a different agent without
+    hand-editing and then restoring its configuration. It follows the same
+    temporary-selection model as --auth-mode and --auth-profile.
 
     Same discipline as _apply_auth_mode_override_in_memory: IN-MEMORY ONLY, no
     disk mutation. The earlier auth-mode implementation edited config.yaml and
@@ -2869,13 +3487,9 @@ def _apply_agent_override_in_memory(cfg, agent: str):
             continue
         # Select on "declares an auth family AND mode", NOT on kind == "agent".
         #
-        # Grace,: `auth use broker` then `start --agent codex` was
-        # refused with "'agent-codex-broker' and 'agent-codex' are mutually
-        # exclusive". Cause: broker and proxy plugins are kind='host_helper'
-        # (they run a host-side process), only the isolated/shared ones are
-        # kind='agent'. So this filter skipped every broker plugin, the swap saw
-        # NO current agent, defaulted the mode to isolated, and appended bare
-        # agent-codex alongside the agent-codex-broker already enabled.
+        # Broker and proxy plugins can be host helpers rather than agent-kind
+        # plugins. Filtering by kind would skip their explicit auth selections
+        # and could append an incompatible default plugin.
         #
         # `kind` describes HOW the plugin is implemented; the question here is
         # WHICH AUTH SLOT it fills. Those are different, and using one for the
@@ -2886,16 +3500,109 @@ def _apply_agent_override_in_memory(cfg, agent: str):
     enabled = list(cfg.plugins_enabled)
     current_agents = [n for n in enabled if n in installed]
 
-    # Carry the current auth mode across the swap where possible.
-    current_mode = ""
-    for name in current_agents:
-        current_mode = getattr(installed[name], "auth_mode", "") or current_mode
+    # An enabled-but-uninstalled plugin is not an absent selection. Diagnose
+    # the missing installation before inference can obscure the intended mode.
+    _agent_prefixes = ("agent-",)
+    missing = [n for n in enabled
+               if isinstance(n, str) and n.startswith(_agent_prefixes)
+               and n not in installed]
+    if missing:
+        sys.stderr.write(
+            f"[botainer] plugins_enabled lists {', '.join(missing)}, which "
+            f"{'is' if len(missing) == 1 else 'are'} NOT installed, so "
+            f"{'it is' if len(missing) == 1 else 'they are'} being ignored "
+            f"when choosing the agent for --agent {agent}. Run `botainer "
+            f"setup` (installs all bundled variants) or `botainer plugin add "
+            f"{missing[0]}`.\n")
 
-    target = base
-    if current_mode and current_mode != "isolated":
-        variant = f"{base}-{current_mode}"
-        if variant in installed:
-            target = variant
+    target_family = getattr(installed.get(base), "auth_family", "") or next(
+        (getattr(m, "auth_family", "") for n, m in installed.items()
+         if n == base or n.startswith(base + "-")), "")
+
+    # Preserve an explicit selection for the target agent family. Inferring
+    # its mode from another family could silently replace broker with shared
+    # and expose a real credential where a host-side broker was selected.
+    # Use the family's configured plugin directly; list order is irrelevant.
+    explicit = [n for n in current_agents
+                if getattr(installed[n], "auth_family", "") == target_family]
+
+    # AMBIGUITY IS NOT MINE TO RESOLVE. Two enabled plugins for one family is an
+    # error the composer ALREADY refuses, a few hundred lines up: "plugins X and
+    # Y are mutually exclusive". Picking explicit[0] here would resolve it before
+    # that guard can see it — so `--agent codex` would silently proceed where a
+    # plain `start` refuses, choosing by LIST ORDER.
+    #
+    # That was the first fix for #220 and it was wrong in the same way as the
+    # bug: it made a silent, order-dependent security decision, and the message
+    # it printed asserted the choice came from plugins_enabled when it came from
+    # which line was first. Found by the completeness critic, reproduced:
+    # `plugin enable agent-codex` + `plugin enable agent-codex-broker`, then
+    # swapping the two lines, flips the auth mode with no other change.
+    #
+    # So: keep BOTH, and let the one existing guard refuse. One place decides
+    # what ambiguity means, and this path cannot diverge from it — rather than a
+    # second copy of the rule here that can drift from the first.
+    ambiguous = len(explicit) > 1
+
+    carried_from = ""
+    if explicit:
+        target = explicit[0]
+    else:
+        # No plugin enabled for the target family, so a mode HAS to be carried.
+        # Take it from the family we are switching AWAY from — the agent
+        # actually selected right now — never from an arbitrary scan. With no
+        # outgoing family identifiable, carry nothing and let `base` (isolated)
+        # stand: inventing a mode is what caused #220.
+        outgoing_family = getattr(
+            installed.get(f"agent-{getattr(cfg, 'agent', '')}"), "auth_family", "")
+        if not outgoing_family:
+            outgoing_family = next(
+                (getattr(installed[n], "auth_family", "") for n in current_agents
+                 if getattr(installed[n], "auth_family", "") != target_family), "")
+        outgoing = [n for n in current_agents
+                    if getattr(installed[n], "auth_family", "") == outgoing_family]
+        current_mode = getattr(installed[outgoing[0]], "auth_mode", "") if outgoing else ""
+        target = base
+        if current_mode and current_mode != "isolated":
+            variant = f"{base}-{current_mode}"
+            if variant in installed:
+                target = variant
+                carried_from = outgoing[0]
+
+    # SAY WHAT THE MODE ENDED UP BEING. The mode is a security decision, and
+    # #220 was invisible for exactly as long as this was silent — the first
+    # signal was the SHARED banner at launch, after composition had already
+    # happened. `_drop_unselected_agent_plugins` above and
+    # `_apply_auth_mode_override_in_memory` below both announce themselves; this
+    # one never did, which is the third instance of that same omission.
+    short_name = base[len("agent-"):]
+    target_mode = getattr(installed.get(target), "auth_mode", "") or "isolated"
+    if ambiguous:
+        # Say nothing about a mode. Announcing one here would be the same lie the
+        # first fix told: there is no answer yet, and the refusal downstream is
+        # what the user needs to read.
+        pass
+    elif carried_from:
+        sys.stderr.write(
+            f"[botainer] --agent {agent}: no {target_family} plugin was enabled, "
+            f"so auth mode {target_mode!r} was carried over from "
+            f"{carried_from!r}. Enable {target!r} (or another "
+            f"agent-{base[len('agent-'):]}-* variant) in plugins_enabled to "
+            f"choose this explicitly.\n")
+    elif explicit:
+        sys.stderr.write(
+            f"[botainer] --agent {agent}: using {target!r} as enabled in "
+            f"plugins_enabled (auth mode {target_mode!r}).\n")
+    else:
+        # Disclose the isolated fallback even when no foreign mode was carried.
+        # Otherwise the later missing-credential error hides why this mode was
+        # selected and how to make the selection explicit.
+        sys.stderr.write(
+            f"[botainer] --agent {agent}: no agent-{short_name} plugin is "
+            f"enabled for this project, so {target!r} (auth mode "
+            f"{target_mode!r}) was selected by default. To choose a mode "
+            f"deliberately: `botainer plugin enable agent-{short_name}-broker` "
+            f"(or -shared), then re-run.\n")
 
     if target not in installed:
         from botainer.core.refusal import RefusalCategory, Refused
@@ -2907,8 +3614,12 @@ def _apply_agent_override_in_memory(cfg, agent: str):
             f"Run `botainer setup` to install bundled plugins.",
         )
 
+    # Drop the OTHER families' agent plugins (that is what --agent means), and
+    # keep every candidate of the target family when there is more than one, so
+    # the mutually-exclusive guard downstream sees the ambiguity and refuses.
+    keep = set(explicit) if ambiguous else {target}
     for name in current_agents:
-        if name != target:
+        if name not in keep:
             enabled.remove(name)
     if target not in enabled:
         enabled.append(target)
@@ -3012,6 +3723,66 @@ def _validate_capabilities(
     return grants
 
 
+def apply_plugin_overrides(
+    cfg,
+    *,
+    agent_override: str | None = None,
+    auth_mode_override: str | None = None,
+):
+    """The three transforms that decide WHICH PLUGINS a session activates.
+
+    Public and extracted because a second caller derived the answer again and
+    got a different one. `hpc submit`'s pre-hook guards — the proxy refusal and
+    the credential-presence gate — judged a set the launcher computed itself,
+    and it DIVERGED from what `compose_session` activates in 18 of 72
+    project × flag combinations (measured by the loop tzar at checkpoint 9;
+    two earlier figures, including one of mine, were wrong — see below).
+
+    The plainest case needs no flags at all. `botainer auth use shared` enables
+    the variant for EVERY installed family by design, so a project's config can
+    hold `[agent-claude-shared, agent-codex-shared, git]`; the launcher passed
+    all three to the guards, while compose activates exactly one
+    (`agent-claude-shared`). Worse cases refuse: `--agent codex` on a project
+    configured for `agent-claude-proxy` was refused AS PROXY while the
+    composition contains no proxy plugin at all, and the refusal told the user
+    to make the persistent config edit the flag exists to avoid.
+
+    The launcher's copy mirrored one of the three steps. The missing two are why
+    the answers differed: `_apply_agent_override_in_memory` is install- and
+    family-aware, and `_activate_only_the_selected_agent` enforces "exactly one
+    agent plugin" — the invariant that made the doubled set a real defect and
+    not a cosmetic one.
+
+    Order is load-bearing: the AGENT override decides which family is in play,
+    the auth-mode swap then operates on whatever that left enabled, and the
+    one-agent filter runs last so it filters against the final choice. (The
+    `--auth-profile` override used to sit between the swap and the filter in
+    `compose_session`; it only sets `cfg.profile` and is now applied after this
+    call, which cannot change the plugin outcome.)
+    """
+    if agent_override is not None:
+        cfg = _apply_agent_override_in_memory(cfg, agent_override)
+    if auth_mode_override is not None:
+        cfg = _apply_auth_mode_override_in_memory(cfg, auth_mode_override)
+    return _activate_only_the_selected_agent(cfg)
+
+
+def targeted_runtime(project_root: Path, cli_runtime: str) -> str:
+    """Which runtime THIS project would actually run, by the same rule compose uses.
+
+    Public because `--preflight` has to know which plan a clean verdict is
+    obliged to cover: a gate that could not compose the plan this project
+    targets, and exits 0 because the OTHER plan was fine, is a false all-clear.
+    Thin wrapper so that answer has one owner — duplicating the auto/config/PATH
+    precedence is how the launcher and its checks drift apart.
+
+    Returns `mock` when nothing is resolvable here, which the caller should read
+    as "this host targets no plan", not as a plan to check.
+    """
+    return _resolve_runtime(config_module.load_config(project_root).runtime,
+                            cli_runtime)
+
+
 def _resolve_runtime(cfg_runtime: str, cli_runtime: str) -> str:
     """Resolve auto → docker|apptainer based on PATH discovery."""
     runtime = cli_runtime if cli_runtime != "auto" else cfg_runtime
@@ -3030,11 +3801,18 @@ def _resolve_runtime(cfg_runtime: str, cli_runtime: str) -> str:
     return runtime
 
 
-def _verify_apptainer_sif_provenance(agent_name: str, sif_path: Path) -> None:
+def _verify_apptainer_sif_provenance(
+        agent_name: str, sif_path: Path, *, enforce: bool = True) -> None:
     """AUDIT (MEDIUM): refuse if the resolved .sif's sha256 differs
     from the `apptainer:sha256:<hex>:<path>` marker recorded in installed.lock
-    at build time. No marker → nothing to verify (proceed)."""
-    from botainer.plugins.provenance import read_lock
+    at build time. No marker → nothing to verify (proceed).
+
+    `enforce=False` says the SAME thing on stderr and proceeds. That exists for
+    exactly one resolution source — see `_ENFORCE_SIF_PROVENANCE` — and the
+    default is the strict one so a caller that says nothing gets a refusal.
+    """
+    from botainer.plugins.provenance import (
+        is_apptainer_marker, parse_apptainer_marker, read_lock, sha256_file)
     from botainer.state import dir as _state_dir
     try:
         paths = _state_dir.ensure_user_state_dir(create_if_missing=False)
@@ -3052,65 +3830,202 @@ def _verify_apptainer_sif_provenance(agent_name: str, sif_path: Path) -> None:
     # robust if an older append-style entry without the marker also exists).
     marker = next(
         (e.image_digest for e in entries
-         if e.name == agent_name and (e.image_digest or "").startswith("apptainer:sha256:")),
+         if e.name == agent_name
+         and is_apptainer_marker(e.image_digest)),
         None,
     )
     if not marker:
         return  # no recorded apptainer provenance → nothing to verify
-    recorded_hex = marker[len("apptainer:sha256:"):].split(":", 1)[0]
-    import hashlib
-    h = hashlib.sha256()
+    recorded_hex = parse_apptainer_marker(marker)
+
+    # HASHING A 3-5 GiB FILE IS NOT FREE, and the dispatcher does this EVERY
+    # CYCLE. Measured by a refuting review on a login-node-shaped box: a 512 MiB
+    # .sif added ~0.9 s to each `dispatcher once` at 1151 MiB/s page-cached, so a
+    # real agent image is ~4 s of CPU and 4 GiB of reads every 15 s, per project,
+    # for the life of the session. Worse than waste: if one cycle exceeds
+    # `dispatcher_claim.STALE_AFTER_SECONDS`, the claim expires while the
+    # dispatcher is alive, `dispatcher status` reports it gone, and a SECOND one
+    # can be started — the double-submit the claim exists to prevent. `doctor`
+    # gates the identical hash behind `--strict` for exactly this reason.
+    #
+    # So: hash once per (path, mtime, size, expected hex) per PROCESS. An
+    # attacker who rewrites the file while preserving both mtime and size within
+    # one process's lifetime defeats the cache — and that is consistent with the
+    # posture this function already documents, where installed.lock is
+    # user-co-writable and this check "raises the bar against accidental/partial
+    # .sif swaps, not against an attacker who already has write to the state
+    # dir". A long-lived process is the dispatcher, which the same user owns.
     try:
-        with open(sif_path, "rb") as f:
-            for chunk in iter(lambda: f.read(1 << 20), b""):
-                h.update(chunk)
+        st = sif_path.stat()
+        cache_key = (str(sif_path), st.st_mtime_ns, st.st_size, recorded_hex)
+    except OSError:
+        cache_key = None          # unreadable → fall through to the real check
+    if cache_key is not None and cache_key in _SIF_VERIFIED:
+        return
+    if sif_path.is_dir():
+        # An apptainer SANDBOX directory. A marker records the sha256 of a
+        # built .sif FILE, so there is no baseline a directory could ever match
+        # — and the three resolution branches used to disagree about what that
+        # meant: `image_override` hashed it and refused with `[Errno 21] Is a
+        # directory` dressed up as "the .sif is unreadable", while `cfg.image`
+        # proceeded unverified. Say the true thing instead, and name the way
+        # out. Only reached when a marker EXISTS: a sandbox on an install that
+        # never recorded one still runs, unverified, as before.
+        _refuse_or_disclose(
+            enforce,
+            f"{sif_path} is an apptainer SANDBOX DIRECTORY, and botainer has a "
+            f"sha256 recorded for agent plugin {agent_name!r}'s built .sif "
+            f"({recorded_hex[:16]}…). A directory has no sha256, so this image "
+            f"cannot be checked against what was built.\n"
+            f"  Point `image:` at the .sif itself to keep the check, or\n"
+            f"      botainer image forget {agent_name}\n"
+            f"  — that drops the recorded baseline and stops verifying this "
+            f"plugin's image at all.",
+        )
+        return
+    try:
+        actual_hex = sha256_file(sif_path)
     except OSError as exc:
-        raise Refused(
-            RefusalCategory.CONFIG_MISSING,
-            f"agent plugin {agent_name!r} .sif {sif_path} is unreadable: {exc}",
-        ) from exc
-    actual_hex = h.hexdigest()
-    if actual_hex != recorded_hex:
+        # THIS BRANCH IGNORED `enforce` AND THAT WAS A REGRESSION, found by a
+        # refuting review before the commit landed. An unreadable .sif is a
+        # filesystem condition, not a provenance verdict: with mode 000 and a
+        # marker recorded, `start --preflight`, `inspect` and `dry-run` all went
+        # from rc=0 to a hard refusal on a source documented as "says so and
+        # proceeds". Reachable exactly where `image:` is meant to be used — a
+        # group-owned or copied-in .sif that loses its read bit.
+        _refuse_or_disclose(
+            enforce,
+            f"agent plugin {agent_name!r} .sif {sif_path} is unreadable, so its "
+            f"sha256 cannot be compared with what was recorded at build time: "
+            f"{exc}",
+        )
+        return
+    if actual_hex == recorded_hex:
+        if cache_key is not None:
+            _SIF_VERIFIED.add(cache_key)
+        return
+    # "REPLACED OUT-OF-BAND" IS FALSE WHEN A DIFFERENT FILE WAS FOUND, and the
+    # resolvers walk four candidate names, so this happens: the marker records
+    # `botainer-<plugin>.sif` and the file resolved is `<plugin>.sif`. `doctor`
+    # already distinguishes the two cases; this said the wrong one. So say which
+    # it is, from the marker's own path half.
+    from botainer.plugins.provenance import apptainer_marker_path
+    recorded_path = apptainer_marker_path(marker)
+    if recorded_path and str(sif_path) != recorded_path:
+        _why = (f"this is NOT the file the digest was recorded against: the "
+                f"record is for {recorded_path}, and {sif_path} was resolved "
+                f"instead (botainer looks under more than one filename).\n")
+    else:
+        _why = ("The image was replaced out-of-band (not via `botainer image "
+                "build` or `botainer hpc build`).\n")
+    _refuse_or_disclose(
+        enforce,
+        f"agent plugin {agent_name!r} .sif {sif_path} sha256 {actual_hex[:16]}… "
+        f"does NOT match the value recorded at build time "
+        f"({recorded_hex[:16]}…) in installed.lock. " + _why +
+        f"  If you REBUILT it, re-record by building through botainer:\n"
+        f"      botainer hpc build {agent_name} --force        (on a cluster)\n"
+        f"      botainer image build {agent_name} --runtime apptainer\n"
+        f"  If you REPLACED it on purpose (e.g. built elsewhere and copied "
+        f"it in): botainer image forget {agent_name}\n"
+        f"  — that accepts the file in place and stops verifying it.",
+    )
+
+
+def _refuse_or_disclose(enforce: bool, message: str) -> None:
+    """Refuse, or say the identical thing on stderr and carry on.
+
+    ONE function so the two outcomes cannot describe the image differently. The
+    earlier shape of this code had a refusal on two branches and SILENCE on the
+    third, and silence is what made a replaced image invisible to
+    `start --preflight` — the command this project calls its pre-push gate.
+    Whatever the policy, the user is told the same facts.
+    """
+    if enforce:
         raise Refused(
             RefusalCategory.IMAGE_INVALID,
-            f"agent plugin {agent_name!r} .sif {sif_path} sha256 {actual_hex[:16]}… "
-            f"does NOT match the value recorded at build time "
-            f"({recorded_hex[:16]}…) in installed.lock. The image was replaced "
-            f"out-of-band (not via `botainer image build`). Refusing to exec a "
-            f".sif whose provenance can't be verified — rebuild it, or remove "
-            f"the stale installed.lock entry if this change is intentional.",
+            message + "\n  Refusing to exec a .sif whose provenance can't be "
+                      "verified.",
         )
+    sys.stderr.write(
+        "[botainer] WARNING: the image this session will run does not match "
+        "what botainer recorded.\n"
+        + "".join(f"  {ln}\n" for ln in message.splitlines())
+        + "  Proceeding because the image came from `image:` in your own "
+          "config, which botainer treats as a deliberate choice. It is NOT "
+          "verified.\n"
+    )
 
 
 def _resolve_apptainer_sif_path(agent_name: str) -> Path | None:
     """Locate an apptainer .sif for the given agent plugin.
 
-    Mirrors the dual-name candidate list in
-    `botainer/cli/doctor.py::collect_image_findings` so users whose
-    .sif lives under either convention are recognized. The unification
-    work is tracked in DN-036.
+    ONE RESOLVER NOW, not a copy of one. This carried its own candidate walk —
+    "mirrors the dual-name candidate list in doctor", which is the arrangement
+    DN-036 exists to end — and a refuting review measured the consequence: the
+    copy could not see the path recorded in installed.lock, so a .sif built to a
+    non-standard location was found by `hpc submit` and by neither `start` nor a
+    dispatched job. `Paths.find_apptainer_sif` owns the search, including that
+    recorded path; this function is the plugin-dir lookup plus a call.
     """
     from botainer.state import dir as _state_dir
     paths = _state_dir.ensure_user_state_dir(create_if_missing=False)
-    images_dir = paths.root / "images"
-    candidates = [
-        images_dir / f"botainer-{agent_name}.sif",
-        images_dir / f"{agent_name}.sif",
-    ]
-    # Also check next to the plugin source (some build flows write here).
+    plugin_dir = None
     try:
         from botainer.plugins.lifecycle import list_installed
         for inst in list_installed():
             if inst.name == agent_name:
-                candidates.append(inst.plugin_dir / f"botainer-{agent_name}.sif")
-                candidates.append(inst.plugin_dir / f"{agent_name}.sif")
+                plugin_dir = inst.plugin_dir
                 break
     except Exception:
         pass
-    for c in candidates:
-        if c.exists():
-            return c
-    return None
+    return paths.find_apptainer_sif(agent_name, plugin_dir)
+
+
+#: WHAT EACH RESOLUTION SOURCE MEANS FOR .sif PROVENANCE — the whole policy, in
+#: one dict, because it used to be three scattered decisions and one of them was
+#: an accident.
+#:
+#: True  = a mismatch REFUSES the launch (unchanged behaviour for these two).
+#: False = a mismatch is DISCLOSED on stderr and the launch proceeds.
+#:
+#: `config-image` is False and that is an OPEN DECISION, not a conclusion. It is
+#: the one source where `botainer start` and `botainer hpc submit` DISAGREE:
+#: `hpc submit` resolves a top-level `image:` and hands it in as an override, so
+#: it refuses; `start` resolves the same config here and discloses. Flipping this
+#: entry to True makes the two agree. That call belongs to the maintainer — it is
+#: the open ask in the capability-surface review queue, and answering it is ONE
+#: WORD here plus the doctor sentence that describes it.
+#:
+#: BE PRECISE ABOUT WHAT IT WOULD COST, because the first version of this comment
+#: was not: a refuting review pointed out that the refusal already exists on the
+#: HPC route, so flipping this adds nothing THERE. What it changes is `start` on a
+#: `.sif` botainer did not build — the copied-in-from-elsewhere case `image:`
+#: exists for — which would begin refusing, with `botainer image forget` as the
+#: remedy.
+#:
+#: What landed without waiting is the part that needed nobody's permission: the
+#: mismatch is no longer SILENT, so `start --preflight` cannot report success
+#: while saying nothing about an image botainer simultaneously knows was replaced.
+#:
+#: The key is the resolution MECHANISM, not what the user typed, and one case
+#: crosses them: `image:` holding a docker TAG under apptainer is dropped by the
+#: resolver, falls through to `plugin-sif`, and therefore refuses. That is right —
+#: the image actually being run is the plugin's own — but it means "did you set
+#: `image:`" is not the question this dict answers.
+#:
+#: A source that is not listed gets True. New branches fail closed.
+#: (path, mtime_ns, size, expected-hex) tuples already hashed IN THIS PROCESS.
+#: Bounded by the number of distinct images a process touches, which is one or
+#: two — not a cache that needs eviction. See the long note in
+#: `_verify_apptainer_sif_provenance` for why this exists and what it costs.
+_SIF_VERIFIED: set[tuple[str, int, int, str]] = set()
+
+_ENFORCE_SIF_PROVENANCE: dict[str, bool] = {
+    "override": True,       # hpc submit's compose-at-submit chokepoint
+    "plugin-sif": True,     # the agent plugin's own built .sif
+    "config-image": False,  # a top-level `image:` — DISCLOSED, not refused
+}
 
 
 def _resolve_session_image(
@@ -3119,7 +4034,52 @@ def _resolve_session_image(
     runtime: str = "docker",
     image_override: str | None = None,
 ) -> str:
-    """Resolve the container image for this session.
+    """Resolve the image, then verify it. ONE exit, so no branch can skip it.
+
+    THE STRUCTURE IS THE POINT. `_resolve_session_image_unverified` has three
+    ways to produce an apptainer image path, and verification used to be written
+    INTO the branches — two of them, each added as its own audit finding, months
+    apart. The third was a top-level `image:` in the project config, which is
+    the configuration `GETTING_STARTED-HPC.md` documents and
+    `examples/hpc-slurm.yaml` ships. Measured on a real install with a .sif
+    replaced out-of-band: `hpc submit --dry-run` refused (it routes through
+    `image_override`), while `start --preflight` — this project's stated
+    pre-push gate — reported CLEAN and `start` ran the swapped image.
+
+    A third in-branch call would have left a fourth branch to remember, which is
+    a rule, not a property. So the resolver returns a path AND THE SOURCE IT CAME
+    FROM, and this wrapper decides — in one place, from
+    `_ENFORCE_SIF_PROVENANCE` — what a mismatch means. A branch added later is
+    covered on the day it lands, and an unregistered source fails closed.
+
+    Docker is deliberately untouched — a docker tag has no .sif to hash, and
+    docker image identity is not verified at all (that is a stated fact of the
+    capability contract, §4bh, not an oversight to fix here).
+    """
+    resolved, source = _resolve_session_image_unverified(
+        cfg, runtime=runtime, image_override=image_override)
+    if runtime == "apptainer":
+        _verify_apptainer_sif_provenance(
+            _agent_plugin_name(cfg), Path(resolved),
+            enforce=_ENFORCE_SIF_PROVENANCE.get(source, True))
+    return resolved
+
+
+def _resolve_session_image_unverified(
+    cfg: config_module.ProjectConfig,
+    *,
+    runtime: str = "docker",
+    image_override: str | None = None,
+) -> tuple[str, str]:
+    """Resolve the container image for this session. Returns (image, source).
+
+    NOT THE ENTRY POINT. `_resolve_session_image` wraps this and is the only
+    caller; it applies the .sif provenance check to whatever this returns.
+
+    EVERY RETURN CARRIES ITS SOURCE, and that is not bookkeeping: the source is
+    what `_ENFORCE_SIF_PROVENANCE` keys on, so a new branch either names itself
+    or fails closed. Returning a bare path is what let one branch quietly differ
+    from the other two for months.
 
     Per Phase 0 of v0.1.0 plan:
     - cfg.image: per-project override; honored if set (warned in inspect).
@@ -3167,10 +4127,10 @@ def _resolve_session_image(
             # path, never hashed the image it was about to exec, even though the
             # hpc-launcher had just parsed that path OUT of the
             # `apptainer:sha256:<hex>:<path>` marker and discarded the hex half.
-            # The docstring above calls this "the trust chokepoint"; it now is
-            # one. Same fail-open-on-no-marker semantics as the resolved path.
-            _verify_apptainer_sif_provenance(_agent_plugin_name(cfg), p)
-        return image_override
+            # The verification itself now lives at this function's single exit
+            # (`_resolve_session_image`) rather than here, so the branch below —
+            # and any branch added later — gets it too.
+        return image_override, "override"
     if cfg.image:
         # AC7 hole-hunt: refuse a flag/shell-hostile image
         # ref BEFORE it reaches `docker run <image>` / `apptainer exec
@@ -3196,10 +4156,10 @@ def _resolve_session_image(
         if runtime == "apptainer":
             p = Path(cfg.image)
             if p.is_absolute() and (p.is_file() or p.is_dir()):
-                return str(p)
+                return str(p), "config-image"
             # else: drop cfg.image and fall through.
         else:
-            return cfg.image
+            return cfg.image, "config-image"
     agent_name = _agent_plugin_name(cfg)
     if agent_name is None:
         raise Refused(
@@ -3221,17 +4181,16 @@ def _resolve_session_image(
                 f"Or set `image:` in .botainer/config.yaml to an absolute "
                 f"path of an existing .sif file.",
             )
-        # AUDIT (MEDIUM): verify the .sif against the sha256 recorded
-        # at build time (the `apptainer:sha256:<hex>:<path>` marker in
-        # installed.lock). `image build` re-records the marker on every build,
-        # so a mismatch means the .sif was REPLACED out-of-band (e.g. a
-        # tampered file swapped under the images dir) — refuse before exec. When
-        # NO marker is recorded (manually-placed .sif, old install) there is no
-        # baseline to verify against, so we proceed (unchanged). Docker registry
-        # plugins already pin via image_digest; this gives the apptainer path
-        # parity. (Partial #143/#144 — full signed-provenance is v0.2.)
-        _verify_apptainer_sif_provenance(agent_name, sif_path)
-        return str(sif_path)
+        # The sha256 recorded at build time (the `apptainer:sha256:<hex>:<path>`
+        # marker in installed.lock) is compared at this function's single exit,
+        # for every branch. `image build` re-records the marker on every build,
+        # so a mismatch means the .sif was REPLACED out-of-band (e.g. a tampered
+        # file swapped under the images dir) — refused before exec. When NO
+        # marker is recorded (manually-placed .sif, old install) there is no
+        # baseline, so it proceeds. Docker registry plugins already pin via
+        # image_digest; this gives the apptainer path parity.
+        # (Partial #143/#144 — full signed-provenance is v0.2.)
+        return str(sif_path), "plugin-sif"
 
     from botainer.plugins.provenance import read_lock
     from botainer.state import dir as _state_dir
@@ -3280,11 +4239,11 @@ def _resolve_session_image(
             # "digest" is a local image ID, not a registry-published
             # digest. `name:tag` resolves to the locally-built image
             # by name; this is the only form Docker accepts for it.
-            return name_part
+            return name_part, "plugin-lock-tag"
         digest = entry.image_digest
         if not digest.startswith("sha256:"):
             digest = f"sha256:{digest}"
-        return f"{name_part}@{digest}"
+        return f"{name_part}@{digest}", "plugin-lock-digest"
     # Fall back to manifest's declared image.tag (may not be digest-pinned).
     plugin_dir = paths.plugins_dir / agent_name
     if plugin_dir.exists():
@@ -3292,7 +4251,7 @@ def _resolve_session_image(
         try:
             m = _load(plugin_dir)
             if m.image and m.image.tag:
-                return m.image.tag
+                return m.image.tag, "manifest-tag"
         except Refused:
             pass
     raise Refused(

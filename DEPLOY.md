@@ -141,6 +141,8 @@ Build it with:
 ```sh
 botainer image build agent-claude   # ~8-12 min first time
 botainer image list                  # see what's built
+botainer image list --verify         # …and hash each .sif against the digest
+                                     #   recorded at build time (slow: images are GBs)
 ```
 
 For non-default agents or to rebuild after Dockerfile changes:

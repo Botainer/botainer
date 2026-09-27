@@ -192,9 +192,17 @@ def test_human_surfaces_cover_session_affecting_fields() -> None:
         "env": "CLAUDE_CONFIG_DIR",
         "entrypoint_wraps": "agent-claude-entrypoint",
         "port_forwards": "8888",
-        # representative spec leaves agent_permissions at its default "bypass",
-        # which capability_summary renders as "Permissions: BYPASS".
-        "agent_permissions": "BYPASS",
+        # representative spec leaves agent_permissions at its default "bypass".
+        #
+        # The probe was "BYPASS" until 2026-09-21, because the banner
+        # upper-cased the posture. It no longer does: the banner echoes the
+        # value the USER WROTE, verbatim, so someone who set `prompt` sees
+        # `prompt` and someone who set `acceptEdits` sees `acceptEdits` —
+        # upper-casing an arbitrary agent mode name would print a value that
+        # does not exist. The loudness that ALL-CAPS carried is now carried by
+        # the ⚠ marker and the "runs UNATTENDED — nothing will ask" line, which
+        # `test_agent_permissions.py` pins separately.
+        "agent_permissions": "Permissions: bypass",
     }
     assert set(proof) == _SESSION_AFFECTING, (
         "proof map drifted from _SESSION_AFFECTING; keep them in lockstep"

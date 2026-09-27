@@ -19,8 +19,7 @@ TWO SEPARATE DEFECTS, so two separate guards here:
 1. THE OPTION SHOULD NOT BE OFFERED. There are no third-party plugins. A control
    for something that does not exist can only hurt the person who finds it.
    Suppression beats repair — building the tier knob properly is work for the
-   day a non-first-party plugin is real. (The user's call, and the right one:
-   "there's no third party anything, so this whole thing should be suppressed".)
+   day a non-first-party plugin is supported.
 
 2. HIDDEN IS NOT REMOVED. Anyone reading the source, or an old script, can still
    pass it. A hidden footgun that still fires is not suppressed — so the value
@@ -92,3 +91,26 @@ def test_the_refusal_explains_the_consequence_and_the_way_out(
     assert "first-party" in err, "must name the tier that has to be included"
     assert "site policy" not in err.lower(), (
         "do not blame site policy for a value the user passed on the CLI")
+
+
+def test_a_bad_flag_is_refused_before_the_machine_is_probed(tmp_path) -> None:
+    """An argument is well-formed or not regardless of what is installed.
+
+    This check sat AFTER the doctor preflight, so on any host where doctor has
+    something actionable to say — no container runtime, no disk, no registry
+    reach, i.e. every machine that has not been set up yet, which is the only
+    kind that runs `setup` — a typo in the user's own command line was reported
+    as "one or more preflight checks need your attention". The user goes and
+    fixes Docker. That is the same blame-the-wrong-thing failure the refusal
+    text below was written to avoid, reintroduced purely by ordering.
+
+    Pinned by ORDER, not by presence: this dev container has no Docker daemon,
+    so doctor IS actionable here, and the assertion below can only pass if the
+    argument check runs first.
+    """
+    out = _run(["setup", "--allow-tier", "third-party"],
+               {"MY_BOTAINER": str(tmp_path / "r2")})
+    err = out.stderr
+    assert "--allow-tier" in err, "must name the flag that is wrong"
+    assert "preflight checks need your attention" not in err, (
+        "the environment preflight must not pre-empt an invalid argument")

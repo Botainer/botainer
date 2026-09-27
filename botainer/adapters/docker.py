@@ -156,11 +156,9 @@ class DockerAdapter:
         # accumulate until the container cannot fork at all, and the failures
         # land far from the cause: "Resource temporarily unavailable", thread
         # spawn panics, hooks failing at random. It reads as flakiness; it is
-        # exhaustion. Observed in botainer's own dev container: 466
-        # zombies, every one with ppid 1, at pids.max=512. Nothing INSIDE can
-        # clear them (only PID 1 could, and it will not), so the only recovery
-        # is destroying the container — which is the user's long-standing
-        # "containers die from time to time".
+        # exhaustion. Orphaned zombies can exhaust the container's PID limit;
+        # only PID 1 can reap them, so a non-reaping PID 1 can leave container
+        # replacement as the recovery path.
         #
         # HPC PARITY, inverted for once: the apptainer adapter passes
         # --containall, which contains "PID, IPC, and environment" — the same
@@ -246,6 +244,14 @@ class DockerAdapter:
             argv += ["--cpus", str(spec.resources.cpu)]
         if spec.resources.memory_mb is not None:
             argv += ["--memory", f"{spec.resources.memory_mb}m"]
+        # GPU (#177). Allocating a device and being able to USE it are two
+        # different things; on the apptainer side the same request renders
+        # `--nv`. Docker needs the NVIDIA Container Toolkit installed on the
+        # host — without it dockerd rejects `--gpus` with its own error, which
+        # is the right failure: loud, at launch, naming the flag. The silent
+        # version (allocate, then no device inside) is what #177 was.
+        if spec.resources.gpus:
+            argv += ["--gpus", str(spec.resources.gpus)]
         # Env files (host_pre_launch contributions). Applied before -e
         # so individual -e overrides win.
         for env_file in spec.env_files:
@@ -420,7 +426,13 @@ class DockerAdapter:
             return RuntimeHandle(
                 runtime="docker", id=container_name, pid=None, extras=extras,
             )
-        return RuntimeHandle(runtime="docker", id=container_name, pid=popen.pid, extras=extras)
+        return RuntimeHandle(
+            runtime="docker",
+            id=container_name,
+            pid=popen.pid,
+            extras=extras,
+            process=popen,
+        )
 
     def attach(self, handle: RuntimeHandle) -> int:
         """Reattach the user's terminal to the running container.
@@ -461,6 +473,12 @@ class DockerAdapter:
             except OSError:
                 return 1
             return proc.returncode
+        if handle.process is not None:
+            try:
+                code = handle.process.wait()
+            except (ChildProcessError, OSError):
+                return 1
+            return 128 - code if code < 0 else code
         if handle.pid is None:
             return 0
         import os
@@ -468,7 +486,8 @@ class DockerAdapter:
         try:
             _, status = os.waitpid(handle.pid, 0)
         except (ChildProcessError, OSError):
-            return 0
+            # An unavailable exit result cannot truthfully mean success.
+            return 1
         if os.WIFSIGNALED(status):
             # Convention: 128 + signum, matching shells.
             return 128 + os.WTERMSIG(status)

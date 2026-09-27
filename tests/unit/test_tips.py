@@ -188,17 +188,9 @@ def test_manifest_user_tips_allows_tab_and_unicode():
 def test_no_shipped_tip_renders_a_safety_verdict():
     """The RULE at the top of botainer/tips.py, enforced.
 
-    IT WAS PROSE UNTIL. The rule came from the maintainer catching
-    two shipped safety verdicts by hand on, and for the next 19 days
-    nothing checked it: `_validate_user_tips` verified non-empty, charset and
-    length, with the rule written in a comment directly above it. A plugin tip
-    reading "The viewer is SAFER … and PROTECTS your clipboard — it is secure."
-    was accepted unmodified.
-
-    THIS WALKS BOTH SURFACES, WHICH IS THE POINT. The drift gate that already
-    existed walks BASE_TIPS only — and BOTH of the maintainer's catches were in
-    plugins/browser/botainer-plugin.yaml. A check covering only the half where
-    the incident did not happen is scenery.
+    Check both built-in tips and plugin manifests. Basic validation of
+    length, charset and non-empty text does not enforce the content rule;
+    checking only built-in tips would leave the plugin surface unchecked.
 
     Known limits, so nobody mistakes this for a guarantee: it matches literal
     words. "redundant", "unnecessary", "you don't need to worry about" and

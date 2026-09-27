@@ -68,8 +68,11 @@ def test_allowlist_contains_no_credential_shaped_names() -> None:
 
 
 @pytest.mark.parametrize("needed", ["PATH", "HOME", "PYTHONPATH", "VIRTUAL_ENV"])
-def test_scrub_keeps_what_the_daemon_actually_needs(needed: str) -> None:
-    """The daemon is spawned as `sys.executable -m botainer.broker.daemon_main`,
-    so it must still be able to find its interpreter and import botainer."""
+def test_scrub_retains_compatible_runtime_context(needed: str) -> None:
+    """These keys remain allowed; isolated Python ignores PYTHONPATH.
+
+    This checks the environment contract, not import selection. Behavioral
+    subprocess isolation is covered separately.
+    """
     mod = _hook_module()
     assert mod.safe_inherited_env({needed: "value"}) == {needed: "value"}

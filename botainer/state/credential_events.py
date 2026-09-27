@@ -1,26 +1,13 @@
-"""Append-only record of what happens to credentials on this host.
+"""Append-only diagnostic events about credential state on this host.
 
-WHY THIS EXISTS. Every question asked during the credential review
-turned out to be unanswerable: how often does a container actually refresh and
-break away from the shared store? Has anyone ever logged in as a second account
-mid-session? Is the staleness window minutes or hours? Both the maintainer and
-the reviewer were guessing, and designs were being argued from those guesses.
+Events record observed reconciliation and identity decisions. They can help
+measure rotation and account changes; they do not prove provider-side refresh
+behavior or resolve credential conflicts.
 
-A week of this log answers all of them from data. It was deliberately built
-FIRST, before any of the fixes it informs, because it is read-only with respect
-to every problem it observes and it turns the next round of decisions into
-measurements rather than arguments.
-
-WHERE. ``<state_root>/logs/credential-events.jsonl`` — host-private, 0600,
-outside `shared-auth/` and outside `state/<uuid>/`, so it is bound into no
-container. Same placement rule and the same reason as the SLURM output dir: a
-log the agent can rewrite is worse than no log, because it reads as evidence.
-
-NEVER A TOKEN. Not a value, not a prefix, not a length. This is enforced by
-construction rather than by review: `record()` takes named, typed, enumerated
-arguments — there is no free-form dict to slip a secret into, and every string
-field that could carry one is either an enum or an identifier we chose.
-"""
+The log is stored at <state_root>/logs/credential-events.jsonl, outside the
+shared credential and per-project state directories. Creation uses mode 0600.
+The event interface accepts named fields and enumerated decisions rather than
+credential contents. Tokens must never be passed as event values."""
 
 from __future__ import annotations
 
@@ -174,25 +161,17 @@ def summarise(events: list[dict]) -> dict[str, int]:
 # ── who is holding the shared credential RIGHT NOW ────────────────────────────
 
 
-def live_shared_holders(paths, *, exclude_uuid: str = "") -> list[dict]:
-    """Other projects with a LIVE session using shared auth, newest first.
+def live_shared_holders(paths, *, exclude_uuid: str = "",
+                        agent_family: str) -> list[dict]:
+    """Find other projects with live shared-auth sessions in one agent family.
 
-    THE MISSING ENFORCEMENT. Shared mode supports exactly ONE session at a
-    time: refreshing mints a new refresh token and invalidates the old one
-    (measured), so a second concurrent session logs the first out.
-    Until nothing checked, nothing said so on any forward-facing
-    surface, and the failure surfaced hours later as "expired" — which reads
-    like a server problem, not like "you started two sessions".
+    This inventory supports advisory concurrency warnings. Session overlap alone
+    does not prove a provider will invalidate credentials; Codex refresh concurrency
+    has not been established by the short overlap checks.
 
-    The maintainer, who WROTE the mode, did not know it had this constraint.
-    That is why this is a check and not another paragraph: a warning nobody
-    could have authored from knowledge was never going to be written.
-
-    Every input here is host-side session bookkeeping the launcher owns. Best
-    effort by construction — a project whose records are unreadable is skipped
-    rather than blocking a launch, because a false refusal to start is worse
-    than a missed warning.
-    """
+    Inputs are host-side session bookkeeping. Unreadable records are skipped, and
+    unverifiable liveness does not count as a confirmed competing holder. Results
+    are newest first and do not themselves stop or log out another session."""
     import shutil as _shutil
     import socket as _socket
 
@@ -221,8 +200,18 @@ def live_shared_holders(paths, *, exclude_uuid: str = "") -> list[dict]:
             spec = getattr(rec, "spec", None)
             if isinstance(spec, dict):
                 plugins = spec.get("plugins_enabled") or []
-            if not any(isinstance(p, str) and p.startswith("agent-")
-                       and p.endswith("-shared") for p in plugins):
+            # SCOPED TO ONE AGENT FAMILY, because there is no such thing as
+            # "the" shared credential. Shared auth is per agent —
+            # shared-auth/agent-claude/ and shared-auth/agent-codex/ are
+            # different directories, different providers, different accounts —
+            # and a live Claude session cannot invalidate an OpenAI refresh
+            # token. This used to match ANY `agent-*-shared`, so starting codex
+            # warned about a Claude session and offered to log it out.
+            #
+            # `agent_family` is a REQUIRED keyword: a caller that omits it gets
+            # a TypeError, not the old cross-agent false alarm.
+            _want = f"agent-{agent_family}-shared"
+            if not any(isinstance(p, str) and p == _want for p in plugins):
                 continue
             # DO NOT CRY WOLF. is_session_alive answers "can't verify" with
             # TRUE ("assume alive"), which is right for `status` — better to

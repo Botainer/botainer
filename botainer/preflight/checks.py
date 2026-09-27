@@ -46,11 +46,9 @@ class PreflightCheck(str, Enum):
     # ── mount plan vs the runtime's actual mount table (host-verified) ──
     MOUNT_PLAN_READBACK = "mount-plan-readback"
     # ── environment the launcher promises ──
-    # HOME must BE the writable per-project home bind. Added after a
-    # real Grace run showed apptainer refusing `--env HOME=` ("Overriding HOME
-    # ... is not permitted") — the dir was mounted and $HOME pointed elsewhere,
-    # so every cache/credential write was ephemeral. Nothing checked it on
-    # EITHER runtime, which is why it reached a cluster. See §4bo.
+    # HOME must resolve to the writable per-project home bind. Apptainer can
+    # refuse `--env HOME=`, leaving HOME elsewhere despite the mounted bind.
+    # That would make cache and credential writes ephemeral. See §4bo.
     HOME_IS_WRITABLE_BIND = "home-is-writable-bind"
     # ── kernel posture ──
     CAPS_DROPPED = "caps-dropped"                 # CapEff == 0
@@ -198,9 +196,8 @@ def build_probe_plan(spec) -> list[str]:
         # not a hardcoded per-label default. `SELFTEST_EXTRA_BIND` rides BOTH RW
         # binds (/packages, /scratch, shared-auth, the agent profile dir) AND RO
         # binds — the old hardcoded `write_ro` made EVERY rw one report a bogus
-        # "data-ro writable" FAIL on every session, both runtimes (the Grace
-        # 6-FAIL false alarm that made selftest cry wolf and hid any real
-        # regression). RW → probe write_rw (expect writable); RO → probe write_ro
+        # "data-ro writable" failure on both runtimes.
+        # RW → probe write_rw (expect writable); RO → probe write_ro
         # (expect NOT writable). Socket/FIFO/null-bind have no RO/RW write
         # semantics → skip. (The `check` enum is the label's category id; the
         # KIND is authoritative for pass/fail. planned_probe_ids re-derives from

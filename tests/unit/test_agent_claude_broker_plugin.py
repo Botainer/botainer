@@ -1,8 +1,8 @@
 """agent-claude-broker plugin: manifest + start_broker.py hook.
 
 The broker is the FUNCTIONAL replacement for the dead agent-claude-proxy
-(T0-3/#59). These tests drive the real pre_session hook the way the launcher
-does (subprocess + BOTAINER_SESSION_RECORD_PATH), spawn the real broker daemon,
+(T0-3/#59). These tests drive the real pre_session hook directly
+(subprocess + BOTAINER_SESSION_RECORD_PATH), spawn the real broker daemon,
 and assert the two things that make the broker correct where the proxy was not:
 
   1. The container is handed a provably-fake SENTINEL, not a real token — and
@@ -30,6 +30,7 @@ import pytest
 from botainer.core.broker_sentinel import is_sentinel
 from botainer.core.credential_leak_check import check_env_for_leaks
 from botainer.core.refusal import Refused
+from tests.unit._broker_install import checked_hook_python
 
 REPO = Path(__file__).resolve().parents[2]
 PLUGIN_DIR = REPO / "plugins" / "agent-claude-broker"
@@ -82,18 +83,13 @@ def _bind_by_target(binds: list, target: str) -> dict | None:
 
 def _run_hook(record_path: Path, session_dir: Path, creds: Path,
               extra_env: dict | None = None) -> subprocess.CompletedProcess:
-    # Pin PYTHONPATH to the working tree so the hook (and the daemon it spawns,
-    # which inherits PYTHONPATH via the hook's safe_inherits) resolve THIS
-    # botainer, not any stale site-packages copy. The real launcher forwards
-    # PYTHONPATH to hooks (composition.py run_hook env allowlist) the same way.
-    pythonpath = os.pathsep.join(
-        [str(REPO)] + ([os.environ["PYTHONPATH"]] if os.environ.get("PYTHONPATH") else [])
-    )
+    # The daemon re-executes with isolated imports. Verify the installed source
+    # instead of silently testing some other version via a PYTHONPATH illusion.
+    interpreter = checked_hook_python(REPO)
     return subprocess.run(
-        [sys.executable, str(HOOK)],
+        [interpreter, "-I", "-B", str(HOOK)],
         env={
             **os.environ,
-            "PYTHONPATH": pythonpath,
             "BOTAINER_SESSION_RECORD_PATH": str(record_path),
             "BOTAINER_SESSION_SCRATCH": str(session_dir),
             "BOTAINER_PLUGIN": "agent-claude-broker",
@@ -249,7 +245,10 @@ def test_unix_binds_socket_and_state(spawned) -> None:
     sock = _bind_by_target(binds, "/run/anthropic-broker.sock")
     state = _bind_by_target(binds, "/home/agent/.claude")
     assert sock is not None and sock["mode"] == "unix-socket"
-    # The state dir persists session history and holds NO credential.
+    # The state dir persists session history and is bound rw. Its "holds NO
+    # credential" contract is NOT checked here — these assertions only see the
+    # bind's shape. That property is exercised by the row-10 tests at the end
+    # of this file, which plant one and assert the spawn surface says so.
     assert state is not None and state["mode"] == "rw"
     assert "broker-state" in state["source"]
     assert len(binds) == 2  # exactly the socket + the state dir, nothing else
@@ -413,3 +412,115 @@ def test_socket_path_resolver_falls_back_when_state_root_too_long(
         assert (sock.parent.stat().st_mode & 0o077) == 0  # host-private 0700
     finally:
         shutil.rmtree(sock.parent, ignore_errors=True)
+
+
+# ── the bound state dir's "holds NO credential" contract ───────────────────
+#
+# The claim appears in prose in four places — start_broker.py's comment, its
+# own `provenance_detail`, history_carry's module docstring, and the comment
+# above `test_unix_binds_socket_and_state` — and until now NOTHING checked it.
+#
+# MEASURED before the fix, by planting a real-SHAPED `.credentials.json` in
+# broker-state and running the hook: rc=0, stderr silent, and the directory
+# bound rw with the file still in it. In broker mode the container is supposed
+# to see a sentinel and never the real token; a polluted state dir hands it
+# over. `botainer auth status` WOULD list it (it scans the same names), so it
+# was not invisible — but only to someone who thought to look, and not at the
+# one moment that matters.
+
+def _plant_credential(state_dir: Path, name: str = ".credentials.json") -> Path:
+    """A real-SHAPED credential in the dir whose contract says it holds none."""
+    bs = state_dir / "data" / "agent-claude" / "broker-state" / "default"
+    bs.mkdir(parents=True, exist_ok=True)
+    planted = bs / name
+    planted.write_text(json.dumps({
+        "claudeAiOauth": {
+            "accessToken": "sk-ant-oat01-" + "P" * 40,
+            "refreshToken": "sk-ant-ort01-" + "Q" * 40,
+        }}))
+    return planted
+
+
+def test_a_polluted_broker_state_dir_is_CALLED_OUT(tmp_path) -> None:
+    """The spawn surface must say so, because it is the moment that matters.
+
+    A WARNING, not a refusal: the pollution can arrive by routes the user did
+    not choose (an older shared-mode layout, a restored backup), and refusing
+    mid-launch would strand them. Whether it should REFUSE is a decision for
+    the maintainer, not a side effect of this test.
+    """
+    record_path, session_dir = _make_record(tmp_path, runtime="apptainer")
+    state_dir = Path(json.loads(Path(record_path).read_text())["spec"]["state_dir"])
+    planted = _plant_credential(state_dir)
+
+    creds = tmp_path / "auth" / ".credentials.json"
+    _write_fake_credential(creds)
+    sock_dir = tempfile.mkdtemp(prefix="bkt", dir="/tmp")
+    proc = _run_hook(record_path, session_dir, creds,
+                     extra_env={"BOTAINER_BROKER_SOCKET_DIR": sock_dir})
+    try:
+        assert proc.returncode == 0, proc.stderr
+        assert planted.name in proc.stderr, (
+            f"the hook bound a broker-state dir holding {planted.name} and said "
+            f"nothing about it:\n{proc.stderr}")
+        assert "NO credential" in proc.stderr, proc.stderr
+    finally:
+        _run_stop(record_path)
+
+
+def test_a_clean_broker_state_dir_says_NOTHING(tmp_path) -> None:
+    """The control — and it SHIPPED HOLLOW, found by the loop tzar at
+    checkpoint 6, which halted the loop for exactly this.
+
+    The first version took the `spawned` fixture and asserted the bind's source
+    held no `*.json`. It never read stderr. Mutating `if _leaked:` to `if True:`
+    — i.e. warning on every healthy launch, which IS the scenery this test is
+    named after — left it passing, along with all 205 broker tests. A control
+    that cannot fail is worse than no control: it reports coverage that is not
+    there, and `surface_hook_stderr`'s own docstring makes hook silence on
+    success load-bearing ("if a hook ever starts chattering on success, fix the
+    hook") for a channel that already had to be repaired once after every
+    warning it carried went to a void.
+
+    It now runs the hook itself and reads what it said.
+    """
+    record_path, session_dir = _make_record(tmp_path, runtime="apptainer")
+    creds = tmp_path / "auth" / ".credentials.json"
+    _write_fake_credential(creds)
+    sock_dir = tempfile.mkdtemp(prefix="bkt", dir="/tmp")
+
+    proc = _run_hook(record_path, session_dir, creds,
+                     extra_env={"BOTAINER_BROKER_SOCKET_DIR": sock_dir})
+    try:
+        assert proc.returncode == 0, proc.stderr
+        assert "WARNING" not in proc.stderr, (
+            f"the hook warned on a CLEAN broker-state dir — a warning on every "
+            f"healthy launch is scenery, and scenery is how the next real one "
+            f"gets ignored:\n{proc.stderr}")
+        assert "NO credential" not in proc.stderr, proc.stderr
+    finally:
+        _run_stop(record_path)
+
+
+def test_the_hooks_credential_names_match_the_REAL_set() -> None:
+    """The hook carries a local copy; a copy that drifts stops catching things.
+
+    A hook runs as a subprocess and cannot rely on botainer being importable,
+    so the duplication is deliberate. What is NOT acceptable is the two sets
+    silently diverging — the first version of this copy had an extra name that
+    the real set does not contain, caught by comparing them.
+    """
+    import importlib.util
+
+    from botainer.core.history_carry import CREDENTIAL_FILENAMES
+
+    hook = (Path(__file__).resolve().parents[2]
+            / "plugins/agent-claude-broker/hooks/start_broker.py")
+    spec = importlib.util.spec_from_file_location("_sb_probe", hook)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    assert mod._CREDENTIAL_FILENAMES == set(CREDENTIAL_FILENAMES), (
+        f"the broker hook's copy has drifted from the real set:\n"
+        f"  hook: {sorted(mod._CREDENTIAL_FILENAMES)}\n"
+        f"  real: {sorted(CREDENTIAL_FILENAMES)}")

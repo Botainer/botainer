@@ -257,7 +257,12 @@ def test_populated_null_bind_anchor_is_reset_not_refused(
     identity.init_project(proj, agent="claude", force=True, non_interactive=True)
 
     # First compose creates the anchor + the project id.
-    composition.compose_session(proj, runtime_choice="mock", identity_accept=False)
+    composition.compose_session(proj, runtime_choice="mock", identity_accept=False,
+                                # These exercise the LAUNCH contract — the masking-dir
+                                # reset and the refusal when it fails — so they must
+                                # opt in the way `start` does. A preview does not, and
+                                # test_preview_does_not_mutate_state.py pins that. (#227)
+                                reset_null_anchor=True)
     uid = identity.read_project_id(proj)
     anchor = state_root / "state" / uid / "data" / "null-bind-anchor"
 
@@ -269,5 +274,150 @@ def test_populated_null_bind_anchor_is_reset_not_refused(
 
     # Re-compose must NOT raise (was: Refused mount-path-null-bind-violated); it
     # resets the anchor to the required-empty invariant.
-    composition.compose_session(proj, runtime_choice="mock", identity_accept=False)
+    composition.compose_session(proj, runtime_choice="mock", identity_accept=False,
+                                # These exercise the LAUNCH contract — the masking-dir
+                                # reset and the refusal when it fails — so they must
+                                # opt in the way `start` does. A preview does not, and
+                                # test_preview_does_not_mutate_state.py pins that. (#227)
+                                reset_null_anchor=True)
     assert list(anchor.iterdir()) == [], "anchor must be reset to empty on re-compose"
+
+# ─────────── the masking-dir refusal: three states, one destructive ───────────
+#
+# Reported 2026-09-04: `bot1 start` with a session already running refused with
+# "(leftover from a prior session)" and an internal path. Not a leftover, not
+# prior — it was running, its container held the directory, and the only
+# actionable thing in the sentence read as "delete this".
+#
+# The FIRST fix had two states and folded "cannot tell" into "nothing is
+# running", which review showed is worse than the bug: `is_session_alive`
+# returns False for an apptainer record with no slurm_jobid, and the adapter
+# only records one under SLURM — so a direct start on a login node reads as
+# DEAD WHILE RUNNING and would have been handed `rm -rf`. Hence three states,
+# and a test for each: the destructive branch is the one that most needs
+# pinning, and originally had no test at all.
+
+
+def _anchor_for(state_root, proj):
+    uid = identity.read_project_id(proj)
+    return state_root / "state" / uid / "data" / "null-bind-anchor"
+
+
+def _refuse_with_unresettable_anchor(installed_state, tmp_path, monkeypatch,
+                                     records, alive):
+    """Drive the REAL compose_session into the REAL failure path."""
+    import os
+
+    from botainer.state import liveness as _liveness
+    from botainer.state import session_record as _sr
+
+    _seed_shared_credential(installed_state)
+    proj = _make_shared_project(tmp_path)
+    identity.init_project(proj, agent="claude", force=True, non_interactive=True)
+    composition.compose_session(proj, runtime_choice="mock", identity_accept=False,
+                                # These exercise the LAUNCH contract — the masking-dir
+                                # reset and the refusal when it fails — so they must
+                                # opt in the way `start` does. A preview does not, and
+                                # test_preview_does_not_mutate_state.py pins that. (#227)
+                                reset_null_anchor=True)
+    anchor = _anchor_for(installed_state, proj)
+    (anchor / "agent-claude").mkdir(exist_ok=True)
+
+    monkeypatch.setattr(_sr, "list_sessions", records)
+    monkeypatch.setattr(_liveness, "is_session_alive", alive)
+    os.chmod(anchor, 0o500)            # readable, NOT writable -> removal fails
+    try:
+        from botainer.core.refusal import Refused
+        with pytest.raises(Refused) as exc:
+            composition.compose_session(proj, runtime_choice="mock",
+                                        identity_accept=False,
+                                        reset_null_anchor=True)  # launch contract (#227)
+    finally:
+        os.chmod(anchor, 0o700)
+    return str(exc.value)
+
+
+class _Rec:
+    """Enough of a SessionRecord for this path; runtime is load-bearing."""
+    def __init__(self, sid, runtime="docker", jobid=""):
+        self.session_id = sid
+        self.runtime = runtime
+        self.ended_at = None
+        self.apptainer = type("A", (), {"slurm_jobid": jobid})()
+
+
+@pytest.mark.skipif(os.geteuid() == 0,
+                    reason="root ignores the mode bits this test relies on")
+def test_a_live_session_is_named_not_blamed_on_a_leftover(
+        installed_state, tmp_path, monkeypatch) -> None:
+    msg = _refuse_with_unresettable_anchor(
+        installed_state, tmp_path, monkeypatch,
+        records=lambda d: [_Rec("ses-live-abc123")],
+        alive=lambda r: True)
+    assert "ses-live-abc123" in msg, "must name the session that is blocking"
+    assert "botainer attach ses-live-abc123" in msg
+    assert "botainer stop ses-live-abc123" in msg
+    assert "leftover" not in msg.lower()
+    assert "rm -rf" not in msg, "never point at deleting what a live session uses"
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores mode bits")
+def test_an_apptainer_session_gets_slurm_commands_not_docker_ones(
+        installed_state, tmp_path, monkeypatch) -> None:
+    """`botainer attach` REFUSES for apptainer (cli/attach.py). Naming it would
+    be a remedy guaranteed to fail — the defect class this project calls
+    'shipped output names commands that do not exist'."""
+    msg = _refuse_with_unresettable_anchor(
+        installed_state, tmp_path, monkeypatch,
+        records=lambda d: [_Rec("ses-hpc-1", runtime="apptainer", jobid="12345")],
+        alive=lambda r: True)
+    assert "botainer hpc attach --jobid" in msg
+    assert "scancel" in msg
+    assert "botainer attach ses-hpc-1" not in msg
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores mode bits")
+def test_an_undecidable_session_never_produces_a_delete_instruction(
+        installed_state, tmp_path, monkeypatch) -> None:
+    """THE ONE THAT MATTERS ON HPC.
+
+    An apptainer record with no slurm_jobid is what a direct `botainer start`
+    on a login node writes, and `is_session_alive` calls it DEAD. Treating that
+    as "nothing is running" would hand the user `rm -rf` for a session that is
+    running right now. Undecidable must say undecidable.
+    """
+    msg = _refuse_with_unresettable_anchor(
+        installed_state, tmp_path, monkeypatch,
+        records=lambda d: [_Rec("ses-nojob", runtime="apptainer", jobid="")],
+        alive=lambda r: False)
+    assert "could not determine" in msg
+    assert "rm -rf" not in msg, "an unknown must never produce a delete command"
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores mode bits")
+def test_a_failure_to_read_the_bookkeeping_is_unknown_not_none(
+        installed_state, tmp_path, monkeypatch) -> None:
+    """A wedged docker daemon or an unreadable state dir is a plausible
+    CO-CAUSE of the error being handled. Collapsing it into "nothing is
+    running" is fail-open in the advice direction."""
+    def _boom(d):
+        raise OSError(13, "Permission denied")
+    msg = _refuse_with_unresettable_anchor(
+        installed_state, tmp_path, monkeypatch,
+        records=_boom, alive=lambda r: True)
+    assert "could not determine" in msg
+    assert "rm -rf" not in msg
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores mode bits")
+def test_a_confidently_empty_scan_gives_a_quoted_command_and_no_verdict(
+        installed_state, tmp_path, monkeypatch) -> None:
+    """Only here may a delete be suggested — and it states a FACT about what
+    the directory holds rather than rendering a safety verdict ("safe"), which
+    this project forbids on a short surface."""
+    msg = _refuse_with_unresettable_anchor(
+        installed_state, tmp_path, monkeypatch,
+        records=lambda d: [], alive=lambda r: False)
+    assert "rm -rf" in msg
+    assert "recreates this directory empty" in msg
+    assert "is safe" not in msg, "state the fact; do not render a safety verdict"

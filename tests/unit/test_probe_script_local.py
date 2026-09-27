@@ -113,5 +113,13 @@ def test_detail_is_sanitized(tmp_path: Path) -> None:
 
 
 def test_always_frames_output_and_mounts(tmp_path: Path) -> None:
-    out = _run([f"caps-dropped{US}capeff{US}"], {"BOTAINER_PROBE_STATUS": _status(tmp_path)})
-    assert out["mounts"] and "/" in out["mounts"]
+    # Exercise the emitted mount frame without depending on the host having /proc.
+    mount_text = "tmpfs / tmpfs rw 0 0\n/dev/mock /data ext4 ro 0 0"
+    mounts_file = tmp_path / "mounts"
+    mounts_file.write_text(mount_text + "\n")
+    out = _run([f"caps-dropped{US}capeff{US}"], {
+        "BOTAINER_PROBE_STATUS": _status(tmp_path),
+        "BOTAINER_PROBE_MOUNTS": str(mounts_file),
+    })
+    assert out["by"]["caps-dropped"].result == "pass"
+    assert out["mounts"] == mount_text

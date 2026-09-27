@@ -17,6 +17,32 @@ from botainer.core.spec import NetworkMode, SessionSpec
 from botainer.mount_plan.render import render_apptainer_argv
 
 
+#: WHICH BINARY BUILDS AN IMAGE ON THIS HOST. Apptainer is the rename of
+#: Singularity and most clusters ship exactly one of the two under its own name.
+#:
+#: ONE OWNER, because this was open-coded. `botainer image build` resolved the
+#: name correctly while `botainer hpc build` — the command the HPC guide and the
+#: installer both tell you to run — accepted a singularity-only host at its
+#: precheck and then ran `["apptainer", "build"]`, so `subprocess` raised
+#: FileNotFoundError, which the refusal handler does not catch, and the user got
+#: a raw traceback on the documented image step.
+#:
+#: SCOPED TO BUILDING, DELIBERATELY. The LAUNCH path still emits a literal
+#: `apptainer exec`, and that is not an oversight left half-done: the sbatch
+#: script is rendered on a login node and executed on a COMPUTE node, which may
+#: not have the same binary, and the hpc-launcher carries a cage-integrity check
+#: that refuses an argv not beginning with `["apptainer", "exec"]`. Changing the
+#: launch side means deciding where the resolution happens (render time, on the
+#: wrong host) and teaching that guard the second name. Tracked as its own row;
+#: `hpc build` discloses the gap rather than letting a user find it after a
+#: twenty-minute build.
+def image_build_binary() -> str | None:
+    """`apptainer`, else `singularity`, else None if neither is on PATH."""
+    return ("apptainer" if shutil.which("apptainer")
+            else "singularity" if shutil.which("singularity")
+            else None)
+
+
 class ApptainerAdapter:
     name: str = "apptainer"
 
@@ -54,10 +80,34 @@ class ApptainerAdapter:
         if spec.resources.cpu is not None or spec.resources.memory_mb is not None:
             raise Refused(
                 RefusalCategory.UNSUPPORTED_RUNTIME_FEATURE,
-                "Apptainer adapter at v0.1.0 cannot enforce resources.cpu / "
-                "resources.memory_mb (no exec-time cgroup support). For HPC, "
-                "use the hpc-launcher plugin which sets SLURM --cpus / --mem "
-                "at sbatch time. Clear resources to launch direct.",
+                "resources.cpu / resources.memory_mb are DOCKER-ONLY. "
+                "Apptainer has no exec-time cgroup support, and nothing on the "
+                "HPC path reads these fields — the sbatch request is built "
+                "from the hpc-launcher plugin's own settings, not from these."
+                "\n\n"
+                "  FIRST, to launch at all: delete these lines from "
+                ".botainer/config.yaml —\n"
+                + "".join(
+                    f"        {_k}: {_v}\n"
+                    for _k, _v in (("cpu", spec.resources.cpu),
+                                   ("memory_mb", spec.resources.memory_mb))
+                    if _v is not None)
+                + "  Nothing else unblocks the launch; the two settings below "
+                "size the job, they do not clear this refusal.\n\n"
+                "  THEN, to size the cluster job, use the settings that ARE "
+                "read:\n"
+                "    plugins:\n"
+                "      hpc-launcher:\n"
+                + (f"        cpus: {spec.resources.cpu}\n"
+                   if spec.resources.cpu is not None else "")
+                + (f"        memory_gb: {max(1, spec.resources.memory_mb // 1024)}\n"
+                   if spec.resources.memory_mb is not None else "")
+                + "  or pass them per-submit: `botainer hpc submit"
+                + (f" --cpus {spec.resources.cpu}"
+                   if spec.resources.cpu is not None else "")
+                + (f" --memory-gb {max(1, spec.resources.memory_mb // 1024)}"
+                   if spec.resources.memory_mb is not None else "")
+                + "`.",
             )
         # Apptainer doesn't directly expose `--network none`; user must configure
         # cluster-side network namespaces. We refuse explicit modes the runtime
@@ -117,9 +167,21 @@ class ApptainerAdapter:
             "--containall", "--cleanenv", "--no-privs",
             "--drop-caps", "all",
         ]
+        # GPU (#177). `--containall` is exactly why this is REQUIRED rather
+        # than optional: it hides the host's NVIDIA driver libraries and
+        # device nodes, so without `--nv` a job holding a Slurm `--gres=gpu:N`
+        # allocation sees no device at all. hpc/jobs.py and hpc/pool.py
+        # already render this for dispatched jobs and warm-pool tasks; the
+        # SESSION path — one layer up — did not, so `hpc submit --gpus 1`
+        # took a GPU off a contended partition and could not use it.
+        # NVIDIA-specific by design: `--rocm` is the AMD equivalent and no
+        # cluster profile distinguishes the two yet, so adding it blind would
+        # be a guess. See ResourceSpec's docstring.
+        if spec.resources.gpus:
+            argv.append("--nv")
         # No --writable; project workspace bind below provides rw.
         #
-        # HOME (HPC-parity bug, reported from a real Grace run):
+        # HOME must be set through Apptainer's dedicated --home option:
         # composition sets HOME=/home/user so npm/npx, pip and Claude Code's
         # ~/.claude land in the PERSISTENT per-project home bind. That used to
         # be passed as `--env HOME=...` below — and apptainer REFUSES it:
@@ -155,8 +217,7 @@ class ApptainerAdapter:
         for env_file in spec.env_files:
             argv += ["--env-file", env_file]
         # Env values (explicit). HOME is excluded when --home carried it:
-        # apptainer refuses `--env HOME=` and warns, so emitting it would only
-        # reproduce the warning the user reported.
+        # apptainer refuses `--env HOME=` and emits a warning.
         for k, v in sorted(spec.env.values.items()):
             if k == "HOME" and home_bind is not None:
                 continue
@@ -271,6 +332,7 @@ class ApptainerAdapter:
             id=str(proc.pid),
             pid=proc.pid,
             extras=extras,
+            process=proc,
         )
 
     def attach(self, handle: RuntimeHandle) -> int:
@@ -291,6 +353,12 @@ class ApptainerAdapter:
             except OSError:
                 return 1
             return proc.returncode
+        if handle.process is not None:
+            try:
+                code = handle.process.wait()
+            except (ChildProcessError, OSError):
+                return 1
+            return 128 - code if code < 0 else code
         if handle.pid is None:
             return 0
         import os
@@ -298,7 +366,8 @@ class ApptainerAdapter:
         try:
             _, status = os.waitpid(handle.pid, 0)
         except (ChildProcessError, OSError):
-            return 0
+            # An unavailable exit result cannot truthfully mean success.
+            return 1
         # Task #196: previously we returned os.WEXITSTATUS(status) blindly,
         # which yields 0 when the child was killed by a signal (e.g. SIGTERM
         # from a SLURM scancel). That misreported a cancelled job as

@@ -38,6 +38,61 @@ def policy() -> None:
 
 
 @handle_refusals
+def _warn_if_the_site_ceiling_will_override(data: dict, key: str,
+                                            requested: object) -> None:
+    """Say when a write will be stored but INERT, before it is applied.
+
+    The user policy is a ceiling you may TIGHTEN, never widen. Ask for
+    something wider and the write succeeds, `✓ policy.yaml updated` prints,
+    and the effective value does not move — observed with
+    `plugins.allowed_tiers`, which accepted `["first-party","third-party"]`
+    and still reported `['first-party']` afterwards. A command that reports
+    success while changing nothing is worse than one that refuses: it sends
+    you off to debug the wrong thing.
+
+    There is already a warning for the three SITE-ONLY fields, but those are
+    a hand-maintained list, and this class is bigger than that list — every
+    INTERSECTED field behaves this way in the widening direction. So rather
+    than extend the list (a filter, which holds only while someone remembers
+    to add the next field), ask the real `intersect()` what the effective
+    value would BE, and compare. A field added later is covered with nothing
+    to remember.
+
+    Best-effort by construction: this is an explanation attached to a write
+    that proceeds either way, so a key that does not map onto the model must
+    not crash the command.
+    """
+    try:
+        from botainer.core import policy as _p
+        eff = _p.intersect(_p.load_site_policy(), _p.SitePolicy(**data))
+        obj: object = eff
+        for part in key.split("."):
+            obj = getattr(obj, part)
+    except Exception:
+        return
+
+    same = (sorted(obj) == sorted(requested)
+            if isinstance(obj, list) and isinstance(requested, list)
+            else obj == requested)
+    if same:
+        return
+
+    click.secho(
+        f"\n! This value will be STORED but will NOT take effect.\n"
+        f"  Your policy is a ceiling you can tighten, never widen. After this "
+        f"write the\n  effective value stays {obj!r}, not {requested!r} — the "
+        f"site policy is\n  more restrictive and wins.",
+        fg="yellow", err=True,
+    )
+    click.secho(
+        "  Check with `botainer policy show` (effective), not `policy get` "
+        "(your file).\n  To actually change it, the SITE policy at "
+        "/etc/botainer/policy.yaml has to\n  change — that is root-owned, so "
+        "on a cluster it is an admin request.",
+        fg="cyan", err=True,
+    )
+
+
 @policy.command("show")
 @click.option(
     "--user-only", is_flag=True,
@@ -258,6 +313,8 @@ def policy_set(key: str, value: str, yes: bool, literal_string: bool) -> None:
         "comments to preserve, edit by hand instead.)",
         fg="yellow",
     )
+    _warn_if_the_site_ceiling_will_override(data, key, parsed_value)
+
     if not yes and not click.confirm("Apply?", default=False):
         click.echo("aborted.")
         return

@@ -156,9 +156,6 @@ persistence vector (LaunchAgents, LaunchDaemons, `/Applications`,
 `~/.zshrc`, login scripts) and every user-data write target
 (Documents, Desktop, Dropbox, source repos).
 
-The profile is the one shipped in v0.0.12+ (reviewed by a security
-SME); copied verbatim into `sandbox/wolfram-sandbox.sb`.
-
 ## Wire protocol
 
 Request (JSON, sent over unix socket):

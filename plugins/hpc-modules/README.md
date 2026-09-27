@@ -103,5 +103,5 @@ switch modules mid-session: edit the config and restart. If a tool isn't on
 PATH (its root is outside the site ceiling, or the feature is off), invoke it
 by absolute path.
 
-See `/workspace/design/HPC-MODULES-DESIGN.md` and
-botainer's internal design notes for the full rationale.
+The full rationale lives in botainer's internal design note DN-002; the
+substance a reader needs to change this code is inlined above.

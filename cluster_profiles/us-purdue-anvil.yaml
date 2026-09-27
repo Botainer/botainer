@@ -52,10 +52,12 @@ slurm:
       max_cpus: 128
       max_memory_gb: 257
     wholenode:
+      exclusive: true
       max_time_minutes: 5760        # 96h. EXCLUSIVE — bills all 128 cores even for a 1-core job.
       max_cpus: 128
       max_memory_gb: 257
     wide:
+      exclusive: true
       max_time_minutes: 720         # 12h. EXCLUSIVE, multi-node — for large MPI jobs.
       max_cpus: 128
       max_memory_gb: 257

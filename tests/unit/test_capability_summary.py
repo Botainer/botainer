@@ -161,8 +161,7 @@ def test_quiet_without_yes_refuses_first_launch(monkeypatch) -> None:
     spec = _make_spec()
     monkeypatch.setattr(capability_summary, "determine_gate", lambda s: _gate_confirm())
     proceed = capability_summary.print_and_maybe_confirm(
-        spec, quiet=True, auto_yes=False
-    )
+        spec, quiet=True, pre_authorised=False, on_sbatch_path=False)
     assert proceed is False
 
 
@@ -172,8 +171,7 @@ def test_quiet_with_yes_proceeds_first_launch(monkeypatch) -> None:
     monkeypatch.setattr(capability_summary, "determine_gate", lambda s: _gate_confirm())
     monkeypatch.setattr(capability_summary, "record_shown", lambda s: None)
     proceed = capability_summary.print_and_maybe_confirm(
-        spec, quiet=True, auto_yes=True
-    )
+        spec, quiet=True, pre_authorised=True, on_sbatch_path=False)
     assert proceed is True
 
 
@@ -182,8 +180,7 @@ def test_quiet_on_subsequent_launch_proceeds_silently(monkeypatch, capsys) -> No
     spec = _make_spec()
     monkeypatch.setattr(capability_summary, "determine_gate", lambda s: _gate_no_confirm())
     proceed = capability_summary.print_and_maybe_confirm(
-        spec, quiet=True, auto_yes=False
-    )
+        spec, quiet=True, pre_authorised=False, on_sbatch_path=False)
     assert proceed is True
     captured = capsys.readouterr()
     assert captured.out == ""  # no one-line either
@@ -194,8 +191,7 @@ def test_json_first_launch_without_yes_refuses(monkeypatch, capsys) -> None:
     spec = _make_spec()
     monkeypatch.setattr(capability_summary, "determine_gate", lambda s: _gate_confirm())
     proceed = capability_summary.print_and_maybe_confirm(
-        spec, as_json=True, auto_yes=False
-    )
+        spec, as_json=True, pre_authorised=False, on_sbatch_path=False)
     assert proceed is False
     captured = capsys.readouterr()
     # JSON was emitted on stdout
@@ -211,8 +207,7 @@ def test_json_first_launch_with_yes_proceeds(monkeypatch) -> None:
     monkeypatch.setattr(capability_summary, "determine_gate", lambda s: _gate_confirm())
     monkeypatch.setattr(capability_summary, "record_shown", lambda s: None)
     proceed = capability_summary.print_and_maybe_confirm(
-        spec, as_json=True, auto_yes=True
-    )
+        spec, as_json=True, pre_authorised=True, on_sbatch_path=False)
     assert proceed is True
 
 
@@ -477,3 +472,310 @@ def test_fingerprint_still_changes_when_a_real_capability_changes():
         "a DIFFERENT per-session file bound at the same target produced the "
         "same fingerprint — the normalisation threw away too much and the gate "
         "is now blind to a real change")
+
+
+# ── CRITICAL-1: a broker reassurance must not cover a mount-mode companion ──
+#
+# From the companion-agents audit (2026-07-23 plan, "THE REAL BLOCKERS"):
+# `_auth_mode` is FIRST-MATCH, so any `agent-*-broker` in plugins_enabled made
+# the whole session report "broker" and the consent gate printed
+#
+#     "A compromised agent cannot read or exfiltrate your credential"
+#
+# while a mount-mode companion's REAL key sat bind-mounted and readable at
+# /home/agent/.openai/api_key in the same container. An absolute safety verdict
+# that is true of one credential and false of another in the same session is
+# the exact statement this project refuses to make at a consent chokepoint —
+# and the consent gate is where a user decides whether to proceed.
+#
+# The verdict sentence is now gone, and mixed sessions disclose per family.
+
+def test_every_enabled_family_and_its_mode_is_resolved() -> None:
+    from botainer.inspect.capability_summary import auth_modes_by_family
+
+    class _Spec:
+        def __init__(self, plugins): self.plugins_enabled = plugins
+
+    # The case that produced the false verdict: broker primary, mount companion.
+    modes = auth_modes_by_family(_Spec(["agent-claude-broker", "agent-codex", "git"]))
+    assert modes == {"claude": "broker", "codex": "mount"}, (
+        "a companion session must resolve BOTH families and their DIFFERENT "
+        "modes; collapsing to one label is what let a broker reassurance cover "
+        "a readable mounted key"
+    )
+
+    # Suffix parsing must not mistake the family for a mode, or vice versa.
+    assert auth_modes_by_family(_Spec(["agent-claude-shared", "agent-codex-shared"])) == {
+        "claude": "shared", "codex": "shared"}
+    assert auth_modes_by_family(_Spec(["agent-claude"])) == {"claude": "mount"}
+    assert auth_modes_by_family(_Spec(["git", "browser"])) == {}
+
+
+def test_the_broker_block_no_longer_claims_the_agent_cannot_read_the_credential() -> None:
+    """The sentence itself is the defect, so pin its absence FROM THE OUTPUT.
+
+    It was true of a broker-only session and false of a companion one, and
+    nothing at the point of printing knew which it was in.
+
+    Written first as a grep of the module source, which the assertion-shape gate
+    correctly refused: a source-text assertion passes just as happily when the
+    string moves into a docstring, and it can never see a sentence assembled at
+    runtime from pieces. So this renders the summary for the session that
+    produced the false verdict — broker primary, mount companion — and reads
+    what a user would actually be shown.
+    """
+    spec = _make_spec()
+    spec = SessionSpec(
+        **{**spec.model_dump(),
+           "plugins_enabled": ("agent-claude-broker", "agent-codex"),
+           "mount_plan": spec.mount_plan,
+           "network": spec.network,
+           "resources": spec.resources,
+           "kernel_caps": spec.kernel_caps,
+           "env": spec.env,
+        }
+    )
+
+    shown = capability_summary.render_multiline(spec)
+
+    assert "cannot read or exfiltrate your credential" not in shown, (
+        "an absolute cannot-read verdict is back in the consent gate; it "
+        "cannot be true for every family in a session that also has a "
+        "READABLE mounted key for another agent"
+    )
+    assert "broker" in shown.lower(), (
+        "sanity: this must be the broker rendering path, or the absence "
+        "above is vacuous — a spec that never reaches the broker block "
+        "would pass no matter what the block says"
+    )
+
+
+# ── #215: the credential-collision warning has to REACH the user ──────────
+#
+# The detector is tested in test_credential_holders.py. What is tested here is
+# the half that made the original defect invisible: whether a warning computed
+# by start.py actually gets printed, on the path the user is actually on.
+
+def _warned(monkeypatch, *, quiet=False, as_json=False, pre_authorised=False,
+            gated=False, capsys=None):
+    """Run the REAL print_and_maybe_confirm and return (stdout, stderr)."""
+    monkeypatch.setattr(
+        capability_summary, "determine_gate",
+        lambda spec: capability_summary.SummaryGate(
+            confirm=gated, reason="test", last_shown_image=None))
+    monkeypatch.setattr(capability_summary, "record_shown", lambda spec: None)
+    capability_summary.print_and_maybe_confirm(
+        _make_spec(), quiet=quiet, as_json=as_json,
+        pre_authorised=pre_authorised,
+        extra_warnings=["", "⚠ ANOTHER SESSION CAN ALREADY REFRESH THIS LOGIN",
+                        "    Also running:  other-proj"], on_sbatch_path=False)
+    return capsys.readouterr()
+
+
+def test_the_warning_reaches_a_ROUTINE_launch(monkeypatch, capsys) -> None:
+    """THE PATH THAT MATTERS. The obvious home for a launch warning is the
+    first-launch confirmation gate — and that alone would not have shown the
+    incident this exists for: six projects were logged out by sessions all
+    confirmed weeks earlier. An ungated launch must print it."""
+    out, _err = _warned(monkeypatch, gated=False, capsys=capsys)
+    assert "ANOTHER SESSION CAN ALREADY REFRESH" in out
+    assert "other-proj" in out
+
+
+def test_quiet_does_not_suppress_it(monkeypatch, capsys) -> None:
+    """--quiet drops the informational one-liner on a project you launch every
+    day. A credential collision is not informational, and the daily launch is
+    exactly when it happens."""
+    out, _err = _warned(monkeypatch, quiet=True, gated=False, capsys=capsys)
+    assert "ANOTHER SESSION CAN ALREADY REFRESH" in out
+    # ...while the thing --quiet IS for stays suppressed.
+    assert "Network:" not in out
+
+
+def test_the_warning_reaches_an_auto_confirmed_launch(monkeypatch, capsys) -> None:
+    """`--yes`, and every non-interactive path (hpc submit forces auto_yes on a
+    compute node with no TTY). This branch returns before the prompt, so it is
+    the one that silently drops a warning if it is only wired to the prompt."""
+    out, _err = _warned(monkeypatch, gated=True, pre_authorised=True, capsys=capsys)
+    assert "ANOTHER SESSION CAN ALREADY REFRESH" in out
+
+
+def test_the_warning_reaches_the_INTERACTIVE_prompt(monkeypatch, capsys) -> None:
+    """The first-launch gate, answered by a human.
+
+    Found by mutation: deleting this print site left all the other tests green,
+    because the gated test above passes pre_authorised=True and returns BEFORE the
+    prompt. Four print sites, three covered — a gap that looks exactly like
+    coverage until something deletes the line.
+
+    The warning must be printed BEFORE the prompt, not after: a question the
+    user has already answered cannot be informed by what follows it."""
+    monkeypatch.setattr(
+        capability_summary, "determine_gate",
+        lambda spec: capability_summary.SummaryGate(
+            confirm=True, reason="first launch", last_shown_image=None))
+    monkeypatch.setattr(capability_summary, "record_shown", lambda spec: None)
+    asked: list[str] = []
+
+    def _fake_prompt(text, **kwargs):
+        asked.append(capsys.readouterr().out)     # what was on screen by then
+        return "y"
+
+    monkeypatch.setattr(capability_summary.click, "prompt", _fake_prompt)
+    assert capability_summary.print_and_maybe_confirm(
+        _make_spec(),
+        extra_warnings=["", "⚠ ANOTHER SESSION CAN ALREADY REFRESH THIS LOGIN",
+                        "    Also running:  other-proj"], on_sbatch_path=False) is True
+    assert asked, "the prompt was never reached"
+    assert "ANOTHER SESSION CAN ALREADY REFRESH" in asked[0], (
+        "the warning was not on screen when the user was asked to confirm")
+
+
+def test_json_mode_keeps_stdout_parseable_and_warns_on_stderr(
+        monkeypatch, capsys) -> None:
+    """A machine consumer must still get valid JSON; a human reading the same
+    terminal must still see the warning."""
+    out, err = _warned(monkeypatch, as_json=True, gated=False, capsys=capsys)
+    json.loads(out)                       # raises if the warning polluted it
+    assert "ANOTHER SESSION CAN ALREADY REFRESH" in err
+
+
+def test_no_warnings_prints_nothing_extra(monkeypatch, capsys) -> None:
+    """The common case. An empty block must not leave a stray blank line or a
+    header with nothing under it."""
+    monkeypatch.setattr(
+        capability_summary, "determine_gate",
+        lambda spec: capability_summary.SummaryGate(
+            confirm=False, reason="", last_shown_image=None))
+    capability_summary.print_and_maybe_confirm(
+        _make_spec(), quiet=True, extra_warnings=[], on_sbatch_path=False)
+    out, err = capsys.readouterr()
+    assert out == "" and err == ""
+
+
+# ── The mounted-credential paragraph in the launch consent block ────────────
+#
+# It was three broken sentences in the text a user reads to decide whether to
+# launch:
+#
+#     Credential delivery: MOUNTED INTO THE CONTAINER — your real
+#       bound into the container at /home/agent/.claude (visible to the
+#       visible to the agent. To keep them host-side, use a broker/proxy
+#       for your agent family where one is available.
+#
+# "your real" dangles, "(visible to the" never closes, and the third line
+# repeats the half it had already lost. Rendered from a POST-HOOK spec to see
+# it at all: the credential bind is a pre_session contribution, so it is absent
+# from the compose-time plan — which is why reading `inspect` output would not
+# have found this.
+
+def _spec_with_cred_bind(mode: BindMode = BindMode.RW) -> SessionSpec:
+    spec = _make_spec()
+    binds = (*spec.mount_plan.binds, Bind(
+        source="/state/data/agent-claude/profiles/default",
+        target="/home/agent/.claude",
+        mode=mode,
+        provenance=Provenance.PLUGIN,
+        provenance_detail="plugin agent-claude-shared pre_session contribution",
+    ))
+    return spec.model_copy(update={"mount_plan": MountPlan(binds=binds)})
+
+
+def _cred_paragraph(spec: SessionSpec, *, on_sbatch_path: bool = False) -> list[str]:
+    out = capability_summary.render_multiline(
+        spec, on_sbatch_path=on_sbatch_path).splitlines()
+    start = next(i for i, ln in enumerate(out) if "Credential delivery" in ln)
+    end = next(i for i, ln in enumerate(out[start:], start)
+               if ln.startswith("Plugins:"))
+    return out[start:end]
+
+
+def test_the_mounted_credential_paragraph_is_whole_sentences() -> None:
+    """Every fact a reader needs, and no fragment. The parenthesis check is
+    not pedantry: an unclosed `(` is exactly what the broken version had, and
+    it is the cheapest mechanical signal that a line was cut mid-clause."""
+    para = _cred_paragraph(_spec_with_cred_bind())
+    text = " ".join(ln.strip() for ln in para)
+
+    assert "/home/agent/.claude" in text, text
+    assert "(rw)" in text, f"the bind's actual mode is not stated: {text}"
+    assert "docs/CAPABILITY-SURFACE.md" in text, (
+        f"no pointer to what each mode does and does not keep out: {text}")
+    assert text.count("(") == text.count(")"), (
+        "a line was cut mid-clause:\n" + "\n".join(para))
+    # THE WHOLE CLAUSE, as one assertion. The refuting review showed why: with
+    # the consequence split across two appended lines, DELETING the
+    # continuation left "…changes the account every" dangling — the exact
+    # defect this test is named for — and both tests still passed. A
+    # word-ending blocklist is a list of the old garble's endings, not a
+    # property; a complete clause is a property.
+    assert ("can read it — and overwrite it, which changes the account "
+            "this project's sessions run as.") in text, text
+
+
+def test_a_READ_ONLY_credential_mount_does_not_claim_it_can_be_overwritten() -> None:
+    """The mode is READ FROM THE BIND, not assumed. "can overwrite it" is true
+    of shared mode (the agent has to be able to save a refreshed token) and
+    false of a read-only mount, and a consent block that says it anyway is the
+    same class of defect as the garble it replaced — text that does not
+    describe this session."""
+    para = _cred_paragraph(_spec_with_cred_bind(BindMode.RO))
+    text = " ".join(ln.strip() for ln in para)
+    assert "(ro)" in text, text
+    assert "overwrite" not in text, (
+        f"claims a read-only mount can be overwritten: {text}")
+    assert "read it" in text, text
+
+
+def test_the_sbatch_path_does_not_send_you_to_a_mode_it_will_refuse() -> None:
+    """`hpc submit` renders this same block, and the sbatch path REFUSES broker
+    mode at compose — after the broker hook has already started and refreshed,
+    which can rotate the refresh token and log other holders out. So on THAT
+    path the paragraph must not print `auth use broker`: following it costs a
+    rotation and still does not launch. Found by the refuting review."""
+    text = " ".join(_cred_paragraph(_spec_with_cred_bind(), on_sbatch_path=True))
+    assert "auth use broker" not in text, (
+        f"tells a cluster user to switch to a mode the sbatch path refuses "
+        f"AFTER the broker has refreshed:\n{text}")
+    assert "salloc" in text and "--runtime apptainer" in text, (
+        f"no reachable host-side route is named:\n{text}")
+
+
+def test_an_APPTAINER_session_that_is_NOT_the_sbatch_path_is_told_broker_works():
+    """The branch is about the CALLER, not the runtime — a mutation's worth of
+    difference to a real user. `botainer start --runtime apptainer` inside an
+    `salloc` is apptainer AND can reach a broker, so keying the advice on
+    `spec.runtime` told that user to do the thing they were already doing and
+    never mentioned the mode that would have helped. Found by the loop tzar at
+    checkpoint 9, by rendering both paths."""
+    appt = _spec_with_cred_bind().model_copy(update={"runtime": "apptainer"})
+    text = " ".join(_cred_paragraph(appt))          # not the sbatch path
+    assert "auth use broker" in text, (
+        f"an salloc session is not told the host-side mode it CAN use:\n{text}")
+    assert "salloc" not in text, (
+        f"tells a user inside an salloc to get inside an salloc:\n{text}")
+
+
+def test_the_scope_of_the_overwrite_comes_from_the_SPEC_not_the_mode_name() -> None:
+    """Who else is affected is a FACT in the plan, not an adjective.
+
+    The host-wide store is bound only in shared mode, so its presence in the
+    binds decides between "this project's sessions" and "every project that
+    shares this login". Asked for by the refuting review, which established by
+    running that a write through the per-project mount does reach the shared
+    master (the promotion runs at session start AND exit).
+    """
+    spec = _spec_with_cred_bind()
+    binds = (*spec.mount_plan.binds, Bind(
+        source="/state/shared-auth/agent-claude",
+        target="/shared-auth/agent-claude",
+        mode=BindMode.RW,
+        provenance=Provenance.PLUGIN,
+        provenance_detail="plugin agent-claude-shared pre_session contribution",
+    ))
+    shared = spec.model_copy(update={"mount_plan": MountPlan(binds=binds)})
+
+    assert "every project that shares this login runs as." in " ".join(
+        _cred_paragraph(shared)), _cred_paragraph(shared)
+    assert "this project's sessions run as." in " ".join(
+        _cred_paragraph(spec)), _cred_paragraph(spec)

@@ -49,6 +49,7 @@ slurm:
       max_cpus: 56
       max_memory_gb: 192
     normal:
+      preemptible: false  # the profile's own prose asserts this
       max_time_minutes: 2880        # 48h. 3-512 nodes/job. 1.0 SU/node-hour.
       max_cpus: 56
       max_memory_gb: 192
@@ -61,6 +62,7 @@ slurm:
       max_cpus: 56
       max_memory_gb: 192
     flex:
+      preemptible: true
       # PREEMPTIBLE: TACC docs describe flex jobs as requeueable/killable
       # once past an initial grace period. Discounted at 0.8 SU/node-hour
       # (vs 1.0 SU standard) — cheaper, but only safe for checkpointing or

@@ -1,9 +1,8 @@
 """Regression test: every agent plugin renders a non-empty apptainer
 command after the image.
 
-real-host failure on Grace: `botainer-v0_1 start` with
-agent-claude-shared blew up with `apptainer exec: requires at least 2
-arg(s), only received 1`. Root cause: `agent-claude-shared` (and
+An empty command causes `apptainer exec` to refuse with
+"requires at least 2 arg(s), only received 1". `agent-claude-shared` (and
 `-proxy`) are mutually-exclusive with `agent-claude`, so when shared
 or proxy mode is on, agent-claude is NOT instantiated and its
 `entrypoint_wrap` declaration is NOT contributed to the composed
@@ -97,7 +96,7 @@ def test_agent_plugin_produces_non_empty_apptainer_command(
     """The composed spec must produce a non-empty command after the
     image — either an entrypoint_wrap, an entrypoint, or a command.
     Without any of these, `apptainer exec <image>` fails with
-    "requires at least 2 arg(s)" — the Grace bug."""
+    "requires at least 2 arg(s)"."""
     proj = _make_project(tmp_path, plugin_name, agent_short)
     # Apptainer compose looks up the .sif on disk — create a placeholder
     # so resolution succeeds (we don't actually launch apptainer here).
@@ -113,7 +112,7 @@ def test_agent_plugin_produces_non_empty_apptainer_command(
         f"Plugin {plugin_name!r} produced an empty command. "
         f"apptainer exec <image> with no command fails with "
         f"'requires at least 2 arg(s), only received 1'. "
-        f"This is the 2026-05-19 Grace bug. Fix: declare an "
+        f"Fix: declare an "
         f"entrypoint_wrap in plugins/{plugin_name}/botainer-plugin.yaml."
     )
 

@@ -146,9 +146,8 @@ def build_docker_argv(image: str, creds_dir: Path,
         # its own -c flag (config override) and died on it:
         #     Error parsing -c overrides: Invalid override (missing '='):
         #     umask 0077 && exec codex login --device-auth
-        # Found by the user's first real login,. `apptainer exec`
-        # bypasses %runscript, so the HPC path was correct and only docker was
-        # broken — the same inverted parity as the missing --init (#108).
+        # `apptainer exec` bypasses %runscript; Docker requires this explicit
+        # entrypoint override to run the login shell instead of the agent CLI.
         "--entrypoint", "sh",
         "--user", f"{os.getuid()}:{os.getgid()}",
     ]
@@ -186,14 +185,48 @@ def build_apptainer_argv(apptainer_bin: str, sif_path: Path,
     ]
 
 
+# ── env channel (SIBLING PARITY with agent-claude-shared) ─────────────────────
+# `APPTAINERENV_FOO=bar` in the LAUNCHING shell becomes `FOO=bar` inside the
+# container. That is the prefix's whole purpose and it survives `--cleanenv`,
+# which strips ordinary variables and honours these BY DESIGN. So a poisoned
+# login environment on a shared node reaches into the container unless the
+# launching process removes them first, and `APPTAINERENV_LD_PRELOAD` is the
+# sharp version of that.
+#
+# The two claude login hooks have done this since their L1 hardening; both codex
+# hooks built an `apptainer exec` argv and then ran `subprocess.run(cmd)` with
+# no `env=` at all, inheriting the shell wholesale. Same decision, one family
+# short — on the path that WRITES A CREDENTIAL.
+#
+# Nothing is re-added afterwards, unlike the claude side: this argv propagates
+# what it wants with explicit `--env` flags, so the scrub is pure removal.
+_APPTAINER_ENV_PREFIXES: tuple[str, ...] = (
+    "APPTAINERENV_",
+    "SINGULARITYENV_",
+)
+
+
+def build_apptainer_subenv(parent_env: dict[str, str]) -> dict[str, str]:
+    """The subprocess env for the login container: parent_env minus the
+    apptainer/singularity env-injection channel.
+
+    Applied to the docker branch too. `APPTAINERENV_*` means nothing to docker,
+    so removing it there is a no-op — and one env for both branches is a
+    property, where remembering which branch needs it is a rule.
+    """
+    return {
+        k: v for k, v in parent_env.items()
+        if not any(k.startswith(p) for p in _APPTAINER_ENV_PREFIXES)
+    }
+
+
+
 def _choose_oauth_flow() -> bool:
     """Return True for --device-auth. DEVICE CODE IS THE DEFAULT, always.
 
-    One option works EVERYWHERE (device code: no port, no tunnel, fine over
-    ssh); the other works locally only. When one branch is universally correct,
-    detecting which branch you are in is cleverness that can only be wrong — an
-    earlier version sniffed SSH_CONNECTION/DISPLAY and the user retired it:
-    "you really think I'd default into running ssh command line?"
+    Device code needs no callback port or SSH tunnel, so it is the portable
+    default. An explicit BOTAINER_CODEX_OAUTH_FLOW value can select the local
+    browser callback instead; do not infer that choice from display variables.
     """
     forced = (os.environ.get("BOTAINER_CODEX_OAUTH_FLOW") or "").strip().lower()
     if forced in ("device", "device-auth", "deviceauth"):
@@ -241,6 +274,21 @@ def _choose_method(oauth_available: bool) -> str:
     """
     forced = (os.environ.get("BOTAINER_CODEX_LOGIN_METHOD") or "").strip().lower()
     if forced in ("oauth", "api-key", "apikey", "key"):
+        if forced == "oauth" and not oauth_available:
+            # SAME REFUSAL THE INTERACTIVE PATH GIVES. This branch used to
+            # return "oauth" before anyone checked, so the caller went on to
+            # build an apptainer argv from a None binary and died with a
+            # TypeError. It did NOT fall back to running codex on the host —
+            # that path does not exist — but a security-shaped command dying
+            # in a traceback is the "condition with a specific remedy,
+            # surfaced as a crash" pattern this project keeps recording.
+            sys.stderr.write(
+                "refused: BOTAINER_CODEX_LOGIN_METHOD=oauth, but OAuth needs "
+                "the agent-codex container and no container runtime + image "
+                "is available.\n"
+                "  Build it with `botainer image build agent-codex`, or set\n"
+                "  BOTAINER_CODEX_LOGIN_METHOD=api-key.\n")
+            raise SystemExit(2)
         return "oauth" if forced == "oauth" else "api-key"
     if forced:
         sys.stderr.write(
@@ -387,7 +435,10 @@ def main() -> int:
             f"  Callback listens on 127.0.0.1:{port_lo}-{port_hi} of THIS host.\n"
             f"  If your browser is elsewhere: ssh -L {port_lo}:127.0.0.1:{port_lo} "
             f"<this-host>\n\n")
-    rc = subprocess.run(cmd, check=False).returncode
+    rc = subprocess.run(
+        cmd, check=False,
+        env=build_apptainer_subenv(dict(os.environ)),
+    ).returncode
     if rc != 0:
         sys.stderr.write(f"\ncodex login exited {rc}\n")
         return rc

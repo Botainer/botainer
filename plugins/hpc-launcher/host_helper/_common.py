@@ -244,9 +244,21 @@ class SubmissionPlan:
     # image resolver + the credential-presence gate; the per-agent binds now come
     # from the composed spec (agent-*-shared pre_session) via the adapter.
     agent_name: str = ""
-    # §A19: when the nudge plugin is enabled, the sbatch script wraps
-    # the `apptainer exec` call in `screen -dmS botainer-${SLURM_JOB_ID}`
-    # on the compute node so that `botainer nudge` running on the login
+    # The three one-shot overrides `botainer start` accepts, carried to the
+    # compose call in submit.py. agent_override is kept SEPARATE from
+    # agent_name even though it feeds it: agent_name is "which agent is this
+    # session", which config supplies, while agent_override is "the user typed
+    # --agent". Only the latter is forwarded to compose_session, so a
+    # submission with no flags passes None for all three and renders exactly
+    # the argv it rendered before.
+    agent_override: str | None = None
+    auth_mode_override: str | None = None
+    auth_profile_override: str | None = None
+    # §A19: when the nudge plugin is enabled, the sbatch script runs
+    # the `apptainer exec` call inside a screen session named
+    # `botainer-${SLURM_JOB_ID}` on the compute node — created nonforking
+    # (`exec screen -D -m`) so the batch process IS that session and the
+    # job's lifetime is the session's. This lets `botainer nudge` on the login
     # node can `srun --overlap` into the compute node and run
     # `screen -X stuff -- ...`. The screen name uses ${SLURM_JOB_ID}
     # (not the in-container session_id, which is generated AFTER the
@@ -598,16 +610,62 @@ class SubmissionPlan:
             # the job still runs (nudge/attach just unavailable for this job).
             # `command -v` in an `if` condition is exempt from `set -e`, and the
             # caged `{body}` is byte-identical on both paths (no cage change).
+            #
+            # THE BATCH PROCESS *IS* THE SESSION OWNER (`-D -m`), rather than
+            # launching one and then polling for it. The prior shape was:
+            #
+            #     screen -dmS "$SCREEN_SID" {body}
+            #     while screen -ls 2>/dev/null | grep -qE "…"; do sleep 30; done
+            #
+            # which held TWO independent defects, either of which ends the job
+            # while the work is unfinished:
+            #
+            #  1. NO STARTUP BARRIER. `screen -dmS` forks and the parent returns
+            #     as soon as the fork succeeds; the child creates its server
+            #     socket afterwards. A first `screen -ls` inside that window
+            #     makes the loop condition false on its FIRST evaluation — and a
+            #     `while` whose condition starts false completes with status 0
+            #     even under `set -euo pipefail`. The script then simply ends:
+            #     Slurm records COMPLETED 0:0 and tears down a container that
+            #     was still starting. Nothing reports a failure, because by the
+            #     script's own lights nothing failed.
+            #
+            #  2. `| grep -q` UNDER `pipefail` IS A COIN TOSS. grep -q exits on
+            #     first match, the writer dies of EPIPE (141), and pipefail
+            #     adopts that as the pipeline's status — so a MATCH reads as NO
+            #     MATCH. Measured with a synthetic listing, match always
+            #     present: 0/300 wrong at ~148 B, 174/300 at ~1.6 KB, 297/300 at
+            #     ~15 KB. Different consequence from (1): the loop exits on a
+            #     LATER poll while the session is ALIVE, so a running agent is
+            #     killed mid-work. The two compound — sessions leaked by (1)
+            #     lengthen the listing, which makes (2) likelier.
+            #     A maintainer-side suite bans this pattern outright, but
+            #     scans only tools/; this was the sole quiet-grep pipeline in
+            #     shipped code, and it was in the job generator.
+            #
+            # `-D -m` starts the session detached WITHOUT forking and returns
+            # when it terminates, so there is no window to race and no listing
+            # to parse. STRUCTURE, not a tighter poll: both defects become
+            # unrepresentable rather than unlikely.
+            #
+            # `exec` matches the screen-less branch below and is safe because
+            # run_section is the LAST thing in the generated script — nothing
+            # runs after it. The session is still created as
+            # `botainer-<jobid>`, so `hpc attach` (`screen -r`) is unaffected.
+            #
+            # KNOWN LIMIT, stated rather than implied: screen exits when the
+            # session ends, and does not propagate the agent's own exit status.
+            # That is NOT a regression — the poll loop also always exited 0 —
+            # but it means a failed agent and a clean one still look alike to
+            # Slurm. Fixing that is a separate change and needs a live cluster.
             run_section = (
                 'if command -v screen >/dev/null 2>&1; then\n'
                 '    SCREEN_SID="botainer-${SLURM_JOB_ID:?SLURM_JOB_ID unset; '
                 'sbatch script must run under Slurm}"\n'
-                f'    screen -dmS "$SCREEN_SID" {body}\n'
-                '    # Wait for the screen session to terminate (agent exit).\n'
-                '    while screen -ls 2>/dev/null | '
-                'grep -qE "[0-9]+\\.${SCREEN_SID}\\b"; do\n'
-                '        sleep 30\n'
-                '    done\n'
+                '    # -D -m: create detached WITHOUT forking, so this process\n'
+                '    # is the session owner and the job lives exactly as long\n'
+                '    # as the session does.\n'
+                f'    exec screen -D -m -S "$SCREEN_SID" {body}\n'
                 'else\n'
                 '    echo "botainer: nudge is enabled but '"'"'screen'"'"' is not '
                 'on this compute node'"'"'s PATH — running the agent directly '
@@ -791,7 +849,18 @@ def _reject_traversal_agent(value: str) -> str:
 
 
 def _load_plugins_enabled(project_root: Path) -> tuple[str, ...]:
-    """Top-level `plugins_enabled:` as a tuple (audit T7 consent disclosure)."""
+    """Top-level `plugins_enabled:` as a tuple.
+
+    NOT the consent disclosure, and this docstring used to say it was. The
+    login-node disclosure is rendered from the composed SPEC
+    (`capability_summary.print_and_maybe_confirm`); nothing prints this field. Its
+    three readers are all in `submit.py`: the proxy guard, the hpc-modules warning
+    and the credential-presence gate — i.e. it is GUARD INPUT. The wrong docstring
+    was then cited in a commit message as evidence that a change improved the
+    disclosure, which is the "a stale comment outlives the behaviour and then argues
+    for it" shape this file has already been bitten by twice; a loop-tzar checkpoint
+    caught it the third time.
+    """
     data = _load_project_top_level(project_root)
     enabled = data.get("plugins_enabled")
     return tuple(enabled) if isinstance(enabled, list) else ()
@@ -826,14 +895,41 @@ def _resolve_apptainer_image(
     Resolution order, most-specific first:
       1. `plugins.hpc-launcher.apptainer_image` from project config.
       2. top-level `image:` from project config (matches docker mode).
-      3. installed.lock entry for agent-<name> whose image_digest
-         field is the apptainer marker `apptainer:sha256:<hex>:<path>`.
-      4. conventional path: <state_root>/images/botainer-agent-<name>.sif.
-      5. last-resort legacy default: <state_root>/images/botainer-claude.sif.
+      3. the first of these that is ACTUALLY ON DISK:
+           <state_root>/images/botainer-agent-<name>.sif   (conventional)
+           <state_root>/images/agent-<name>.sif            (legacy spelling)
+           the path recorded in installed.lock's `apptainer:sha256:<hex>:<path>`
+      4. if none exists: the conventional name, so the error names the file the
+         user is expected to build.
 
-    Returning a relative path or non-existent file is OK; the submit
-    flow renders a script that apptainer will reject at exec time
-    with a clear error.
+    STEPS 3-4 MIRROR `Paths.find_apptainer_sif` DELIBERATELY — in ORDER and in
+    every candidate this side can name. It is not candidate-for-candidate and
+    saying so would be false: the library also tries the installed plugin
+    DIRECTORY, which this helper has no way to locate without importing botainer.
+    A `.sif` sitting only there is found by `start` and not by a submit, which is
+    the one resolver divergence left standing and is hand-placement only.
+    This ordering was arrived at by a refuting review that measured
+    what the previous one cost. Four divergences existed, each of which made
+    `hpc submit` disagree with `start` about which image — or whether any image —
+    exists:
+
+      * The recorded path was returned UNCONDITIONALLY, existence unchecked. Delete
+        that file, leave a real one at the conventional name, and `start` ran the
+        real image while a submitted job execed a path that was not there.
+      * It was also returned FIRST, which shadows the active state root: copy a
+        state root and the copy's lock still names the ORIGINAL root's file, so a
+        submitted job would run the old image. Same regression the library resolver
+        was reordered to avoid; it was left here then and is fixed here now.
+      * Two lock entries for one plugin where the FIRST has an empty path half
+        ended the search — the second, valid, entry was never seen.
+      * The legacy unprefixed spelling was not a candidate at all, so a state root
+        holding only `images/agent-<name>.sif` (which `start` runs) produced a job
+        that died at exec on the compute node.
+
+    This helper is standalone BY DESIGN — zero `botainer` imports, because it runs
+    on a login node that may not have the package on its PATH — so the agreement
+    cannot be had by sharing code. It is held by a parity test that drives both
+    resolvers over each of these states.
     """
     # 1. Plugin-specific override.
     if cfg.get("apptainer_image"):
@@ -842,21 +938,31 @@ def _resolve_apptainer_image(
     proj = _load_project_top_level(project_root)
     if proj.get("image"):
         return _reject_flaglike_image(str(proj["image"]))
-    # 3. installed.lock recorded path (set by `bot1 image build
-    #    --runtime apptainer`, marker format `apptainer:sha256:<hex>:<path>`).
+    # 3. Filename candidates first, then botainer's own record of where it wrote.
+    images = state_root / "images"
     if agent_name:
+        candidates = [images / f"botainer-agent-{agent_name}.sif",
+                      images / f"agent-{agent_name}.sif"]
         recorded = _recorded_apptainer_image_path(
             state_root, f"agent-{agent_name}",
         )
         if recorded:
-            return recorded
-    # 4. Conventional path (matches what `bot1 image build` writes).
-    if agent_name:
-        return str(
-            state_root / "images" / f"botainer-agent-{agent_name}.sif"
-        )
-    # 5. Last-resort legacy default.
-    return str(state_root / "images" / "botainer-claude.sif")
+            candidates.append(Path(recorded))
+    else:
+        candidates = [images / "botainer-claude.sif"]
+    for cand in candidates:
+        try:
+            # is_file()/is_dir(), NOT exists(): a .sif is a file and a sandbox is a
+            # directory, while `exists()` also says yes to a FIFO — and a FIFO here
+            # HANGS the reader for ever. Same rule, same reason, as the library
+            # resolver; a hang on a login node is worse than a refusal.
+            if cand.is_file() or cand.is_dir():
+                return str(cand)
+        except OSError:
+            continue
+    # 4. Nothing on disk. Name the conventional path so the failure tells the user
+    #    which file to build, rather than whichever candidate was checked last.
+    return str(candidates[0])
 
 
 def _recorded_apptainer_image_path(
@@ -868,6 +974,18 @@ def _recorded_apptainer_image_path(
     `apptainer:sha256:<hex>:<absolute-path>` into the image_digest
     field. Parse that out; return None if not recorded or not the
     apptainer format.
+
+    TWO THINGS THIS GOT WRONG, both measured against the library's reader:
+
+    * It accepted any `apptainer:` prefix, so `apptainer:md5:<hex>:<path>` was
+      honoured here and IGNORED by botainer (`is_apptainer_marker` requires
+      sha256). The algorithm half is not decoration — it says which digest the
+      provenance check will compare — so a marker naming another one is not a
+      marker we understand. Requiring `apptainer:sha256:` makes the two agree by
+      being the stricter of the pair.
+    * It RETURNED on the first entry matching the name, so an entry whose path
+      half was empty ended the search and a second, valid entry for the same
+      plugin was never read. Keep scanning; only a usable path ends it.
     """
     lock_path = state_root / "plugins" / "installed.lock"
     if not lock_path.exists():
@@ -887,11 +1005,11 @@ def _recorded_apptainer_image_path(
             digest = d.get("image_digest")
             if not isinstance(digest, str):
                 continue
-            if not digest.startswith("apptainer:"):
+            if not digest.startswith("apptainer:sha256:"):
                 continue
             # Format: apptainer:sha256:<hex>:<path>
             parts = digest.split(":", 3)
-            if len(parts) == 4:
+            if len(parts) == 4 and parts[3]:
                 return parts[3]
     except OSError:
         return None
@@ -911,6 +1029,35 @@ def _load_project_top_level(project_root: Path) -> dict[str, Any]:
     return dict(data) if isinstance(data, dict) else {}
 
 
+def normalise_agent_name(name: str) -> str:
+    """The ONE place the `agent-` prefix rule lives on this side. Returns the
+    short form (`claude`), refuses a doubled prefix, and validates for traversal.
+
+    IT WAS INSIDE `_load_agent_name`, WHICH ONLY THE CONFIG PATH GOES THROUGH.
+    `make_plan(agent_override=…)` — i.e. `hpc submit --agent …` — assigned the
+    flag's value straight to `agent_name`, so the prefix rule applied to the
+    config spelling and not to the flag. Measured: `--agent agent-codex` resolved
+    `images/botainer-agent-agent-codex.sif` and refused naming a file nobody
+    typed, while `start --agent agent-codex` launched the real image. A
+    laptop/cluster divergence, which is the class the review that found it was
+    about — so the rule becomes a function both sources call, rather than a second
+    copy of the stripping logic next to the override.
+    """
+    if name.startswith("agent-"):
+        stripped = name[len("agent-"):]
+        if stripped.startswith("agent-") or not stripped:
+            raise ValueError(
+                f"agent {name!r} is not a short agent name. Write "
+                f"`agent: claude` in .botainer/config.yaml (or pass "
+                f"`--agent claude`) — botainer adds the `agent-` prefix itself."
+            )
+        name = stripped
+    # AUDIT (CRITICAL C1): validate at the source as well as in
+    # SubmissionPlan.__post_init__ (chokepoint at every layer). This is the
+    # config-vs-CLI sibling of config.py's `agent:` field_validator.
+    return _reject_traversal_agent(name)
+
+
 def _load_agent_name(project_root: Path) -> str:
     """Read top-level `agent:` from .botainer/config.yaml. Used by
     to_apptainer_argv to construct per-agent binds. Returns empty
@@ -919,10 +1066,11 @@ def _load_agent_name(project_root: Path) -> str:
     data = _load_project_top_level(project_root)
     agent = data.get("agent")
     name = str(agent) if isinstance(agent, str) else ""
-    # AUDIT (CRITICAL C1): validate at the source as well as in
-    # SubmissionPlan.__post_init__ (chokepoint at every layer). This is the
-    # config-vs-CLI sibling of config.py's `agent:` field_validator.
-    return _reject_traversal_agent(name)
+    # THE SAME NORMALISATION AS `ProjectConfig._validate_agent`, and it has to be
+    # on this side too because this flow never builds a ProjectConfig (see
+    # `_reject_traversal_agent` for why). Delegated so the `--agent` flag gets
+    # the identical rule — it used to get none.
+    return normalise_agent_name(name)
 
 
 def _load_nudge_enabled(project_root: Path) -> bool:
@@ -937,8 +1085,83 @@ def _load_nudge_enabled(project_root: Path) -> bool:
     return "nudge" in enabled
 
 
-def make_plan(project_root: Path) -> SubmissionPlan:
-    """Build a SubmissionPlan from env + config."""
+def _source_plugins_root() -> Path | None:
+    """The repo's `plugins/` dir when running from an editable install, else None.
+
+    `lifecycle.list_installed` overlays source plugins on top of the installed
+    tree ("source wins"), and this helper lives INSIDE that tree — three parents up
+    is the plugins root — so it can see the same set without importing botainer.
+    """
+    root = Path(__file__).resolve().parents[2]
+    return root if root.name == "plugins" else None
+
+
+def authoritative_plugins_enabled(
+    project_root: Path,
+    config_enabled: tuple[str, ...],
+    *,
+    agent_override: str | None = None,
+    auth_mode_override: str | None = None,
+) -> tuple[str, ...]:
+    """`plugins_enabled` AS THE SESSION WILL ACTUALLY HAVE IT — asked, not derived.
+
+    This used to be a 79-line launcher-side projection: build the variant name
+    from a prefix rule, check whether it is installed, strip the other family's
+    agent plugins, and hope the answer matched compose's. It did not. Measured
+    over 72 project × flag combinations, it diverged in 18 — including with NO
+    FLAGS AT ALL, because `auth use shared` enables a variant for every installed
+    family and the projection returned that list untouched while a session
+    activates exactly one agent plugin. One of the divergences was a FALSE
+    REFUSAL: `--agent codex` on a project configured for `agent-claude-proxy` was
+    refused AS PROXY, though the session would run `agent-codex`.
+
+    So the projection is GONE, along with the prefix rule, the installed-variant
+    check and the parity test that held the convention equal — there is no second
+    convention left to hold. `composition.apply_plugin_overrides` is the only
+    implementation, and this asks it.
+
+    THE STANDALONE PATH IS STILL REAL and is why this is not simply an import at
+    the top of the file: the helper runs on a login node where `botainer` may not
+    be importable. When it is not, the CONFIG SET is returned unchanged and the
+    answer is labelled on stderr, because a guard judging the config's list is
+    what shipped for months and is better than no guard — but nobody should have
+    to guess which answer they got.
+    """
+    try:
+        from botainer.core import composition as _comp  # type: ignore[import-not-found]
+        from botainer.core import config as _cfg  # type: ignore[import-not-found]
+        cfg = _cfg.load_config(project_root)
+        composed = _comp.apply_plugin_overrides(
+            cfg,
+            agent_override=agent_override,
+            auth_mode_override=auth_mode_override,
+        )
+        return tuple(composed.plugins_enabled)
+    except Exception as exc:                                     # noqa: BLE001
+        import sys as _sys
+        _sys.stderr.write(
+            f"hpc-launcher: note — could not ask botainer which plugins this "
+            f"session activates ({type(exc).__name__}: {exc}); using the "
+            f"config's list, which does not reflect --agent / --auth-mode or "
+            f"the one-agent rule.\n"
+        )
+        return config_enabled
+
+
+def make_plan(
+    project_root: Path,
+    *,
+    agent_override: str | None = None,
+    auth_mode_override: str | None = None,
+    auth_profile_override: str | None = None,
+) -> SubmissionPlan:
+    """Build a SubmissionPlan from env + config, plus any one-shot overrides.
+
+    The overrides are REAL PARAMETERS, deliberately, and not more environment
+    variables. `profile` already arrives here via `BOTAINER_PROFILE`, and that
+    env-as-parameter habit is why `--auth-profile` had nowhere obvious to land
+    on the HPC side in the first place.
+    """
     cfg = load_plugin_config(project_root)
     cluster = detect_cluster()
     uid = os.environ.get("BOTAINER_PROJECT_UUID", "")
@@ -950,11 +1173,19 @@ def make_plan(project_root: Path) -> SubmissionPlan:
     # Coerce empty/unset to "default" so the __post_init__ profile validator
     # (which requires a non-empty flat token) doesn't false-reject a present
     # but empty BOTAINER_PROFILE.
-    profile = os.environ.get("BOTAINER_PROFILE") or "default"
+    profile = (auth_profile_override
+               or os.environ.get("BOTAINER_PROFILE") or "default")
     # Read top-level cfg.agent for per-agent bind mapping in
     # to_apptainer_argv. Empty string is acceptable — to_apptainer_argv
     # falls back to umbrella binds.
-    agent_name = _load_agent_name(project_root)
+    # The override wins, and it must be applied BEFORE _resolve_apptainer_image
+    # below — that call takes agent_name and picks the .sif from it, so
+    # `--agent codex` has to reach it or the job would run codex's entrypoint
+    # out of claude's image. `__post_init__` runs `_reject_traversal_agent` on
+    # whatever lands here, so a hostile value is refused on the same path a
+    # config-supplied one is.
+    agent_name = (normalise_agent_name(agent_override) if agent_override
+                  else _load_agent_name(project_root))
     apptainer_image = _resolve_apptainer_image(
         cfg, project_root, state_root, agent_name,
     )
@@ -968,6 +1199,9 @@ def make_plan(project_root: Path) -> SubmissionPlan:
         state_root=state_root,
         profile=profile,
         agent_name=agent_name,
+        agent_override=agent_override,
+        auth_mode_override=auth_mode_override,
+        auth_profile_override=auth_profile_override,
         partition=cfg.get("partition") or cluster.default_partition,
         account=cfg.get("account") or cluster.default_account,
         time_minutes=int(cfg.get("time_minutes") or cluster.default_time_minutes),
@@ -979,6 +1213,13 @@ def make_plan(project_root: Path) -> SubmissionPlan:
         submission_mode=str(cfg.get("submission_mode") or "submit"),
         existing_jobid=os.environ.get("SLURM_JOB_ID"),
         nudge_enabled=_load_nudge_enabled(project_root),
-        plugins_enabled=_load_plugins_enabled(project_root),
+        # ASKED, not derived — see `authoritative_plugins_enabled`. The raw
+        # `agent_override` goes in, not the normalised `agent_name`: compose's
+        # own swap does the normalising, and handing it a pre-chewed name was
+        # half of how the two answers drifted apart.
+        plugins_enabled=authoritative_plugins_enabled(
+            project_root, _load_plugins_enabled(project_root),
+            agent_override=agent_override,
+            auth_mode_override=auth_mode_override),
         network_mode=_load_network_mode(project_root),
     )

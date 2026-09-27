@@ -41,6 +41,7 @@ import secrets
 import signal
 import socketserver
 import sys
+import threading
 import time
 from collections import deque
 from datetime import datetime, timezone
@@ -137,7 +138,7 @@ class ProxyConfig:
         the entire JSON blob as x-api-key. The READ half is fixed here;
         the REFRESH half (Gap 3) is still v0.1.x.
 
-        CREDENTIAL-PROXY-INVESTIGATION.md finding #1: validate file
+        internal design note DN-042 finding #1: validate file
         ownership + mode bits before reading. A buggy write that left
         the file world-readable would silently leak the credential to
         anyone with shell on the host; refuse loudly instead.
@@ -225,7 +226,7 @@ class _RateLimiter:
 # rewrite the whole file in one pass without prior reads, but useful
 # against accidental truncation and casual tampering.
 #
-# Per CREDENTIAL-PROXY-INVESTIGATION.md finding #2.
+# Per internal design note DN-042 finding #2.
 
 import hashlib
 
@@ -547,7 +548,7 @@ def _start_launcher_watchdog(launcher_pid: int, server) -> None:
                     f"[proxy] launcher pid {launcher_pid} is gone; "
                     f"shutting down (orphan guard)\n"
                 )
-                server.shutdown()
+                threading.Thread(target=server.shutdown, daemon=True).start()
                 return
             except PermissionError:
                 # Process exists but we can't signal it — fine, still alive.
@@ -566,14 +567,34 @@ def main() -> int:
     server = _UnixHTTPServer(str(cfg.socket_path), handler)  # type: ignore[arg-type]
 
     def _shutdown(signum: int, _frame: object) -> None:
+        """SIGTERM handler. MUST NOT call `server.shutdown()` on this thread.
+
+        `socketserver.shutdown()` sets a flag and then BLOCKS until
+        `serve_forever()` acknowledges it. A signal handler runs ON the thread
+        that is inside `serve_forever` (or inside a request it dispatched), so
+        the thing it waits for cannot happen: the documented CPython deadlock.
+        The proxy then ignores SIGTERM entirely.
+
+        OBSERVED, not reasoned: a `timeout 5 python3 proxy.py` from an unrelated
+        measurement was still alive **3h29m** later, parked in
+        `futex_wait_queue`, socket not unlinked, no `proxy_stopped` audit record.
+        `timeout` had sent SIGTERM at five seconds.
+
+        Bounded today only by luck of layering — `stop_proxy.py` escalates to
+        SIGKILL after 3s, and whole-proxy auth mode is refused at v0.1.0, so no
+        user reaches it. Neither of those is a reason to keep a handler that
+        cannot run.
+
+        The fix is the shape the #108 watchdog in this same file already uses,
+        and the one `plugins/wolfram-sidecar/proxy.py` has always used: get off
+        the serving thread. `shutdown()` runs on a throwaway thread; this
+        handler returns immediately, `serve_forever()` unblocks, and the
+        `finally` in `main()` does the unlink and the audit record on the way
+        out — so cleanup happens exactly once, on one path, rather than being
+        duplicated here.
+        """
         sys.stderr.write(f"[proxy] received signal {signum}; shutting down\n")
-        try:
-            server.shutdown()
-        finally:
-            try:
-                cfg.socket_path.unlink()
-            except OSError:
-                pass
+        threading.Thread(target=server.shutdown, daemon=True).start()
 
     signal.signal(signal.SIGTERM, _shutdown)
     signal.signal(signal.SIGINT, _shutdown)

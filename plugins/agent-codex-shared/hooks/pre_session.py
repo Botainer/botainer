@@ -16,12 +16,9 @@ import sys
 from pathlib import Path
 
 
-# The per-project config dir INSIDE the container, and the variable that tells
-# codex to look there. These are ONE fact and must be written ONCE: shipping the
-# bind without the variable is precisely the bug the user hit  —
-# "I logged in. started the session and codex asks me to log in." The credential
-# was bound correctly at /home/agent/.codex and codex never knew, because it
-# resolves ~/.codex against the session HOME (/home/user) and found nothing.
+# The per-project configuration bind and CODEX_HOME must agree. Without the
+# variable, Codex searches the ordinary HOME for .codex and can miss the
+# credential correctly mounted at /home/agent/.codex.
 #
 # Its sibling agent-claude-shared has always contributed CLAUDE_CONFIG_DIR, and
 # agent-codex-broker has always contributed CODEX_HOME; only this plugin — the

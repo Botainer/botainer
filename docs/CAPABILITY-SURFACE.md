@@ -109,7 +109,7 @@ and plugins' `pre_session` hook contributions.
 | `/shared-auth/agent-<name>` | `<state_root>/shared-auth/agent-<name>` | rw | agent-<name>-shared pre_session | Host-wide credentials for shared-mode auth. Only mounted when shared mode is active. RW because OAuth token refresh atomic-replaces the credential file. |
 | `/workspace/.git/hooks` | `<project>/.git/hooks` | **ro** | git (guarded) pre_session | Read-only overlay so the agent cannot install host-executed git hooks (agent writes `.git/hooks/pre-commit` → user runs git on host → code runs as the user). Only when the `git` plugin is enabled in `guarded` mode (the default) and the project is a git repo. |
 | `/workspace/.git/config` | `<project>/.git/config` | **ro** | git (guarded) pre_session | Read-only overlay so the agent cannot ADD a host-code-exec key at runtime to bypass the hooks overlay. In-container git still writes transient config to the ephemeral `~/.gitconfig`. The hook ALSO refuses the session if `.git/config` already carries one: `core.hooksPath/sshCommand/fsmonitor(-as-program)/pager/editor/askpass/gitProxy`, `sequence.editor`, `credential.*.helper`, `gpg.*.program`, `filter.*.clean/smudge/process`, `diff.*.command/textconv`, `merge.*.driver`, a `!`-shell `alias.*`, or an `[include]`/`[includeIf]` (which would pull a dangerous key in via an agent-writable external file — bypassing the overlay). Worktree/submodule repos (`.git` is a gitdir-pointer file) are refused fail-closed (the real hooks live elsewhere and can't be overlaid yet). |
-| `<software_root>` (e.g. `/apps/python/3.11`) | same path (identity) | **ro** | hpc-modules host_pre_launch (#160) | Host software-root dirs `module load` ADDED to PATH/LD_LIBRARY_PATH/etc. The hook emits the raw post-purge/post-load env; composition (`run_host_pre_launch_hooks` → `derive_software_root_binds`) derives the binds, gated by the plugin's `caps.modules_software_roots` declaration + the root-owned SitePolicy `mounts.cluster_software_roots` ceiling. Empty ceiling → no binds (feature OFF). Never an umbrella; `validate_mount_plan` backstops. Applies on docker + direct-apptainer here; the sbatch path derives the same set on the OUTER argv (§2). See §4h. |
+| `<software_root>` (e.g. `/apps/python/3.11`) | same path (identity) | **ro** | hpc-modules host_pre_launch (#160) | Host software-root dirs `module load` ADDED to PATH/LD_LIBRARY_PATH/etc. The hook emits the raw post-purge/post-load env; composition (`run_host_pre_launch_hooks` → `derive_software_root_binds`) derives the binds, gated by the plugin's `caps.modules_software_roots` declaration + the root-owned SitePolicy `mounts.cluster_software_roots` ceiling. **Empty SITE ceiling no longer means no binds:** a cluster profile's `cluster.software_roots` fills a ceiling no administrator set (#156), and a DECLARED root is bound directly with no `module load` at all (#171). A site ceiling, when set, still wins and cannot be widened. Never an umbrella; `validate_mount_plan` backstops. Applies on docker + direct-apptainer here; the sbatch path derives the same set on the OUTER argv (§2). See §4h. |
 
 > **git guarded mode is a real control (H6).** Previously the plugin shipped
 > `hooks: []` and the overlay was never created while the default config claimed
@@ -131,7 +131,7 @@ and plugins' `pre_session` hook contributions.
 | `BOTAINER_SESSION_ID` | composition | Current session id. |
 | `BOTAINER_RUNTIME` | composition | `docker` / `apptainer` / `mock`. |
 | `BOTAINER_PLUGINS_ENABLED` | composition | Comma-separated list; lets plugins implement mutual exclusion (e.g. agent-claude skips its credential bind when agent-claude-proxy is also enabled). |
-| `BOTAINER_AGENT_PERMISSIONS` | composition (#53) | In-container posture SIGNAL (`bypass`\|`prompt`), = project config ∩ site-policy `agent.max_permissions` ceiling. Informational only — the agent may read it; the wrapper deliberately does NOT act on it. The actual flag is appended to the agent argv by compose (see §4ab). |
+| `BOTAINER_AGENT_PERMISSIONS` | composition (#53) | In-container posture SIGNAL, = project config ∩ site-policy `agent.max_permissions` ceiling. Carries the value the user WROTE, verbatim and unfolded — `prompt` stays `prompt` — so anything already reading this keeps seeing what it saw. Since 2026-09-21 the value set is wider than `bypass`\|`prompt`: it is any value §4ab admits for the selected agent. Informational only — the agent may read it; the wrapper deliberately does NOT act on it. The actual flags are appended to the agent argv by compose (see §4ab). |
 
 ### Env vars contributed by plugins
 
@@ -139,7 +139,7 @@ and plugins' `pre_session` hook contributions.
 |---|---|---|
 | `CLAUDE_CONFIG_DIR` | agent-claude(-shared/-proxy) | Tells Claude Code where to read .credentials.json. |
 | `CODEX_HOME` | agent-codex, agent-codex-shared, agent-codex-broker | Tells codex where to read `auth.json`. All three codex auth modes agree on `/home/agent/.codex`; disagreeing would strand the credential for anyone switching mode. **Added**: agent-codex-shared bound the credential at `/home/agent/.codex` and contributed `"env": {}`, so codex resolved its default `~/.codex` against the session `HOME` (`/home/user`), found an empty dir, and asked the user to log in again — with a valid credential mounted two inches away. A bind is delivery, not discovery. Both codex plugins now agree on `/home/agent/.codex`, and `tests/unit/test_agent_config_env_contract.py` runs every agent plugin's hook and asserts the bind/env pair agrees, so a future agent plugin cannot repeat the omission. |
-| `OPENAI_API_KEY_FILE` | agent-codex — **image** default, **hook** override | Path the codex entrypoint wrap reads to set `OPENAI_API_KEY` at exec time. The image bakes `/home/agent/.openai/api_key` and `entrypoint_wrap.sh` reads `${OPENAI_API_KEY_FILE:-…}`, so this worked with an empty hook contribution for as long as the bind sat at `/home/agent/.openai`. Since #62 the bind moved to `/home/agent/.codex` (codex reads OAuth tokens from `CODEX_HOME` and would never look in `.openai` for them), so the hook now **overrides** this to `/home/agent/.codex/api_key` whenever an `api_key` file exists — without that override an API-key project would silently lose its credential the moment the bind target moved. (I briefly recorded this row as false  after reading only the hook; the mechanism lived one layer down in the image. Corrected the same day.) |
+| `OPENAI_API_KEY_FILE` | agent-codex — **image** default, **hook** override | Path the codex entrypoint wrap reads to set `CODEX_API_KEY` (and, for other tooling in the image, `OPENAI_API_KEY`) at exec time. **Corrected 2026-08-27:** this row said the wrap set `OPENAI_API_KEY`, and so did the wrap. Measured against codex-cli 0.145.0 in a container: with only `OPENAI_API_KEY` set, codex behaves exactly as if no credential were present; `CODEX_API_KEY` is the variable it reads, and its own message says so. `OPENAI_API_KEY` appears in codex's help only as something you PIPE into `codex login --with-api-key` — an input to that command, never an ambient variable. So every mount/isolated/shared codex session delivered the key to a variable nothing read. Both names are now exported; the second is kept because SDKs and notebooks in the image read it by convention. Nothing new crosses the boundary — the container already had the key file bound; only the in-container variable name changed. The image bakes `/home/agent/.openai/api_key` and `entrypoint_wrap.sh` reads `${OPENAI_API_KEY_FILE:-…}`, so this worked with an empty hook contribution for as long as the bind sat at `/home/agent/.openai`. Since #62 the bind moved to `/home/agent/.codex` (codex reads OAuth tokens from `CODEX_HOME` and would never look in `.openai` for them), so the hook now **overrides** this to `/home/agent/.codex/api_key` whenever an `api_key` file exists — without that override an API-key project would silently lose its credential the moment the bind target moved. (I briefly recorded this row as false  after reading only the hook; the mechanism lived one layer down in the image. Corrected the same day.) |
 
 ## 2. Apptainer runtime (HPC compute node)
 
@@ -500,7 +500,8 @@ unvalidated — the same flag-injection vector, reaching `apptainer exec
 `SubmissionPlan.__post_init__`, making the frozen dataclass the
 universal chokepoint on the HPC side (mirrors the `SessionSpec.image`
 field validator): make_plan, the override merge, the auto-yes rebuild,
-and tests all validate. Generated `.sif` paths (resolver cases 3–5) are
+and tests all validate. Generated `.sif` paths (the resolver's
+filename/recorded candidates, after the two config-sourced branches) are
 absolute and pass cleanly.
 
 The image is NOT otherwise free-form: it must be an OCI reference or an
@@ -728,8 +729,13 @@ so it carries the full umbrella-bar (DN-003):
   **verbatim from the site policy** in `policy.intersect()` (NOT
   intersected with the user-writable `cluster.yaml`/user policy — that would let
   a user widen it = self-grant on a multi-tenant cluster, and a default-empty
-  user list would zero an admin-set ceiling). Empty ceiling → **no binds**
-  (feature OFF; the only safe default). **Not silent (audit T1):** when
+  user list would zero an admin-set ceiling). **An empty SITE ceiling is no
+  longer OFF:** `software_root_ceiling` falls back to the cluster profile's
+  `cluster.software_roots` when no administrator set one (#156), and #171
+  binds a DECLARED root with no `module load` in the picture. The one-way
+  rule is unchanged and is the part that matters: a site ceiling, when set,
+  WINS and a profile cannot widen it. Corrected 2026-09-04 — the claim was
+  already stale from #156 and wiring #171 widened the gap. **Not silent (audit T1):** when
   `module load` ADDED dirs but none survive the ceiling, both flows emit a
   loud WARNING (composition stderr; the sbatch login-node confirmation shows an
   explicit OFF line) naming the dropped dirs + the remediation (admin adds the
@@ -757,6 +763,12 @@ so it carries the full umbrella-bar (DN-003):
   cannot collapse to `/` even under a misconfigured shallow prefix. **No
   common-ancestor widening** (conservative v1 — bin/lib/include arrive via their
   own path-var diffs).
+
+  The derived software-root system denylist compares its prefixes in both
+  their literal and resolved forms.
+  This includes macOS aliases such as `/etc` → `/private/etc` and `/var` →
+  `/private/var`; resolving a candidate does not remove that denial. This
+  correction changes no software-root capability or policy ceiling.
 - **RO identity binds** (`source == target`), never rw. The bound path is the
   candidate's **realpath** (symlink-resolved). On a symlink-farm cluster
   (`/apps` → `/vast/...`) the bind target is therefore the resolved `/vast`
@@ -1284,7 +1296,11 @@ note — this closes the docker/direct gap.)
 - **Behavior (fail-fast):** `start_proxy.py::main()` now refuses at the TOP
   (before spawning the proxy or emitting a contribution) with an explicit "NOT
   FUNCTIONAL at v0.1.0" message that names the blocker and points at
-  `--mode=shared`/`--mode=isolated`. This converts a confusing late
+  `botainer auth use shared` / `botainer auth use isolated`. (Corrected
+  2026-09-14: this entry, and the hook itself, named `--mode=shared` — not an
+  option of any command, so the remedy ended at "Error: No such option". The
+  behaviour described here is unchanged; only the command named is now one
+  that exists.) This converts a confusing late
   leak-check refusal ("credential-shaped env var in hook contribution") into a
   legible early one. The universal leak-check remains the airtight backstop
   (defense-in-depth: even with the guard bypassed, the session still refuses).
@@ -1312,27 +1328,80 @@ note — this closes the docker/direct gap.)
 
 **What changed.** Previously the caged agent ran with its stock *interactive*
 permission prompts ON — which deadlocks a TTY-less HPC batch job (the product's
-core use case). Now a config knob `agent_permissions: bypass|prompt` (default
-`bypass`), ceilinged by site policy, sets the posture; **compose appends the
-agent's bypass flag(s) to the INNERMOST entrypoint wrap** (the token becomes the
-wrapper's `"$@"`, forwarded to the agent CLI).
+core use case). A config knob `agent_permissions` (default `bypass`), ceilinged
+by site policy, sets the posture; **compose appends the posture's flag(s) to the
+INNERMOST entrypoint wrap** (the tokens become the wrapper's `"$@"`, forwarded
+to the agent CLI).
 
-**Rebuild-independent (revision).** The flag is applied by the
+**Rebuild-independent (revision).** The flags are applied by the
 LOGIN-NODE / launcher compose, NOT by logic inside the image's entrypoint
 wrapper — so changing the posture does NOT require rebuilding the `.sif`/docker
 image (the wrapper is a dumb `exec claude "$@"` forwarder, unchanged across
-versions). The flags are a FIXED first-party set keyed on the agent family
-(`_AGENT_BYPASS_FLAGS` in composition.py); a plugin selects WHICH set via its
+versions). The flags are a FIXED first-party table keyed on the agent family
+(`botainer/core/agent_permissions.py`); a plugin selects WHICH row via its
 family but cannot inject arbitrary flags, so `command_append` stays refused
-(#290). `BOTAINER_AGENT_PERMISSIONS` is still set in the container env as an
-posture signal, but nothing reads it to produce the flag.
+(#290). `BOTAINER_AGENT_PERMISSIONS` is still set in the container env as a
+posture signal, but nothing reads it to produce the flags.
 
-- **`bypass` (default)** → claude `--dangerously-skip-permissions`; codex
-  `--sandbox danger-full-access --ask-for-approval never`. The agent runs with NO
-  per-action prompts. The container (binds + network + §4 cage) is the ONLY
-  boundary. Codex's OWN sandbox is disabled deliberately: it cannot nest inside
-  an apptainer cage (no nested user namespaces), and the cage already sandboxes.
-- **`prompt`** → no flag; the agent's stock interactive prompts (TTY only).
+### The vocabulary (revised 2026-09-21)
+
+Two words mean the same thing for every agent. Everything else is **the agent's
+own mode name**, passed through and validated against that agent's vocabulary —
+botainer does not invent a parallel set of permission names.
+
+| value | claude | codex |
+|---|---|---|
+| **`bypass`** (default) | `--dangerously-skip-permissions` | `--sandbox danger-full-access --ask-for-approval never` |
+| **`default`** (`prompt` is a permanent alias) | *nothing appended* | `--sandbox danger-full-access` only |
+| `acceptEdits` `auto` `plan` `manual` `dontAsk` `bypassPermissions` | `--permission-mode <value>` † | refused, naming what codex takes |
+| `untrusted` `on-request` `never` | refused, naming what claude takes | pinned sandbox + `--ask-for-approval <value>` |
+| `read-only` | refused | `--sandbox read-only -c features.use_legacy_landlock=true` |
+| `workspace-write` | refused | **refused with the measurement** — see below |
+
+† except `bypassPermissions`, which maps to `--dangerously-skip-permissions`:
+the binary states that `--permission-mode bypassPermissions` additionally
+requires `--allow-dangerously-skip-permissions`, and botainer passes the
+single-flag spelling that has been shipping.
+
+Validation is two-stage, and must be: at config parse the agent is NOT yet known
+(`agent:` is a sibling field and `botainer start --agent` can override it), so
+parse accepts the union of every agent's vocabulary and catches typos; compose
+narrows to the selected agent and refuses a cross-agent value, naming what that
+agent accepts. A value botainer cannot translate is **refused, never silently
+dropped** (#128).
+
+### Why codex's sandbox is pinned, and what that claim is now
+
+The previous text here said codex's own sandbox "cannot nest inside an apptainer
+cage (no nested user namespaces)". **That was too narrow in one direction and
+too broad in the other**, and both halves are corrected by measurement
+(codex-cli 0.145.0, run in a docker dev container, 2026-09-21):
+
+- It is not apptainer-specific. The failure is any container that cannot create
+  an unprivileged user namespace, which includes the docker case.
+- It is not "codex's sandbox". codex ships **two** backends. Only the default
+  (bubblewrap) needs a user namespace. The landlock backend needs none, and
+  under it `read-only` both starts **and enforces** — a write returns
+  `Permission denied` and the target file is unchanged.
+- `workspace-write` fails on **both** backends: bubblewrap cannot start, and
+  landlock refuses that mode outright ("permission profiles requiring direct
+  runtime enforcement are incompatible with --use-legacy-landlock").
+
+So codex's `default` pins `--sandbox danger-full-access` and this is a
+**CHOICE**, not a physical constraint: `danger-full-access` is the only mode that
+runs commands with codex's shipped default backend. Leaving the sandbox
+unspecified produces an agent that launches, warns once, and then fails every
+command — alive but crippled, which reads as working. `read-only` remains
+available for anyone who wants a real inner boundary.
+
+This is a **filter, not a structural guarantee**, and holds only while the
+measurement holds. The project ships a host-side probe that re-measures it on any
+machine. **Not yet measured under apptainer on an HPC compute node** — landlock
+needs kernel ≥5.13 or a backport, which many clusters do not have.
+
+An earlier claim that the agent images ship no bubblewrap, and that this was a
+second independent reason to fail, is **withdrawn**: the npm package bundles its
+own `codex-resources/bwrap`, and codex uses it when no system one is on PATH.
 
 **Trust model — why this is safe.**
 - The flag is injected by *trusted first-party* code (composition → env →
@@ -1928,14 +1997,42 @@ compared).
 **Two auth modes, auto-detected from botainer's own codex login store** (the hook
 reads it and picks the mode; the container is never told which):
 
+**HOW CODEX IS POINTED AT THE BROKER: a FILE, not an env var.** This is the one
+place botainer's two brokers differ in mechanism. Claude Code follows
+`ANTHROPIC_BASE_URL`; codex does **not** follow `OPENAI_BASE_URL` for its model
+calls, on either auth path — measured against codex 0.153.2 on 2026-09-04, it
+goes to `chatgpt.com/backend-api/codex` (subscription) or
+`wss://api.openai.com/v1/responses` (API key) regardless. So the hook writes
+`$CODEX_HOME/config.toml` into the broker-state dir with a `model_providers`
+entry: `base_url` = the per-session broker, `wire_api = "responses"`,
+`env_key = "OPENAI_API_KEY"` (the sentinel), `requires_openai_auth = false`
+(this is what stops codex demanding a login), `supports_websockets = false`
+(the WebSocket transport ignores the configured base URL). That file **is** the
+routing. It carries no secret, is rewritten every session, and is agent-editable
+without effect: an edit can only redirect the SENTINEL, which is not a
+credential, and the daemon still refuses anything not presenting it.
+
+**No `auth.json` is written into the container, in either mode**, so nothing in
+the cage holds or attempts an OAuth refresh. A stale stub left by an earlier
+botainer is deleted at start — the broker-state dir outlives the session, and a
+leftover stub puts codex into ChatGPT mode where it contacts chatgpt.com
+directly and bypasses the broker entirely.
+
+`OPENAI_BASE_URL` is still set. It no longer routes codex, and is retained
+because it is the only thing check 3 of `_refuse_cross_node_binds` can see for
+this TCP-transport plugin (which contributes no bind): without it `hpc submit`
+would bake a login-node `127.0.0.1` into an sbatch script that runs on a compute
+node. Ordinary OpenAI-SDK clients in the container also honour it and reach the
+broker. Pinned by `test_broker_endpoint_stays_visible_to_the_cross_node_guard`.
+
 1. **API-key** (auth.json `OPENAI_API_KEY` or the per-project `api_key` file).
    Provider `openai`; upstream pinned `https://api.openai.com`; `/v1/` allowlist;
-   container `OPENAI_BASE_URL=<broker>/v1`; inject `Authorization: Bearer sk-…`
+   container provider `base_url = <broker>/v1`; inject `Authorization: Bearer sk-…`
    (`broker/openai_credential.OpenAICredentialBroker`). No refresh — keys don't
    expire.
 2. **ChatGPT subscription** (auth.json with a `tokens` object). Provider
    `openai-chatgpt`; upstream pinned `https://chatgpt.com`; `/backend-api/codex/`
-   allowlist; container `OPENAI_BASE_URL=<broker>/backend-api/codex`. The
+   allowlist; container provider `base_url = <broker>/backend-api/codex`. The
    `broker/openai_oauth.CodexOAuthCredentialBroker` reads the OAuth bundle,
    refreshes the access token host-side at the PINNED
    `https://auth.openai.com/oauth/token` (client_id `app_EMoamEEZ73f0CkXaXp7hrann`,
@@ -2093,6 +2190,41 @@ path (`dispatcher.submit_request` passes the resolved gpus) and the warm-pool pa
 a follow-up. Unit-tested (`test_hpc_jobs_child.py`); real GPU-node exposure needs
 live-cluster validation.
 
+**Extended to SESSIONS (#177).** The paragraph above was true of dispatched jobs
+and warm-pool tasks and false of an ordinary session: `hpc submit --gpus N`
+emitted `#SBATCH --gres=gpu:N`, took the allocation, and launched a container
+with no `--nv`. `ResourceSpec.gpus` had been removed in #175 on the rule "only
+fields an adapter reads live here" — correct for `time_minutes`, `partition`,
+`account` and `gpu_type`, wrong for `gpus`, which means two things at once:
+Slurm ALLOCATES the device, and the container must separately be allowed to SEE
+it. Restored and rendered by both adapters — `--nv` (apptainer), `--gpus N`
+(docker).
+
+**What `--nv` costs, stated because "needs no privilege" is not the same claim.**
+It binds the host's NVIDIA driver libraries — real host paths, selected by
+apptainer's nvliblist, that are NOT enumerated in the §1/§2 tables — and exposes
+`/dev/nvidia*`, `/dev/nvidiactl` and `/dev/nvidia-uvm`, i.e. direct ioctl access
+to the GPU driver from an untrusted, prompt-injectable process. On a shared node,
+device memory is not guaranteed zeroed between jobs; that is a known class for
+GPUs and is not a measurement of any particular cluster. **The widening that
+matters here is reach, not the flag**: this capability was previously available
+only through a *job* — profile-capped and policy-checked — and is now reachable
+from an ordinary interactive session, bounded only by what Slurm grants.
+
+**Local (docker) behaviour.** On **macOS** a GPU request is REFUSED at compose:
+Docker Desktop runs Linux in a VM with no NVIDIA passthrough, and Apple-Silicon
+GPUs are not exposed to Linux containers, so the request cannot be honoured under
+any configuration. The refusal names the alternatives (`resources.gpus: 0`, a
+Linux NVIDIA host, or `hpc submit`) rather than letting dockerd emit an error the
+user must decode. *This platform fact is taken from documentation, not measured —
+there is no Docker daemon in the dev container.* On **Linux** it WARNS and
+proceeds: whether the NVIDIA Container Toolkit is installed cannot be known at
+compose time without calling the daemon, so refusing would break every correctly
+configured GPU host, and silence would reproduce #177's failure-far-from-cause.
+`_refuse_or_warn_on_gpu_request` (`core/composition.py`); apptainer is never
+platform-checked, since `--nv` degrades to "no device visible" rather than
+failing. Still NOT validated on a real GPU node, on either path.
+
 ## 4at. Governed MCP servers — plugin `contributes.mcp_servers`
 
 > **An MCP server reaching the agent is a GOVERNED grant, not a side effect.**
@@ -2106,8 +2238,15 @@ A plugin may now declare `contributes.mcp_servers: [{name, command, args, env}]`
 (`plugins/manifest.py::McpServerDecl`). The launcher writes these into the agent's
 MCP config ONLY when the plugin is enabled, so an MCP tool becomes a GOVERNED grant:
 - it runs INSIDE the §4 cage (same isolation as the agent);
-- it inherits the plugin's trust (tier + trust-lock) — a third-party plugin's MCP
-  server is a supply-chain grant surfaced at session start (capability summary);
+- it inherits the plugin's trust. This is the part to read carefully, because an
+  MCP server is a SUPPLY-CHAIN grant: enabling a plugin that ships one means its
+  tools can touch network, filesystem and commands, with the plugin's tier and
+  trust-lock as the only thing standing behind them. **That grant is not
+  currently itemised for the user anywhere.** The capability summary names no
+  MCP server and no tool — `mcp_capability_lines` exists but nothing calls it,
+  so per-tool disclosure is a FOLLOW-UP, listed below, not something this
+  document should be read as promising. What you get today is the trust chain
+  (enabled + tier + lock), not a session-start list of what those tools can do;
 - every field is charset-guarded at parse time (name `[A-Za-z0-9_.-]+`; command
   non-empty, no leading dash, no control chars; args control-char-free; env keys
   are identifiers, values control-char-free) — config → argv+env, never shell.
@@ -2119,10 +2258,35 @@ REFUSED) and written to a launcher-owned `mcp-servers.json`, bound RO at
 AGENT_HINTS.md). Claude Code is then launched with `--mcp-config <that path>
 --strict-mcp-config` — appended to the INNERMOST agent wrap by TRUSTED compose
 (alongside the #53 permission flags; NOT a plugin `command_append`, which stays
-refused), Claude-family only. `--strict` means the agent gets EXACTLY these
-governed servers and NO ungoverned ones (project `.mcp.json` / user `.claude.json`
-/ connectors are all excluded) — an MCP tool can only reach the agent THROUGH an
-enabled, trust-locked plugin. Proven end-to-end in test_compose_end_to_end.py
+refused), Claude-family only. When the flag IS passed, `--strict` means the agent
+gets exactly these governed servers and no ungoverned ones (project `.mcp.json`,
+user `.claude.json` and connectors are all excluded).
+
+**BUT IT IS CONDITIONAL, and this paragraph used to imply otherwise.** Both the
+file and the flag are produced ONLY when an enabled plugin actually contributes
+an MCP server — `composition.py` gates the file on `if _mcp_cfg:` and the flag on
+`if _mcp_target is not None:`. In the DEFAULT configuration, where no plugin
+contributes one, botainer passes **no `--strict-mcp-config`**, and Claude Code
+reads its ordinary sources, including a `.mcp.json` that arrived with a cloned
+repository. The sentence "an MCP tool can only reach the agent THROUGH an
+enabled, trust-locked plugin" was true only in the contributing case. The test
+below asserts the absence as intended, so the condition is deliberate — the
+CLAIM was the error, not the code.
+
+**The project channel stays open.** A server named in a cloned repo's `.mcp.json` runs stdio INSIDE the
+cage; under the default `agent_permissions: bypass` the agent already has
+arbitrary command execution there, so it confers no capability the agent lacked,
+and under `network.mode: none` it reaches no network. What the file does get is a
+place in the model's tool schema — repo-authored tool names and descriptions.
+That is **the risk of cloning a repository at all**, not a surface peculiar to
+MCP: the same clone can carry a `Makefile`, a `package.json` `postinstall`, a
+build script or a git hook, each of which acts when something runs it. Singling
+out `.mcp.json` while accepting the rest would cost the feature and buy little.
+Mitigation for that whole class — including whether botainer should render its
+policy into the AGENT'S OWN settings rather than blanket-bypassing prompts — is
+tracked as research, not as a blocker.
+
+Proven end-to-end in test_compose_end_to_end.py
 (file+bind+flag present when a plugin contributes; absent when none do). Follow-ups:
 splice per-tool lines into the capability summary (`mcp_capability_lines` exists);
 codex MCP delivery (config.toml); the browser plugin as the first real consumer.
@@ -2445,6 +2609,51 @@ When you change the runtime's surface:
    propagated through a security boundary like `--cleanenv`, any
    relaxation of network mode), run `/second-opinion` BEFORE merge.
 
+5. **When the change touches a listed file but not the surface**, say so in
+   the commit message and skip step 1:
+
+       Surface-Neutral: renames a local; no bind, env, capability
+                        or argv change
+
+   **JUDGE TWO SURFACES, not one** (decided 2026-09-12, after the field was used
+   to two different standards in one week):
+
+   | surface | what moves |
+   |---|---|
+   | THE CAGE | a bind, an env var crossing `--cleanenv`, a capability grant, a plugin envelope, an argv element, a refusal boundary |
+   | THE HUMAN | whether a refusal MOVES, whether a flag or off-switch appears or disappears, what a user is TOLD or ADVISED |
+
+   Cage-unchanged is **not sufficient**. One commit asserted neutrality while
+   moving a refusal in both directions and adding a user-facing off-switch a
+   shipped guide then recommended — the cage really was identical, and the
+   assertion was still the wrong shape.
+
+   So the field carries one of two legal shapes: **(a)** nothing changes, and
+   why; or **(b)** what DOES change and in which DIRECTION ("no refusal added or
+   relaxed and the cage is identical; what changes is DISCLOSURE: X now says Y
+   where it was silent"). (b) is the honest answer when the cage holds and the
+   human surface moves — not a loophole. Asserting (a) when (b) is true is the
+   misuse this paragraph exists to name.
+
+   The repository's commit gate accepts this in place of an edit to this file.
+   It exists because the alternative was worse: a one-line fix to a warning
+   string in `botainer/cli/auth.py` needed either an unrelated entry here —
+   diluting a contract with maintenance notes — or bypassing verification
+   entirely, which the project forbids. The refusal text had offered this skip
+   since it was written and provided no way to take it.
+
+   **It is an ASSERTION, not a verification.** The tool cannot tell a comment
+   change from a capability change; nothing about the trailer makes the claim
+   true. It is a trailer rather than a flag so it is permanent and greppable —
+   `git log --grep='^Surface-Neutral:'` lists every use, so a wrong one is
+   evidence rather than an absence. Same status as `Reviewed-By:`.
+
+   Mechanically, the inventory requirement is enforced by the **commit-msg**
+   hook rather than pre-commit, because at pre-commit git has not written the
+   message and no trailer can be read. Pre-commit defers with a note — and
+   REFUSES outright if the commit-msg hook is not installed, so deferring can
+   never silently delete the gate.
+
 This is the workflow that would have caught the umbrella-bind
 disaster at commit time.
 
@@ -2526,6 +2735,14 @@ sides, so a link pointing into the writable tree is refused too. The
 `agent_writable_roots` parameter of `run_hook` is REQUIRED (not defaulted) so a
 future call site cannot silently opt out — forgetting it is a `TypeError`, not a
 silent bypass.
+
+The Claude and Codex broker daemon launches, interactive setup from Start,
+HPC submit/attach forwarding, scheduled nudge, and automatic dispatcher
+invoke their existing Python module with `-I -B`. These calls do not load
+Botainer through the current directory, `PYTHONPATH`, or the user site.
+Botainer and the child's dependencies must be importable from the selected
+interpreter's non-user installation paths. This covers those named calls; it is not a claim about
+every host Python subprocess or about the integrity of an editable install.
 
 ## 4ay. Plugin trust is mechanism-derived, never self-declared
 
@@ -2672,7 +2889,18 @@ limit, total-job budget, or spend cap at v0.1 (the shipped broker dropped the ra
 limiter the deprecated proxy had). Replaced with per-area facts and their stated
 limits, plus a pointer to what is not covered at all.
 
-## 4bg. A nested botainer project is refused
+## 4bg. A nested botainer project is refused — SUPERSEDED 2026-09-15 by §4dt
+
+> **SUPERSEDED. Discovery WARNS; it no longer refuses.** Read §4dt for the
+> current behaviour and for why. The analysis of the HAZARD below is still
+> accurate and is why anything is printed at all — the mask's domain really is
+> one path, and its consumer really does walk up to the nearest `.botainer/`.
+> The response changed because the commands that
+> reach that function take no project path, so the refusal's closing sentence
+> ("takes an explicit project path") named a remedy they do not have, and a
+> stray ENCLOSING project made every one of them unusable. This section is kept
+> rather than deleted because the derivation is the part a future reader needs;
+> it is not a description of what the code does today.
 
 The null-bind mask is what makes `.botainer/config.yaml` **trusted input** — it is
 the reason the launcher may read the project config without treating it as
@@ -2692,8 +2920,12 @@ mechanism was: *structural for `/workspace/.botainer`; nothing at all for any ot
 the agent has not created yet), the gap is closed on the **consumer** side:
 discovery now **refuses** when the project it found is nested inside another
 botainer project — the exact shape an agent can manufacture — instead of silently
-preferring the inner one. Legitimate nesting is rare and takes an explicit project
-path.
+preferring the inner one.
+
+*(Superseded: see the banner at the top of this section and §4dt. The final
+sentence as originally written — "Legitimate nesting is rare and takes an
+explicit project path" — was false about the commands this guard governs, and
+that falsehood is what made the refusal a dead end.)*
 
 ## 4bh. `.sif` provenance is verified on every path, including HPC
 
@@ -2707,6 +2939,30 @@ the `apptainer:sha256:<hex>:<path>` marker and discarded the hex half.
 The verification now runs on both branches, with unchanged fail-open-on-no-marker
 semantics (a manually-placed `.sif` or an old install has no baseline, so it
 proceeds — as before).
+
+**WHAT IS ACTUALLY ENFORCED, MEASURED 2026-09-12.** The heading above says "every
+path" and the paragraph above says "both branches"; neither was the whole story,
+so here is the table instead of the adjective. Verification happens at ONE exit in
+`_resolve_session_image`, keyed on which resolution source produced the path
+(`_ENFORCE_SIF_PROVENANCE`), and `cli/hpc.py::_resolve_child_image` applies the
+same policy for dispatched jobs and warm-pool workers:
+
+| how the image was resolved | mismatch with the recorded sha256 |
+|---|---|
+| `image_override` — what `botainer hpc submit` always uses | **refused** |
+| the agent plugin's own built `.sif` | **refused** |
+| a top-level `image:` in the project config | **stated on stderr, and it runs** |
+| an apptainer sandbox DIRECTORY | cannot be hashed at all; stated, with the same two outcomes as above |
+| no marker recorded (manual `.sif`, old install, `image forget`) | nothing to compare; proceeds silently |
+| a per-profile `job_profiles.<name>.image` | no baseline exists for it; not compared |
+| docker, any path | not compared — see the paragraph below |
+
+The third row is a deliberate non-refusal and it is the one a reader should notice:
+a top-level `image:` is the configuration `GETTING_STARTED-HPC.md` documents, and
+until 2026-09-12 `botainer start` did not look at that `.sif` at all. It now says
+so and launches. Whether it should refuse instead — which would make `start` agree
+with `hpc submit`, at the cost of refusing an image built elsewhere and copied in —
+is an open decision, not a settled posture.
 
 Still open from that audit: **Docker has no image-identity check at all** (the
 recorded image ID is never compared, and the consent fingerprint keys on the tag
@@ -2784,8 +3040,7 @@ browser-npx and /tmp-splatter failures. `composition.py` even asserted the
 mechanism in a comment: "Crosses `apptainer --cleanenv` as `--env` (adapters
 render spec.env.values)." On Apptainer that was false.
 
-**Effect — SMALLER than first recorded here; corrected after the
-user reported that sessions in fact work.** The home directory was bound at
+**Effect.** The home directory was bound at
 `/home/user` and nothing pointed at it, so on apptainer `$HOME` was not the
 persistent bind. The first version of this entry claimed "every cache,
 credential and package write went somewhere ephemeral" — that was wrong, and
@@ -3450,41 +3705,212 @@ Non-agent plugins (git, nudge, browser) are never touched.
 Pinned by `tests/integration/test_only_one_agent_activated.py`.
 
 
-## 4cb. Auth mode decides where session HISTORY lives — warned, not yet fixed
+## 4cb. A mode or profile switch relocates the agent's config dir — and botainer carries it
 
-Every auth mode binds the same container config dir from a different host dir:
+Every auth mode binds the same container path from a different host directory,
+and the profile name is a path component in all of them:
 
-| mode | host dir behind `/home/agent/.{codex,claude}` |
+| mode | host dir behind `/home/agent/.{claude,codex}` |
 |---|---|
 | shared | `…/data/agent-<x>/profiles/<profile>` |
 | isolated | `…/data/agent-<x>/profiles/<profile>` (same as shared) |
 | **broker** | `…/data/agent-<x>/broker-state/<profile>` |
 
-Both CLIs keep session history in that dir, so `auth use broker` (and back)
-relocates the user's conversation history. Reported as *"session not being saved
-after I exit… maybe when I make a config change?"* — correct, and it read as a
-guess only because the move was silent.
-
 **The separation is load-bearing and must not be removed.** `broker-state/`
-exists because it *"Holds NO credential"* — that is the whole point of broker
-mode, whose guarantee is that the container never receives the refresh token.
-Shared mode, by contrast, keeps `auth.json` in its dir as a symlink into
-`/shared-auth/agent-<x>`. Binding one directory for all modes would place the
-real credential inside a broker session — the §4ca leak, reintroduced from the
-opposite direction. **Do not "simplify" these into one path.**
+exists because it holds NO credential — that is broker mode's guarantee, that
+the container never receives the refresh token. Shared mode, by contrast, keeps
+its login in that directory as a shortcut into `/shared-auth/agent-<x>`.
+Binding one directory for all modes would place a real credential inside a
+broker session: the §4ca leak, reintroduced from the opposite direction. **Do
+not "simplify" these into one path.**
 
-**Status: warned, not fixed.** `auth use` now prints, whenever a switch crosses
-broker, that history moves, that nothing is deleted, and the host path of each
-mode's copy. It stays silent for shared ↔ isolated, which share a directory.
+That directory holds more than your login. It is also the agent's whole working
+memory — every transcript, todo and setting. So a switch used to swap it for an
+empty one, silently. It no longer does.
 
-**The proper fix (#122)** is to stop partitioning history by auth mode at all —
-history is not credential material and should follow the PROJECT, while auth mode
-governs only credentials. That requires changing credential delivery, which is
-the most fragile machinery in the system: the symlink exists because `rename()`
-destroys it (EF-2), `post_session` reconciles refreshed tokens through it, and a
-file bind pins an inode (§4bz-adjacent). All three failure modes were hit on
-alone, which is why this was deliberately left as a designed change
-rather than an end-of-session edit.
+**All THREE routes carry it**, which is newer than it sounds. There are three
+ways to change a mode or profile, and until 2026-09-05 only two of them said
+anything:
+
+| route | behaviour |
+|---|---|
+| `botainer auth use <mode>` | warns, offers the carry |
+| `botainer config set profile <x>` | warns, offers the carry |
+| **edit `.botainer/config.yaml`, then `botainer start`** | **carried nothing, said nothing** |
+
+The third is the one botainer's own `--auth-profile` help text recommends for a
+persistent change, so the documented path was the silent one. `start` now
+compares what the config file DECLARED at the last start against what it says
+now (`botainer/state/declared.py`) and offers the same carry. It compares the
+declared value rather than the effective session spec deliberately: the spec has
+one-shot flags folded in, so comparing specs would treat a temporary
+`--auth-profile work` as a switch and the next plain `start` as a switch back —
+two carries from one flag. Reading only what the file said cannot see a flag.
+
+Without a terminal it states what moved and proceeds rather than prompting:
+`start` runs under `hpc submit` and in CI, where a prompt on closed stdin would
+turn a config edit into a failed launch.
+
+### What travels
+
+| | carried | why |
+|---|---|---|
+| transcripts, todos, prompt history | **yes** | the thing the user notices losing |
+| `settings.json`, user subagents, plugins | **yes** | nothing about them depends on how you sign in |
+| this project's MCP servers, allowed tools, trust answer | **yes** | project config; the state dir is already per-project |
+| **your sign-in file** | **no** | see below |
+| **the account keys inside `claude.json`** | **no** | see below |
+
+Note what that second row does NOT say. Your transcripts identify you perfectly
+well and they travel; this is about two named things, not about anonymity.
+
+**Config travels with history, deliberately.** The state directory is per
+PROJECT, so a switch moves between two slots of the same project. Carrying the
+transcripts but not the tools would be an arbitrary line.
+
+### What does not, and why
+
+**Your login.** A switch is a change of login, so you sign in once on the other
+side and the prompt says so before you agree to it. Two reasons it cannot simply
+be copied across. Broker mode's directory is defined by holding no login at all
+— that is the guarantee broker mode exists to make, that the container never
+receives your refresh token — so putting one there would break it. And shared
+mode's login is refreshed in place: copy it and you get two, of which only the
+most recently refreshed still works, while nothing tells you which that is
+(EF-1).
+
+**Your account details.** Your email address, your organisation's policy flags,
+what your plan entitles you to. §4cm settles why these cannot travel: a profile
+separates ACCOUNTS, not just files, and nothing on disk can tell you whether two
+profiles belong to the same account — not even two with the same name. Since
+your login does not travel either, account details that did would leave a
+directory naming an account it cannot sign in as. One file mixes these with
+settings worth keeping; that file is rebuilt from the settings rather than
+copied whole. See property 1.
+
+### Five properties of the carry
+
+Each is a SHAPE rather than a check: the bad outcome is not something botainer
+looks for and rejects, it is something the code has no way to express. That
+distinction matters because a check only holds while it stays complete, and the
+two defects found while building this were both a check that had a gap.
+
+1. **Your sign-in, and the account details stored with it, stay behind.**
+
+   Two specific things from two specific places, not a general guarantee:
+
+   - the file holding your login, in whichever form this mode keeps it;
+   - the account keys inside `claude.json` — your email address, your
+     organisation's policy flag, and the caches of what your plan allows.
+
+   **This is not anonymity, and the section does not claim it.** Your
+   transcripts say who you are, what you work on and how you write, and they
+   DO travel — that is the entire point of carrying them. A profile is not a
+   disguise and switching to one does not make your history untraceable to
+   you.
+
+   What it prevents is narrower and specific. You made two profiles to keep
+   two ACCOUNTS apart. If the stored account details travelled, the profile
+   you switched *to* would name the account you switched *from* — and since
+   your sign-in does not travel either, it would name an account it cannot
+   sign in as. That is the failure this stops.
+
+   Three things hold that, rather than one list somebody has to keep complete:
+
+   - **Login files are recognised by name, and the names cannot drift apart.**
+     They are listed in two places in the codebase, and a test fails the build
+     if the two ever disagree — so a newly-recognised login file cannot quietly
+     become something the carry copies.
+   - **The one file that mixes account details with settings worth keeping is
+     rebuilt, not edited.** botainer copies out the handful of keys it wants —
+     this project's MCP servers, your permissions, your trust answer — and
+     writes a new file from those. Anything it does not recognise is simply not
+     in the result. So a future Claude Code release cannot introduce a field
+     that travels by accident. The cost is that a new preference may reset; the
+     alternative was that a new account field might leak.
+   - **A file botainer cannot read is not carried at all.** If it cannot parse
+     the file, it cannot find the account details to leave behind — so it leaves
+     the whole file behind.
+
+*Properties 2 and 3 are both about symbolic links, guarding opposite
+directions: what botainer READS, and where it WRITES.*
+
+2. **A switch cannot quietly merge two profiles into one account.**
+
+   In shared mode your login is not a file in the profile directory; it is a
+   shortcut pointing at one host-wide login that several projects use. Copy that
+   shortcut into a profile meant to be separate, and the two now share a login
+   while every screen still calls them separate. That is the failure this
+   section exists to prevent, arriving by the back door.
+
+   So botainer copies no shortcut, at any depth — it copies only real files.
+   Nothing in genuine history is a shortcut, so nothing is lost by the rule.
+
+3. **A copied file cannot land outside the profile you switched to.**
+
+   The directory being written to is the one the agent works in, and the agent
+   can leave a shortcut there — say, `projects` pointing at somewhere else on
+   your machine. Follow it and the carry writes the agent's own content to a
+   path the agent chose. That was possible, was demonstrated, and is fixed.
+
+   It is now impossible rather than checked-for: botainer opens each directory
+   in the path one step at a time, refusing to follow a shortcut at any step. A
+   check would have a gap between looking and writing; there is nothing to race
+   here because there is no check. If it does hit one, it stops and tells you
+   in a sentence rather than failing with a kernel error code.
+
+4. **No file is deleted, and no file is overwritten.** True even though the
+   carry is a MOVE: files land at the destination and are verified, and only
+   then are the source's copies RENAMED into a timestamped sibling. Nothing is
+   unlinked. Only files that verifiably arrived are moved, so a copy that
+   failed leaves its original where it was.
+
+   Two precise limits on that sentence, because it is the kind of promise
+   people rely on. Directories left EMPTY by the move are removed — they hold
+   nothing at that point, but "no file" is the accurate word, not "nothing".
+   And the guarantee is about botainer's own writes: it does not stop you, or
+   the agent, deleting something afterwards.
+
+   Destination files are created so that an existing file is never replaced,
+   which holds even against a session that starts mid-carry. Two populated
+   directories are never merged — that cannot be undone — so the carry stops
+   and shows each side's size, last-written time and the opening prompt of its
+   newest transcript.
+
+5. **A switch is refused outright while a session is running.** The directory
+   being relocated is the one a live agent has bound and open. This is a
+   refusal, not a warning: there is no version of "rename this running agent's
+   transcripts anyway" worth offering.
+
+**Why a move and not a copy.** With a copy, switching away, working, and
+switching back leaves two populated directories and no sound way to say which is
+current — only a modification time. A login can answer that question about itself
+— the token carries its own expiry date — but a transcript cannot. So the two
+differ by kind: copy-and-sync suits a login, a move suits history.
+
+### A cross-agent switch is not a carry
+
+Claude's directory and codex's share no format; copying either way would be junk
+in a directory the tool then has to survive reading. `config set agent` says
+plainly that this starts a fresh history and that the old one stays where it is.
+Unrepresentable rather than checked: the switch helper derives both paths from
+one agent.
+
+### Where the superseded copies go
+
+`<profile>.superseded-<timestamp>/`, beside the profile it came from. `botainer
+where` lists these as reclaimable: they are the one thing inside `data/` that is
+safe to delete, because every byte in them was written to the live location and
+verified before the rename.
+
+### Pinned by
+
+`tests/unit/test_history_carry.py`, `tests/unit/test_history_prompt.py` and
+`tests/unit/test_history_dir_matches_hooks.py` — the last RUNS each agent
+plugin's `pre_session` hook and asserts the directory it binds is the directory
+the carry targets. A carry between two directories no session reads would report
+success and do nothing.
+
 
 ## 4ch. Project-name charset: an allowlist, but a less lossy one
 
@@ -3693,7 +4119,7 @@ Found while doing so: `botainer doctor` was the ONLY command in the CLI without
 traceback — in the command whose whole job is explaining a broken install.
 Fixed, and pinned by a test.
 
-## 4cx. Shared auth — a second concurrent session is detected and refused
+## 4cx. Shared auth — a second concurrent session triggers an advisory warning
 
 `botainer start` and `botainer hpc submit` both check, before launching a
 shared-auth session, whether another project already has a LIVE one, and stop
@@ -3702,14 +4128,13 @@ to ask. Same check, one implementation
 sites exist, because the first cut had it on `start` only — the laptop path
 guarded and the cluster path, which is the product, not.
 
-**Why a check and not documentation.** Shared mode supports exactly ONE session
-at a time: refreshing mints a new refresh token and REVOKES the old (measured), so two live sessions log each other out. That constraint appeared
-on NO forward-facing surface — audited: not the start banner, not `auth use`,
-not `init`, not `auth status`, not `doctor`, not tips, not README /
-GETTING_STARTED-HPC. Only `auth doctor` said it, after the fact.
-The maintainer, who wrote the mode, did not know. Prose nobody could author
-from knowledge was never going to appear, so the signal has to come from state
-the launcher already records.
+**Why a check accompanies documentation.** The launcher can identify other
+recorded holders before launch. Refresh-token invalidation is an observed Claude
+concern; short Codex shared-session overlap can work, and its renewal concurrency
+is not established. This detector does not determine provider token semantics.
+Interactive launches ask whether to continue; non-interactive or `--yes` launches
+print the warning and continue. The warning's existing wording overstates the
+Codex conclusion and still needs correction.
 
 **Trust.** The check reads `spec.plugins_enabled` from session records under
 `state/<uuid>/sessions/` to decide whether to interrupt a launch — agent-
@@ -3722,9 +4147,9 @@ assumed.
 failure reading the bookkeeping returns silently and the launch proceeds: a
 missed warning costs a re-login, a launch refused over an unparseable record
 costs the user their session. It reduces an invisible failure to a visible
-one; it does not make concurrent shared sessions safe. The cure remains
-host-as-sole-refresher (the container holds an access token only and therefore
-cannot rotate anyone out), still unbuilt.
+one; it does not serialize refreshes. Broker mode performs refreshes on the host
+under a shared lock. That mechanism does not establish live renewal behavior for
+every provider, client version or platform.
 
 **Cry-wolf guard.** `liveness.is_session_alive` answers "cannot verify" with
 TRUE — correct for `status`, wrong for a launch gate. Docker is host-local, so
@@ -3781,6 +4206,71 @@ written, blaming "platform cannot express this" — it looked like it pinned a
 security guarantee and pinned nothing. Both properties now have tests that fail
 when the guard is removed.
 
+## 4cz. The state root is never handed to a container
+
+**What is at stake.** `$MY_BOTAINER` — `~/.botainer/` unless you moved it — is
+botainer's own directory on the host. It holds your agent login
+(`shared-auth/`), every project's identity and credentials
+(`state/<uuid>/data/`), the installed plugin tree, and the host-wide policy
+file. A container able to read that directory would hold your login token and
+*every* project's state at once, not only the project it was launched for.
+
+**What botainer does.** No mount botainer composes uses the state root as its
+source. The container receives specific directories from *inside* it, one per
+purpose — `/packages`, `/scratch`, `/home/user`, the selected agent's credential
+directory, and the session's own hint files — each named individually and
+mounted at a fixed target. Nothing mounts the root itself, or any directory
+above it.
+
+This holds under both container runtimes botainer supports, Docker and
+Apptainer. The Apptainer path additionally runs with `--containall` and a
+redirected HOME, so your real home directory is not visible either.
+
+It is a property of how the mount plan is built rather than a check applied
+afterwards: every entry comes from a per-component path, so there is no step in
+composition that could name the root.
+`tests/integration/test_state_root_not_bound.py` fails if any bind source ever
+becomes the root or a directory above it.
+
+**Where this stops — and it does stop.** The above describes the plan botainer
+builds for you. It does not cover a mount *you* add.
+
+Two things are checked when you declare a mount, and only one of them helps
+here. The **target** must be on the policy allowlist — `/data`, `/datasets`,
+`/shared`, `/scratch`, `/mnt` by default — so a mount aimed anywhere else is
+refused. The **source** is checked against a denylist that covers your home
+directory and sensitive paths inside it, such as `~/.ssh`. `~/.botainer` is not
+on that denylist, and the target allowlist contains ordinary directory names
+that a real project might genuinely want.
+
+So a mount of this shape is accepted — an absolute path to the state root, aimed
+at an allowlisted target:
+
+```text
+mounts:
+  extra:
+    - source: /Users/you/.botainer     # absolute; `~` is not expanded
+      target: /data                    # on the allowlist, so not refused
+      mode: rw
+```
+
+(Shown as text rather than a copyable config on purpose: it is the thing not to
+write.)
+
+Verified by composing it. The state root then appears in the mount plan as
+`…/.botainer → /data  rw  [user] user-declared in config.yaml`, which hands the
+container your login and every project's state, writable.
+
+**What to do about it:** do not put `~/.botainer`, or any parent of it, in
+`mounts.extra`. If the agent needs something botainer keeps, request that
+component by name.
+
+**What is being fixed:** the resolved state root is being added to the
+bind-source denylist, so the configuration above is refused rather than
+honoured. Until that lands, this section describes a strong default with a known
+gap — not a guarantee.
+
+
 ## 4cv. Disk-full and quota errors surface as refusals, not tracebacks
 
 `write_secure` — the chokepoint every state write funnels through — let
@@ -3832,8 +4322,8 @@ the place the decision was recorded.
 **The blast radius is botainer's own shared store**, `<state_root>/shared-auth/`
 — created by `botainer auth login --shared`. The user's own `~/.claude` and the
 macOS Keychain are never bound and never read by the session path. "Host-wide"
-in `auth doctor` means "shared across botainer projects on this host", which is
-worth stating because that naming misled both the maintainer and me.
+in `auth doctor` means "shared across botainer projects on this host"; it does
+not refer to the native client's separate login store.
 
 
 ## 4dh. Child-job containment allows the same roots a session does
@@ -3940,11 +4430,9 @@ enumerated, typed arguments with no `**kwargs`, so there is no free-form dict to
 slip a secret into. `test_there_is_no_way_to_pass_a_token` pins the signature so
 adding one later is a deliberate, visible act.
 
-**Why it exists.** Every question in the credential review turned out
-unanswerable from data: how often does a container break away from the shared
-store, has anyone ever logged in as a second account mid-session, is the
-staleness window minutes or hours. Both maintainer and reviewer were guessing,
-and designs were being argued from guesses. This makes the next round measured.
+**Purpose.** The event log records credential reconciliation events so that
+store divergence, account changes and staleness can be investigated from recorded
+state rather than inferred from a later login failure.
 
 Bounded and non-fatal by construction: 5 MB cap (stop appending rather than
 rotate — a truncating rotation discards the oldest evidence, which is usually
@@ -4175,12 +4663,211 @@ Found by a UX emulation walking the road as a user, and independently visible in
 a real cluster transcript.
 
 
+## 4du. A project config may not name the state root as a bind source
+
+**What it prevents.** `/workspace` is read-write in the cage, so a caged agent
+can write `mounts.extra` into the project's own `config.yaml`. Before this, a
+source of `$MY_BOTAINER` composed with NO refusal — measured, `inspect --json`
+rendered `<state root> -> /data rw`. That is not a secret at the edges; it is
+the whole store: `state/<uuid>/` for every OTHER project on the host including
+their credentials, `shared-auth/agent-*/` (the host-wide login), and read-write
+on `plugins/*/hooks/*.py` — which botainer EXECUTES ON THE HOST as the user at
+the next `start` in ANY project. Host code execution, persisting after the
+session that planted it has ended.
+
+**Why it is not a denylist entry.** `DENYLISTED_SOURCES` is checked for every
+bind, and botainer's own binds legitimately live inside the state root.
+Measured on a default session: **eight binds, SEVEN of them inside the root**
+— six `core` and one `plugin`: `/packages`, `/scratch`, `/home/user`, the
+`.botainer` subtree, the per-plugin data dir. Adding the root to that tuple
+refuses all seven and breaks every launch.
+
+*(An earlier version of this paragraph said nine and eight. That count was taken
+with the attack's own `mounts.extra` entry still in the config — I measured the
+state I had just created rather than the default one. Corrected by re-running it
+clean. The same version claimed `MY_BOTAINER` is "routinely moved to `$SCRATCH`"
+on HPC; that is false of this product, which REFUSES a state root outside
+`$HOME` — and that refusal is precisely why a user reaches for a symlink
+instead, which is the failure mode below.)*
+
+**Mechanism class: STRUCTURAL on WHO ASKED; a FILTER on WHERE IT POINTS.** The
+provenance half is genuinely mechanism-derived. The containment half is a string
+comparison over two normalised paths, and a filter is exactly what it is — this
+contract's own rule is that calling a filter structural tells a reader not to
+ask "and what if the two paths do not normalise the same way?", which is the
+question that found the defect recorded below. The rule is not *which path* but
+*who asked*; `Provenance.USER` is exactly "the project's config.yaml named
+this", which is exactly the attacker-reachable channel; `core` and `plugin`
+binds are untouched. A future core bind inside the state root needs no
+exemption, and a future config-supplied one cannot acquire one.
+
+**What is checked, and in both directions.** The source and its `realpath`, each
+against the resolved state root, via the same ancestor-aware helper the hard
+denylist uses. So naming the root, naming anything under it, naming an ANCESTOR
+of it, and naming a SYMLINK whose target is any of those are all refused. The
+symlink case is not hypothetical — the agent can create the link in its own
+read-write workspace, and dropping the `realpath` candidate kept every other
+test in this area green.
+
+**It fails CLOSED.** If the state root cannot be resolved, a config-supplied
+bind is refused with a message saying the check could not run — not allowed.
+A guard that cannot locate what it protects must not answer "allowed"; that is
+the shape this contract records elsewhere, where a swallowed lookup became a
+plausible-looking permission. Note this branch is DEFENSIVE and not reachable
+through today's CLI, because every command resolves the state root earlier than
+it composes a mount plan — it is pinned anyway, since "unreachable today" is the
+property that rots silently.
+
+**An admin can still vouch for it, and that is deliberate.**
+`trusted_source_roots` re-allows the source, exactly as it does for `~/.ssh` and
+the other sensitive-home paths. That hatch is **site-policy only**: the root-owned
+`/etc/botainer/policy.yaml`. A user-level `trusted_source_roots` is
+INOPERATIVE — policy composition intersects it with the site default, which is
+empty, so a user policy listing the root changes nothing (driven; the
+intersected value is `[]`). An earlier version of this paragraph said "or the
+user policy", which was wrong and would have told a reader they had a knob they
+do not have. **The practical consequence is
+worth stating plainly: a site that trusts `$HOME` re-admits the state root with
+it, because `~/.botainer` sits under `$HOME` by default.** That is the
+pre-existing semantics of the hatch, not something this entry introduces, but a
+reader deciding whether to trust `$HOME` should know it includes the credential
+store and the host-executed hooks.
+
+The first version of this rule refused absolutely and ignored the hatch. The
+test suite caught it — `test_trusted_source_root_reallows_home` failed, because
+`$HOME` is an ancestor of the state root — and the right answer was consistency
+with the existing design rather than an invention.
+
+**A refuting review found this rule doing NOTHING on the target platform, and
+that is worth recording rather than quietly fixing.** The first version resolved
+the bind SOURCE but compared it against the state root as returned — and
+`ensure_user_state_dir` resolves symlinks on its `MY_BOTAINER` branch while
+returning `Path.home() / ".botainer"` verbatim on its default one. So on a
+default install whose `$HOME` traverses a symlink — `/home/<netid>` →
+`/gpfs/...`, the ordinary cluster layout, with no attacker involved — the
+resolved candidate and the literal root were different strings and nothing
+matched. Both sides are resolved now, and a test pins the symlinked-home case.
+
+**What this does NOT fix.** `mounts.extra` can still name other sensitive host
+paths not on the denylist; that list remains a list of literals, and widening
+it to a resolved ancestor-aware rule for the general case is tracked separately.
+This entry closes the botainer-state-root route only.
+
+
+## 4dt. A nested project WARNS and names both roots; it no longer refuses
+
+**What changed.** `find_project_root` used to raise `IDENTITY_AMBIGUOUS` when a
+botainer project sat inside another one. It now returns the NEAREST — the
+normal answer — and prints a warning naming both roots and which one is being
+used.
+
+**The hazard is unchanged, and is still why anything is printed.** The
+null-bind mask that makes `.botainer/config.yaml` trusted input is structural
+but covers exactly one path: `_MASK_REQUIRED_UNDER_RW = {"/workspace":
+("/workspace/.botainer",)}`. Project discovery, its consumer, walks up to the
+nearest `.botainer/project-id`. The mask's domain is strictly smaller than its
+consumer's, so nothing masks `/workspace/anysubdir/.botainer/` — which a caged
+agent, rw on its workspace, can create. A user who later ran a botainer command
+from that subdirectory ON THE HOST would load an agent-authored config driving
+`plugins_enabled`, `mounts.extra`, `network.mode`, `agent_permissions` and
+`image`.
+
+**Why the refusal went anyway.** The commands that reach this function resolve a
+project by WALKING UP and take no project path of their own, so a stray
+enclosing project made every one of them unusable — and the refusal's remedy,
+"run the command with an explicit project path", named something they do not
+have. A refusal whose only remedy does not exist is a dead end, not a control.
+
+**Two claims in the first draft of this section were FALSE, and a refuting
+review disproved both.** They are recorded rather than quietly deleted, because
+the second one was a live regression and the first is still load-bearing
+elsewhere:
+
+* *"no botainer command takes an explicit project path"* — false. **Nine
+  `botainer hpc` subcommands take `--project`** (`jobs-status`, the dispatcher
+  group, and others). They pass a path straight in and never reach
+  `find_project_root`, so they were unaffected either way — but the sentence as
+  written was wrong, and the parenthetical that "measured" it measured a
+  different question: it counted call sites of `find_project_root`, which is the
+  check that agreed with what I already believed.
+* *"an agent cannot write ABOVE its own workspace root"* — false as stated, and
+  this one was the whole justification. Nothing relates a `mounts.extra` source
+  to the project root, so a project config can bind the parent directory rw; the
+  mask invariants reason about container TARGETS, never about a host directory
+  reachable at a second target. It is consent-gated — the first-launch confirm
+  lists the bind and the gate re-fires when the bind set changes — which bounds
+  it to "consented, not silent", and it is tracked as its own queue row. The
+  narrower true statement, which is what this section now rests on, is that an
+  agent can only plant a `.botainer/` in a tree that was bound as its workspace,
+  and that only happens when a session RUNS.
+
+**What the warning is keyed on.** Whether an ENCLOSING project has ever run a
+session — the one fact that separates the two shapes. EVERY enclosing project is
+consulted, not just the nearest: with `work/` having run and `work/foo/` planted
+empty, the nearest-only first draft reported "No session has ever run" about
+`work/foo/bar`, a false all-clear regarding a tree that HAD been bound, produced
+by one `mkdir`. Worst-known-wins, and every root in the reported state is named
+so there is no index left to be wrong. And a session DIRECTORY is not a session:
+`botainer inspect` launches nothing and still creates one, so the measurement is
+a record whose `started_at` is set. Three states,
+and the third matters most: HAS run (says an agent held that tree rw, and what a
+config controls); NEVER ran (stated as a measurement, qualified to "by that
+route", and explicitly NOT as a safety verdict — see §4dc); and CANNOT TELL,
+which an unreadable or absent state root must produce rather than silently
+reading as "never". That last case was a real defect in the first draft of this
+change, caught by its own test: `ensure_user_state_dir(create_if_missing=False)`
+returns paths for a root that is not there, so a missing root answered "never
+ran" — a missing measurement reported as a clean bill.
+
+**Mechanism class: FILTER, and weaker than what it replaced.** A warning does
+not stop anyone. The user may read past it, and on a non-tty it is stderr text
+like any other. This trades a blocking refusal for a disclosure that permits
+project discovery to continue. The STRUCTURAL fix
+is unchanged and unbuilt: widen the null-bind mask so that no `.botainer/`
+anywhere under a bound workspace is agent-writable, at which point the inner
+project cannot be planted and the warning becomes informational. Tracked, not
+done.
+
+**What this change does and does not touch.** No bind, env var, capability grant,
+plugin envelope or cage flag is edited, and the mask itself is untouched. But it
+would be false to write "nothing about the cage changes" and stop: where the old
+code REFUSED, nothing composed at all, and now a session composes from the
+nearest config. If that config is agent-authored, its `mounts.extra` reaches the
+rendered argv — driven and observed. That path is consent-gated (the first-launch
+confirm lists every bind; the gate re-fires when the bind set changes), so the
+user sees it before anything runs. The honest statement is: the cage is built the
+same way from the same inputs, and this change alters WHICH config is allowed to
+be one of those inputs, from "none, the command stops" to "the nearest, with a
+warning and a consent prompt".
+
+**No suppression switch.** The first draft had a `warn=False` parameter with zero
+production callers — an off-switch for the only control left here, of the shape
+this contract records elsewhere as a loaded gun. It is gone. In its place the
+warning fires once per root per process, which no caller can turn off.
+
+**AND THAT DEDUP DOES NOT SPAN `hpc submit`, which is measured, not assumed.**
+An earlier version of this section said `hpc submit` resolves the project three
+times and that warning-once "solves" it. Both halves were false. Counted by
+running it in a nested project, the warning appears **twice** — and identically
+with the dedup deleted, because `botainer/cli/hpc.py` re-execs botainer as a
+SUBPROCESS (`subprocess.call([sys.executable, "-m", "botainer.cli.main", ...])`),
+so a process-global set cannot reach across it: one print in the parent, one in
+the child. The "three" came from counting `find_project_root` call sites in the
+source rather than running the command — the exact substitution of a shadow for
+the thing that this contract's own method rules forbid.
+
+The consequence is a DESIGN CONSTRAINT, not just a corrected number: any
+per-invocation state about this hazard — including a consent record, should one
+be added — must live on DISK, because the process that asks and the process that
+acts are not always the same process.
+
+
 ## 4dc. A tip may state a fact and point; it may never render a safety verdict
 
 The RULE at the top of `botainer/tips.py` — *a tip may state a FACT and POINT at
 the security surface; it may never render a comparative or absolute safety
-verdict* — came from the maintainer catching two shipped verdicts by hand.
-For a period after, **nothing enforced it.**
+verdict* — requires enforcement on both core and plugin tips. Previously, the
+manifest validator did not enforce that restriction.
 `ContributesDecl._validate_user_tips` checked non-empty, charset and length,
 with the rule written in a comment directly above it.
 
@@ -4189,10 +4876,8 @@ SAFER … and PROTECTS your clipboard — it is secure."]` was accepted unmodifi
 and inserting a verdict into a live core tip passed both `test_tips.py` and
 `check-claims-vs-impl.sh`.
 
-Compounding it: the drift gate that *did* exist walks `BASE_TIPS` only — and
-**both** of the maintainer's catches were in
-`plugins/browser/botainer-plugin.yaml`. The gate covered the half where the
-incident had not happened.
+A check that only walks `BASE_TIPS` misses plugin-provided tips, including
+`plugins/browser/botainer-plugin.yaml`. Both sources need the same validation.
 
 Now a `ValueError` at manifest load, tested across both surfaces. Zero shipped
 tips trip it.
@@ -4350,26 +5035,17 @@ still binding `mcp-servers.json`; all four `init --agent` cases; all three
 claude project, and outside one.
 
 
-## 4ce. agent-codex-broker is documented as NOT WORKING
+## 4ce. Codex broker qualification remains incomplete
 
-Fully implemented — 375-line hook, its own OpenAI credential and OAuth modules,
-two auto-detected modes (api-key → `api.openai.com/v1`, ChatGPT subscription →
-`chatgpt.com/backend-api/codex`), upstreams pinned so an untrusted config cannot
-redirect the token. **And it has never executed on any platform**: both hooks
-shipped mode 0644, so the launcher could not exec them from the day it was
-written, and the first real attempt after that was fixed still failed.
+The earlier statement that its hooks are non-executable is stale: both declared
+hooks now carry executable modes. The client-routing configuration has also
+changed. A short Docker account-login check of an installed broker succeeded,
+but the installed hook differs from this candidate. That check does not qualify
+this exact candidate, long-running token renewal, every model or HPC transport.
 
-Listing it beside the working modes invited that attempt, so both user-facing
-surfaces now say so: the README plugin table, and the plugin's own
-`description:` — which `plugin list` and `plugin info` print verbatim, and is
-the only one a user enabling plugins from the CLI will ever see.
-
-Security-relevant because the failure is silent in the direction that matters:
-a broker that does not start means the session either refuses (good) or falls
-back to a mount mode carrying the real credential (not good). Until it has run
-once, the guarantee it exists to provide — the container never holds the
-credential — is unverified for codex, and §4ap's description of that guarantee
-should be read as design intent rather than observed behaviour.
+See §4ap for the implementation and its boundaries. Source inspection and
+synthetic request tests establish narrower properties than a live deployment;
+the README and plugin description must preserve that distinction.
 
 ## Change register (entries 1-N, internal)
 
@@ -4415,3 +5091,155 @@ in the contract sections themselves.
 - **§4do** — PyPI page metadata: subtitle, urls, classifiers (surface-NEUTRAL)
 - **§4dp** — Published digests were platform-dependent (autocrlf)
 - **§4dq** — Python 3.10 was never actually run (surface-NEUTRAL)
+
+## 4dv. `--auth-profile` selects a credential in isolated mode only, and a shared login under a named profile is refused
+
+**The claim that was wrong.** `--auth-profile` promised, in its own help text,
+that you could "keep personal and work logins side by side" at
+`<creds-dir>/profiles/<name>/`, and `docs/PROFILES.md` described the axis the
+same way — unconditionally, for every auth mode. For a SHARED login that is
+false. The shared login hook writes `shared-auth/agent-<agent>/`
+unconditionally; the string "profile" does not occur in it anywhere. So
+
+    botainer auth login --shared --auth-profile work
+    botainer auth login --shared --auth-profile personal
+
+wrote the SAME file twice and the second OVERWROTE the first account's refresh
+token. Not shadowed — gone, with no command that restores it, in the mode the
+HPC guide teaches.
+
+**What is true per mode, measured by driving `botainer auth login`.** The
+profile axis ALWAYS selects this agent's history and settings directory. It
+selects a CREDENTIAL only where the login hook reads it:
+
+| mode | credential written to | profile selects the credential? |
+|---|---|---|
+| isolated | `<project state>/data/agent-<agent>/profiles/<name>/` | yes |
+| shared | `shared-auth/agent-<agent>/` | **no — one login per agent, host-wide** |
+| broker | reads the SHARED credential above | **no** |
+
+**The rule.** A login that resolves to the family's shared login plugin refuses
+a non-default `--auth-profile`, names the file it would have overwritten, says
+that the profile still selects history and settings, and points at isolated
+mode — the one mode that can actually honour it.
+
+**Keyed on the RESOLVED plugin, not on the mode name, and that distinction is
+load-bearing.** The first version of this guard tested the requested mode name
+(`shared`, `proxy`). It was wrong: **broker mode has no login hook of its own
+and falls back to the SHARED login plugin**, so `--broker --auth-profile work`
+overwrote the identical file while passing a mode-name check. The shipped guard
+reads the variable the mode dispatch just assigned, so it cannot drift from the
+dispatch, and a future mode that also falls back to the shared login is covered
+without being enumerated. Proxy is deliberately NOT covered: its `login` command
+runs the proxy STARTER rather than a login, so what it writes is not established
+here, and an unverified claim inside a refusal is worse than no claim.
+
+**This is a FILTER, not a structural property, and the structural gap it backs
+up is named.** The credential is still one file that two modes can write; what
+changed is that the CLI refuses to do so under a name implying otherwise.
+Making it structural means per-profile shared credentials, and that is a
+BIND-PATH change — the per-project credential is a symlink to one fixed path,
+so a profile-aware login without a profile-aware bind produces a link pointing
+at a file nobody writes. That is this surface, and it is not done.
+
+**Related.** §4du (a config may not name the state root).
+
+## 4dw. Leaving shared mode clears the credential link it wrote, so the project can start again
+
+**The dead end.** In shared mode a project's credential is a SYMLINK to an
+in-container path under `/shared-auth/`, dangling when read from the host. That
+is correct in shared mode, and the README written beside it says so: "DANGLING
+when viewed from the host filesystem, by design. Don't 'fix' them."
+
+Switching the project to isolated left that link in place. Measured:
+
+    exists()  -> False        is_symlink() -> True
+    lexists() -> True         stat()       -> FileNotFoundError
+
+Checks that ask `exists()` see nothing; checks that ask `lexists()` see
+something — which is why the surfaces disagreed with each other. The isolated
+pre_session hook asks `exists()`, so it refused with "no credentials; run
+login", and the login it named could not write through the dangling link either
+(the login container has no `/shared-auth` bound, so the write is ENOENT and
+lands nowhere). The user was sent to a command that cannot succeed, by a check
+that cannot see what is wrong, against a file the shipped README told them not
+to touch.
+
+**Structure, then a rule that names its gap.** `botainer auth use <mode>` now
+clears that family's shared-mode leftovers whenever the new mode is not shared,
+so the state never forms on the supported path. The agent pre_session hooks
+(both `agent-claude` and `agent-codex`, together — this is the sibling-drift
+class) additionally RECOGNISE a leftover and name the command that clears it.
+That second half is a FILTER and it backs up a stated gap: `auth use` is not the
+only way a mode changes, because editing `.botainer/config.yaml` by hand
+bypasses it entirely.
+
+**What is removed and what is never removed.** Only a symlink whose target
+begins with the container prefix — including a DIRECTORY symlink, which is
+deliberate but worth stating — and a regular file named `README.shared-mode.txt`
+in that directory. The second is matched BY NAME: "the README this project
+wrote" is what it means, not what it checks, so a file of that name holding
+something else would also go. A REGULAR credential file is never removed — that is a real isolated-mode
+login. A symlink pointing anywhere else is never removed — that is the user's
+own arrangement. The shared credential itself is untouched: `Path.unlink()` does
+not follow a final symlink.
+
+**A limit I claimed here was WRONG, and the correction is the entry.** This
+section previously said a resolve-then-delete rewrite "is NOT caught by any
+test" and that catching it "would need `/shared-auth/` to exist at the real root
+of the filesystem". Both are false, and a refuting review disproved them by
+running the thing rather than reasoning about it:
+
+* Installing `entry.resolve().unlink()` fails an existing test on the first run
+  — `resolve()` on a dangling link raises `FileNotFoundError`, the surrounding
+  `except OSError` swallows it, and the link is never removed. A visible
+  behaviour change, already covered.
+* The one variant that DID survive — delete the resolved target, then unlink the
+  link — is now killed by a test that points the container prefix (a module
+  constant) at a temp directory, making the target reachable and the two
+  behaviours distinguishable. No filesystem root is involved.
+
+The protection is still the POSIX property that `Path.unlink()` does not follow
+a final symlink, and that is pinned on its own. What changed is that the
+destructive rewrite is now covered by a test instead of by an assertion that it
+could not be.
+
+**Related.** §4dv (`--auth-profile` selects a credential in isolated mode only).
+
+## 4dx. What AGENT_HINTS tells the agent about its reach is derived from the plan
+
+**The false claim.** `AGENT_HINTS.md` told every agent, in every session, that
+"Files outside `/workspace` are not visible to you." Measured on a plain default
+project, the agent also reaches `/packages`, `/scratch` and `/home/user`, and
+plugins add more. It was false on the first session anyone runs.
+
+**Why this error pointed the wrong way.** AGENT_HINTS is injected into the
+agent's system prompt — it is the agent's picture of its own cage. An agent told
+it cannot see what it CAN see will tell the USER so, confidently, about privacy.
+"I can't see anything outside the project" is the sentence someone would rely on
+before putting something sensitive in a neighbouring directory.
+
+**The other half, which no agent-facing surface carried at all.** The null-bind
+mask on `/workspace/.botainer` hides the host's copy of the project's config and
+id from the agent. Nothing said that was deliberate, so the readings available
+to the agent were "empty" or "broken". It is now disclosed as deliberate, with
+the path named.
+
+*(Not literally empty, and the first version of this section said it was. Three
+paths are mounted back on top of the mask — `AGENT_ACCESS.txt`, `AGENT_HINTS.md`
+and the per-agent data dir — which §1 of this contract already describes as
+"Nested on top of the null-bind", and the rendered hints list all three twelve
+lines above. What the mask removes is everything ELSE under that directory.)*
+
+**Derived, not asserted.** The list is built from `spec.mount_plan.binds` — the
+same plan the adapter renders into argv — with each target's mode. A hardcoded
+sentence was wrong the moment a plugin contributed a bind; this cannot drift
+from the session it describes, and a test adds a bind via the project config and
+requires it to appear.
+
+**Scoped, so it does not overcorrect.** "Nothing else is visible" would be the
+same defect reversed: `/usr`, `/bin` and the agent's own tooling are visible and
+come from the IMAGE, not the user's machine. The claim is limited to host paths
+and says where everything else comes from.
+
+**Related.** §4dw (shared-mode leftovers), §1 (the bind table this renders).

@@ -1,13 +1,9 @@
 #!/usr/bin/env python3
 """pre_session hook — arm the in-agent browser VIEWER (opt-in).
 
-Re-architected (Fable-5-reviewed, see
-DN-018). The OLD design started a
-SEPARATE helper container and made the agent reach its Chromium over CDP —
-unreliable on every platform (it died on the user's Mac). The NEW design runs the
-whole viewer stack INSIDE the agent's own container: the agent drives its OWN
-local HEADED Chromium (no cross-container control), and only the VNC *view*
-crosses to the human. So this hook no longer starts any container. It:
+The viewer stack runs inside the agent's own container. The agent drives its
+local headed Chromium, and the VNC view crosses to the human. This avoids
+cross-container Chromium control; the hook itself starts no helper container. It:
 
   1. mints a per-session token (0600 file, bound RO at /run/viewer-token — NEVER
      via --env, which is visible in `ps` on a shared apptainer node),

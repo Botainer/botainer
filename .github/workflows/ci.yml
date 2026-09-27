@@ -1,19 +1,6 @@
-# CI for the PUBLIC repository.
-#
-# Deliberately small. The private repository has a much larger workflow
-# (v0.1.yml) that runs thirteen `tools/dev/` gates — none of which ship, so
-# exporting that file would fail on every push against scripts that do not
-# exist. This one runs only what a clone actually contains.
-#
-# What it proves: the exported tree installs from scratch and its own test suite
-# passes on a machine that is not the maintainer's. That is the claim the README
-# makes, so it is the claim worth checking automatically.
-#
-# What it does NOT prove, and should not pretend to: the suite computes what
-# botainer DECIDES — binds, environment, argv, refusals — without launching a
-# container. GitHub runners have Docker but no Slurm and no Apptainer, and the
-# HPC paths are the ones with the least real-world mileage. A green tick here
-# says the logic is consistent; it does not say the cage holds.
+# CI for the public checkout: install the package and run its test suite.
+# These tests primarily exercise composition, validation and command behavior.
+# This workflow does not qualify Slurm or Apptainer runtime isolation.
 name: CI
 
 on:
@@ -34,9 +21,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The floor is what pyproject declares (requires-python), and the
-        # ceiling is current. A version that only the maintainer runs is a
-        # version nobody else's failure would be caught on.
+        # Exercise the declared minimum and a newer supported interpreter.
         python-version: ['3.10', '3.13']
     steps:
       - uses: actions/checkout@v4
@@ -51,12 +36,7 @@ jobs:
       - name: Install
         run: python -m pip install --upgrade pip && pip install -e '.[dev]'
 
-      # NO separate version check here. `botainer --version` did print a number
-      # two releases stale once, but the guard for that is
-      # tests/unit/test_version_is_single_sourced.py, which runs in the step
-      # below and compares against pyproject portably. A second copy of the
-      # check in this file would be a second thing to keep in step — the same
-      # shape as the defect it guards against.
+      # The suite checks that CLI and package versions match pyproject.toml.
       - name: Tests
         run: python -m pytest -q --tb=short
 

@@ -5,7 +5,7 @@ the agent as untrusted — prompt injection, a compromised model, a hostile page
 the agent visited. Reports that the cage does not hold are the reports that
 matter most here.
 
-Read this first, though: **botainer is at v0.1.0a4, an alpha, and it is not a
+Read this first, though: **botainer is at v0.1.0a5, an alpha, and it is not a
 complete security product.**  What follows is how to report a
 problem, not a claim that there are few of them.
 
@@ -67,5 +67,5 @@ fixes land on the newest version.
 
 | Version | Supported |
 |---|---|
-| 0.1.0a4 | yes |
+| 0.1.0a5 | yes |
 | anything older | no |

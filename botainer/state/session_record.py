@@ -41,7 +41,7 @@ Format (v1):
       "screen_session_id": "botainer-<sid>" | null  # set when nudge enabled
     }
 
-Per FEATURE-PARTITION-LOCKED.md §A19, the nudge integration point is
+Per internal design note DN-041 §A19, the nudge integration point is
 top-level `screen_session_id` — a HOST-side screen session that wraps
 the docker/apptainer runtime call. `botainer nudge` uses
 `screen -S <screen_session_id> -X stuff "..."` to inject text.
@@ -135,7 +135,7 @@ class SessionRecord:
     apptainer: ApptainerHandle | None = None
     proxy: ProxyHandle | None = None
     schema_version: int = SCHEMA_VERSION
-    # Per FEATURE-PARTITION-LOCKED.md §A19.4: the host-side `screen`
+    # Per internal design note DN-041 §A19.4: the host-side `screen`
     # session name that wraps this session (Docker: on the launching host;
     # Apptainer: on the compute node). Used by `botainer nudge` to
     # address the correct `screen -S <id> -X stuff` target without any
@@ -278,6 +278,93 @@ def read(session_dir: Path) -> SessionRecord:
     return SessionRecord.from_dict(json.loads(raw))
 
 
+#: Refuse to read a spec.json larger than this when all we want is one integer.
+#: The census runs on every `doctor` and every `setup`, over a directory that
+#: grows monotonically (nothing GCs session records), on $HOME which on the
+#: target platform is NFS or GPFS. A record is a few KB; anything past this is
+#: either damaged or hostile, and counting it as unknown is both cheaper and
+#: more honest than parsing it.
+_CENSUS_MAX_RECORD_BYTES = 512 * 1024
+
+
+def schema_version_census(root: Path) -> dict[int | None, int]:
+    """Histogram of `schema_version` across every session record under a root.
+
+    Takes the STATE ROOT (`<root>`), not `<root>/state` and not
+    `<root>/state/<uuid>` — both of which are also called "state_dir" elsewhere
+    in this package (`StatePaths.state_dir`, `BOTAINER_STATE_DIR`). The
+    parameter is named `root` because when it was named `state_dir` either of
+    those two was the obvious thing to pass, and passing one returned `{}` —
+    indistinguishable from a healthy empty root, so `doctor` would have printed
+    nothing at all. Named for what it is, the mistake is visible.
+
+    WHY (#202). `from_dict` accepts exactly SCHEMA_VERSION or SCHEMA_VERSION-1
+    and raises for anything else; `list_sessions` catches that and drops the
+    record from its result. So a user who skips a release gets a shorter
+    history than they had.
+
+    It is NOT silent — #211 already writes one stderr line per skipped record.
+    But that line appears only for a project you happen to be listing, at the
+    moment you run some unrelated command, one record at a time. This sweeps
+    EVERY project and answers a different question: how much is affected, asked
+    before you go looking for a session that is missing rather than after.
+
+    A MISSING spec.json is NOT counted. A session dir with no record is an
+    aborted launch — `composition.py` creates the directory long before it
+    writes the record, so every refusal and every Ctrl-C leaves one, and nothing
+    removes them. `list_sessions` skips that case silently and says why. This
+    counted it as unreadable, which made `doctor` warn — and `doctor --strict`
+    exit 1 — on a completely healthy install, while blaming a downgrade that
+    never happened. Caught by review before it shipped; the shared
+    `candidate_session_dirs` exists so the two cannot drift apart again.
+
+    Reads `schema_version` and nothing else — deliberately NOT via `from_dict`,
+    which is exactly the function that refuses the records we are trying to
+    count. A record that EXISTS but cannot be parsed is counted under None,
+    because "I could not tell" and "it is version 7" are different facts and
+    collapsing them would overstate what is known.
+
+    Never raises, and means it: the except is deliberately broad. `json.loads`
+    on pathological input raises RecursionError, which is not an OSError or a
+    ValueError, and a census is a diagnostic — one that can take down the
+    command diagnosing with it is worse than no census.
+    """
+    census: dict[int | None, int] = {}
+    try:
+        project_dirs = [p for p in (Path(root) / "state").iterdir() if p.is_dir()]
+    except OSError:
+        return census
+    for project in project_dirs:
+        for child in candidate_session_dirs(project / "sessions"):
+            record = child / RECORD_FILENAME
+            key: int | None
+            try:
+                if record.stat().st_size > _CENSUS_MAX_RECORD_BYTES:
+                    key = None
+                else:
+                    raw = json.loads(record.read_text(encoding="utf-8"))
+                    got = raw.get("schema_version")
+                    key = (got if isinstance(got, int) and not isinstance(got, bool)
+                           else None)
+            except FileNotFoundError:
+                continue          # aborted launch; not a record. See above.
+            except Exception:     # noqa: BLE001 — see the docstring
+                key = None
+            census[key] = census.get(key, 0) + 1
+    return census
+
+
+def unreadable_by_this_build(census: dict[int | None, int]) -> int:
+    """How many records in a census this build's `from_dict` would refuse.
+
+    Split from the scan so the threshold logic is testable without a filesystem,
+    and so the accepted range is stated ONCE next to the constant it derives
+    from rather than duplicated into the caller.
+    """
+    return sum(n for v, n in census.items()
+               if v not in (SCHEMA_VERSION, SCHEMA_VERSION - 1))
+
+
 _RECOGNIZED_UPDATE_FIELDS = frozenset({
     "started_at", "ended_at", "screen_session_id",
     "container_id",  # docker handle
@@ -371,6 +458,29 @@ def reserialize_spec(session_dir: Path, spec_obj: Any) -> SessionRecord:
     return rec
 
 
+def candidate_session_dirs(sessions_root: Path) -> list[Path]:
+    """Directories under `sessions/` that could hold a session record.
+
+    ONE definition of "what counts as a session record", because there are two
+    callers and they used to encode it separately — which is how the #202 census
+    came to disagree with `list_sessions` about the aborted-launch case and warn
+    at users about a healthy install (found by review before it shipped).
+
+    Excludes launcher-internal dirs (`_submit-scripts`, `_module-env`, …): they
+    are not session records and have no spec.json. Real session ids are hex, so
+    never start with `_` or `.`, and this cannot hide a genuine record.
+
+    Says nothing about whether a record is PRESENT or readable — that is the
+    caller's business, and the two callers legitimately differ there.
+    """
+    try:
+        children = list(sessions_root.iterdir())
+    except OSError:
+        return []
+    return [c for c in children
+            if not c.name.startswith(("_", ".")) and c.is_dir()]
+
+
 def list_sessions(sessions_root: Path) -> list[SessionRecord]:
     """Enumerate all session records under a project's sessions/ dir.
 
@@ -381,18 +491,7 @@ def list_sessions(sessions_root: Path) -> list[SessionRecord]:
         return []
     out: list[SessionRecord] = []
     skipped: list[tuple[Path, str]] = []
-    for child in sessions_root.iterdir():
-        if not child.is_dir():
-            continue
-        # F1: skip launcher-internal dirs (e.g. `_submit-scripts`, `_module-env`)
-        # — they are NOT session records and have no spec.json. Including them
-        # made every `status`/`stop`/`nudge`/`hpc logs` spam a "skipped session
-        # record _submit-scripts: FileNotFoundError … spec.json" line. Real
-        # session ids are hex (never start with `_`/`.`), so this can't hide a
-        # genuine record. The Task #211 orphan-surfacing below stays for
-        # MALFORMED real session dirs.
-        if child.name.startswith(("_", ".")):
-            continue
+    for child in candidate_session_dirs(sessions_root):
         try:
             out.append(read(child))
         except FileNotFoundError:

@@ -1,34 +1,9 @@
 """Every hook a plugin declares must actually be runnable.
 
-Observed on a Slurm cluster,:
-
-    $ botainer start --agent codex
-    refused: plugin-hook-failed: hook script not executable:
-        .../plugins/agent-codex-broker/hooks/start_broker.py
-
-Three hook scripts were committed without the executable bit —
-agent-codex-broker's start_broker.py and stop_broker.py, and
-agent-codex-shared's login.py. agent-claude-broker's equivalents had it, so
-CODEX BROKER MODE HAD NEVER WORKED ANYWHERE, on any platform, since the day it
-was written. Nothing noticed, because no test ever tried to run a hook and the
-mode only became reachable when `auth use broker` started offering it.
-
-WHY THIS TEST EXISTS RATHER THAN JUST A CHMOD. This was the third mechanical
-defect in one day that the user discovered by running the real product on a real
-cluster — after the login container's missing --entrypoint and the .def's
-missing /packages routing. Each cost a round trip: run, fail, paste, fix,
-rebuild, run again. The defects were all statically checkable and none of them
-were statically checked.
-
-So the class gets swept here instead of one at a time:
-
-  - the file a manifest names must EXIST      (typo / rename / never written)
-  - it must be EXECUTABLE                     (the Grace failure)
-  - it must have a SHEBANG                    (exec'd directly, so no shebang
-                                               means exec fails or, worse,
-                                               runs under whatever /bin/sh is)
-  - it must not be EMPTY                      (a placeholder that passes every
-                                               other check)
+A declared hook is executed directly by the launcher. A missing file,
+executable bit, shebang or script body can therefore break startup before
+the agent runs. Check every declared hook rather than only the hook that
+first exposed a problem.
 
 Checked against the MANIFEST rather than a glob, because what matters is what
 the launcher will try to run — a stray .py in hooks/ that nothing declares is
@@ -122,7 +97,7 @@ GIT_MODES = _git_modes()
 @pytest.mark.parametrize("plugin,when,script", HOOKS,
                          ids=[f"{p}:{w}" for p, w, _ in HOOKS])
 def test_declared_hook_is_executable_IN_GIT(plugin, when, script) -> None:
-    """THE Grace regression — asserted on the git index, not the filesystem.
+    """Hook executability is asserted on the Git index, not the filesystem.
 
     The launcher execs hook scripts directly, so a missing +x is a hard refusal
     at session start. It survives commit, review and the whole suite, because
@@ -131,7 +106,7 @@ def test_declared_hook_is_executable_IN_GIT(plugin, when, script) -> None:
     ASSERTED VIA GIT ON PURPOSE. The obvious check, `os.access(script, X_OK)`,
     is WORTHLESS in this dev container: the bind mount reports mode 644 and
     still answers True to X_OK. So a filesystem check passes here and fails on
-    Grace — the exact platform-divergent blindness that let this ship. The git
+    a cluster with normal executable-bit enforcement. The Git
     index mode is what a clone or `rsync -a` actually carries to the cluster,
     which makes it the thing worth asserting.
     """
@@ -149,9 +124,7 @@ def test_declared_hook_is_executable_IN_GIT(plugin, when, script) -> None:
     assert mode == "100755", (
         f"{plugin}'s {when} hook is mode {mode} in git (needs 100755): {rel}\n"
         f"    fix: chmod +x {rel} && git update-index --chmod=+x {rel}\n"
-        f"This is what refused `start --agent codex` on Grace. codex broker "
-        f"mode had never worked on any platform since the day it was written, "
-        f"because its two hooks shipped non-executable and nothing ran them.")
+        f"The launcher cannot execute a hook shipped without its executable bit.")
 
 
 @pytest.mark.parametrize("plugin,when,script", HOOKS,

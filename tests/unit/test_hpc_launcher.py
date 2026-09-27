@@ -108,10 +108,25 @@ def test_sbatch_script_is_self_contained(monkeypatch: pytest.MonkeyPatch, tmp_pa
 def test_sbatch_script_wraps_apptainer_in_screen_when_nudge_enabled(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """§A19: with the nudge plugin enabled, the sbatch script wraps
-    apptainer exec in `screen -dmS botainer-${SLURM_JOB_ID}` so
+    """§A19: with the nudge plugin enabled, the sbatch script runs apptainer
+    exec inside a screen session named `botainer-${SLURM_JOB_ID}` so
     `botainer nudge` can `srun --overlap` into the compute node and
-    `screen -X stuff --` against that session."""
+    `screen -X stuff --` against that session.
+
+    THE WRAP FORM CHANGED 2026-09-21, and the two assertions this docstring
+    used to justify were inverted rather than deleted. It was
+    `screen -dmS … ` followed by `while screen -ls | grep -q …; do sleep 30`,
+    which held two independent ways to end the job while the agent was still
+    working — the fork/socket startup race, and `grep -q` under `pipefail`
+    reading a match as a failure. It is now `exec screen -D -m -S …`, so the
+    batch process IS the session owner.
+
+    What this test still guarantees is the part nudge depends on and the fix
+    must not cost: the session EXISTS, under that exact name. The lifetime
+    property itself is proven by execution in
+    `tests/unit/test_sbatch_screen_owns_the_job_lifetime.py`; asserting it
+    here as a string match would be a second, weaker copy.
+    """
     common = _load_common()
     plan = common.SubmissionPlan(
         project_root=tmp_path,
@@ -139,9 +154,15 @@ def test_sbatch_script_wraps_apptainer_in_screen_when_nudge_enabled(
     # Screen session named after Slurm jobid (matches hpc-launcher
     # attach.py's `screen -r botainer-<jobid>` convention).
     assert "SCREEN_SID=\"botainer-${SLURM_JOB_ID" in script
-    assert "screen -dmS \"$SCREEN_SID\"" in script
-    # Wait loop keeps the sbatch step alive while the screen lives.
-    assert "while screen -ls" in script
+    assert "-S \"$SCREEN_SID\"" in script
+    # The batch process IS the session owner: nonforking (`-D -m`), exec'd, so
+    # the job lives exactly as long as the session and there is no window
+    # between launching and noticing.
+    assert "exec screen -D -m -S" in script
+    # And the shapes that made the old form racy are GONE, not merely rarer.
+    assert "screen -dmS" not in script
+    assert "while screen -ls" not in script
+    assert "| grep -q" not in script
     # Fallback: when screen is absent, warn LOUDLY and exec the agent
     # directly so the job still runs (nudge/attach just unavailable).
     assert "not on this compute node" in script
@@ -174,8 +195,10 @@ def test_attach_reattaches_to_batch_screen_when_nudge_enabled(tmp_path, capsys):
     # is defined later in this file and returns the submit module.)
     submit = _load_submit()
     common = _load_common()
+    # `.rc` since queue-row work made the dispatch return `Outcome(rc, launched)`
+    # — `main()` needs to know whether anything STARTED, which an int cannot say.
     rc = submit._do_attach(_attach_plan(common, tmp_path, nudge=True),
-                           "12345", dry_run=True)
+                           "12345", dry_run=True).rc
     out = capsys.readouterr().out
     assert rc == 0
     assert "screen -r botainer-12345" in out
@@ -530,7 +553,7 @@ def test_submit_account_is_optional_partition_required(tmp_path: Path) -> None:
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             # spec is only used on the successful-submit jobid-record path, not
             # reached under dry_run; None is fine for this partition-gate test.
-            return submit._do_submit(plan, None, dry_run=True)
+            return submit._do_submit(plan, None, dry_run=True).rc
 
     assert rc("scavenge", None) == 0   # no account → submits (account optional)
     assert rc("scavenge", "myacct") == 0

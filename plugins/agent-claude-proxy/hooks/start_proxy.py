@@ -103,8 +103,14 @@ def main() -> int:
             "[agent-claude-proxy] refused: proxy auth mode is NOT FUNCTIONAL "
             "at v0.1.0. The agent's ANTHROPIC_API_KEY (an ephemeral proxy "
             "token) is blocked by botainer's credential-leak guard, so a "
-            "proxy session cannot start. Use `--mode=shared` (host-shared "
-            "login) or `--mode=isolated` (per-project login) instead. "
+            # `--mode` is not an option of `botainer start`; naming it here
+            # ended the only road out of proxy at "Error: No such option".
+            # This is the message a proxy user actually reaches — the same
+            # remedy in the consent summary cannot render, because this hook
+            # refuses before the summary is printed.
+            "proxy session cannot start. Switch with `botainer auth use "
+            "shared` (one host-wide login) or `botainer auth use isolated` "
+            "(a login per project). "
             "Tracked in the project's internal design notes.",
             file=sys.stderr,
         )
@@ -130,8 +136,15 @@ def main() -> int:
     session_id = record["session_id"]
     state_dir = Path(record["state_dir"]) if "state_dir" in record else None
     if state_dir is None:
-        # Derive from spec.project_root + spec.session_id if missing
-        # (the launcher always sets state_dir; this is defensive).
+        # THE SECOND BRANCH IS THE ONLY ONE THAT RUNS. This used to be
+        # commented "the launcher always sets state_dir; this is defensive",
+        # which is backwards: `SessionRecord.to_dict` writes twelve keys and
+        # `state_dir` has never been one of them. So the branch above is dead
+        # code that reads like the normal path, and the "defensive" fallback is
+        # the normal path. Left in place rather than deleted only because a
+        # record written by some future version may carry the key; but nothing
+        # produces one today, and a reader should not be told otherwise.
+        # `tests/unit/test_hook_record_contract.py` pins the real key set.
         spec = record.get("spec", {})
         state_dir = Path(spec.get("state_dir", ""))
     if not state_dir or not state_dir.exists():

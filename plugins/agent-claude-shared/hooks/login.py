@@ -343,9 +343,8 @@ def _format_login_help(
             "               (No -p publish; the callback binds host:localhost directly.)\n"
         )
 
-    # Standing user direction (a standing user direction): the host's
-    # credential store must NEVER be touched. State this in every
-    # message block.
+    # State the login boundary in every message block: the login container
+    # receives the selected output directory, not the native credential store.
     keychain_promise = _c(
         "No host credential store is consulted (no macOS Keychain,\n"
         "no `~/.claude/`, no `~/.config/anthropic/`). The credential\n"

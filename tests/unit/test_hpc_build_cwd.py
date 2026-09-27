@@ -2,8 +2,7 @@
 directory, because apptainer resolves `%files` SOURCE paths relative to the
 build's WORKING DIRECTORY (not the .def's location). The bundled .defs copy a
 relative sibling `entrypoint_wrap.sh`, so a build launched from the user's
-project dir fails with "cannot stat 'entrypoint_wrap.sh'" (Grace host-test,
-2026-07-02)."""
+project directory cannot resolve that relative source path."""
 
 from __future__ import annotations
 
@@ -28,6 +27,13 @@ def test_hpc_build_runs_from_plugin_dir(tmp_path, monkeypatch) -> None:
     paths = SimpleNamespace(
         images_dir=images,
         apptainer_sif_path=lambda n: images / f"botainer-{n}.sif",
+        # A real StatePaths has this, and `hpc build` now uses it: on success it
+        # records the .sif's sha256 in installed.lock, so the compose-time
+        # provenance check has a baseline instead of silently fail-opening for
+        # every cluster-built image. Omitting it made this fake diverge from a
+        # real install, which is why this test broke when the command started
+        # doing something a real StatePaths supports.
+        installed_lock_path=tmp_path / "plugins" / "installed.lock",
     )
 
     monkeypatch.setattr(hpc.shutil, "which", lambda b: "/usr/bin/apptainer")

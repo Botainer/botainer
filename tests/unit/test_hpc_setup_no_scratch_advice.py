@@ -1,10 +1,9 @@
 """`botainer hpc setup` storage guidance — drift gate.
 
 Earlier versions printed `export MY_BOTAINER=$SCRATCH/.botainer` as a
-"suggested next step", which is actively DANGEROUS on every YCRC cluster
-and most HPC sites: scratch auto-purges (Grace: 60 days) and would wipe
-credentials, project UUIDs, built .sif images, and the installed plugin
-tree. DN-036 flagged this; removed.
+"suggested next step". Site scratch can be purged, which can remove
+credentials, project UUIDs, built .sif images and the installed plugin tree.
+Persistent state must not be directed to purgeable storage (DN-036).
 
 These tests pin the guidance the command now prints so the dangerous
 advice can't sneak back in via a refactor."""
@@ -48,8 +47,8 @@ def test_setup_does_not_advise_redirecting_state_to_scratch(
     for f in forbidden:
         assert f not in result.output, (
             f"setup output contains dangerous advice {f!r}; the pre-2026-06-16 "
-            f"block would purge credentials/UUIDs/.sif/plugins on Grace's "
-            f"60-day scratch sweep. Replace with the storage-layout block."
+            f"block directs persistent state into purgeable scratch storage. "
+            f"Replace with the storage-layout block."
         )
 
 

@@ -1,6 +1,7 @@
 """A login container must RUN its command, not hand it to the agent.
 
-Found by the user's first real codex login,:
+Without an entrypoint override, the shell command can reach the agent
+option parser and fail:
 
     Running `codex login --device-auth` INSIDE the agent-codex container.
     Error parsing -c overrides: Invalid override (missing '='):
@@ -98,8 +99,7 @@ def test_login_overrides_the_image_entrypoint(plugin, image_dir) -> None:
         f"declares ENTRYPOINT {entrypoint}. docker would run\n"
         f"    {entrypoint} sh -c '<login command>'\n"
         f"which hands the login command to the AGENT as arguments. This is the "
-        f"bug that produced \"Error parsing -c overrides\" on the user's first "
-        f"real codex login.")
+        f"bug where Codex parses shell arguments as configuration overrides.")
 
 
 @pytest.mark.parametrize("plugin,image_dir", LOGIN_HOOKS)

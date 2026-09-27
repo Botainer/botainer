@@ -75,7 +75,25 @@ def main() -> int:
         return 1
 
     session_id = record["session_id"]
-    state_dir = Path(record["state_dir"])
+    # WHERE state_dir REALLY LIVES. `SessionRecord.to_dict` writes twelve keys
+    # and `state_dir` is not one of them — it is inside the embedded spec. This
+    # read used to be a bare `record["state_dir"]`, so this hook raised
+    # KeyError on EVERY run, on every host, in a real `start` as much as in a
+    # preview. That is why the host-side Wolfram path has never worked (#179):
+    # it cannot get past this line.
+    #
+    # Four sibling hooks read the same key — agent-claude-broker,
+    # agent-codex-broker, agent-claude-proxy, browser — and all four carry this
+    # fallback. This one did not. Sibling drift, the #136 shape: a family of
+    # five, four fixed, one missed. `tests/unit/test_hook_record_contract.py`
+    # is the gate that now covers all five at once instead of per-plugin.
+    state_dir = Path(record.get("state_dir")
+                     or record.get("spec", {}).get("state_dir", ""))
+    if not str(state_dir) or not state_dir.exists():
+        print(f"[wolfram-sidecar] state_dir missing from record "
+              f"{record_path_p} (looked at 'state_dir' and 'spec.state_dir')",
+              file=sys.stderr)
+        return 1
     session_scratch = Path(
         os.environ.get(
             "BOTAINER_SESSION_SCRATCH",

@@ -19,6 +19,9 @@ anything the sdist excludes must also be refused by the script's leak check.
 from __future__ import annotations
 
 import re
+import json
+import shutil
+import subprocess
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
@@ -67,3 +70,67 @@ def test_build_script_does_not_copy_internal_process_docs() -> None:
     assert "DIST_PRUNE=(" in body, (
         "build-distrib.sh must prune docs/PROTOCOLS + docs/REVIEW-PROTOCOL.md, "
         "which ride in with `cp -a docs`")
+
+
+def test_bundle_metadata_omits_local_paths_and_labels(tmp_path) -> None:
+    """Run the real builder; local build labels must not enter the artifact."""
+    import hashlib
+
+    source = tmp_path / "private-source-marker"
+    source.mkdir()
+    subprocess.run(["git", "init", "-q", str(source)], check=True)
+    script = source / "tools/pkg/build-distrib.sh"
+    script.parent.mkdir(parents=True)
+    shutil.copyfile(REPO / "tools/pkg/build-distrib.sh", script)
+    (source / "pyproject.toml").write_text('version = "0.1.0a5"\n')
+    payload = source / "botainer/payload.txt"
+    payload.parent.mkdir()
+    payload.write_text("public fixture\n")
+    for name in ("SECURITY.md", "CHANGELOG.md", "CONTRIBUTING.md", "CLA.md"):
+        (source / name).write_text("public fixture\n")
+    output = tmp_path / "private-output-marker"
+    subprocess.run(
+        ["bash", str(script), "--out", str(output), "--label", "private-label-marker"],
+        cwd=source, check=True, capture_output=True, text=True,
+    )
+    info = (output / "BUILD_INFO.txt").read_text()
+    assert str(source) not in info
+    assert str(output) not in info
+    assert "private-label-marker" not in info
+    assert "git_describe" not in info  # Free-form Git tags are local metadata too.
+    fields = dict(line.split("=", 1) for line in info.splitlines() if "=" in line)
+    fields = {key.strip(): value.strip() for key, value in fields.items()}
+    assert fields["git_sha"] == "unknown"
+    manifest_bytes = (output / "BUILD_MANIFEST.json").read_bytes()
+    assert hashlib.sha256(manifest_bytes).hexdigest() in info
+    manifest = json.loads(manifest_bytes)
+    assert manifest["botainer/payload.txt"]["sha256"] == hashlib.sha256(payload.read_bytes()).hexdigest()
+    assert manifest["botainer/payload.txt"]["bytes"] == payload.stat().st_size
+    for name in ("SECURITY.md", "CHANGELOG.md", "CONTRIBUTING.md", "CLA.md"):
+        assert (output / name).read_bytes() == (source / name).read_bytes()
+        assert name in manifest
+    assert "BUILD_INFO.txt" not in manifest
+    assert "BUILD_MANIFEST.json" not in manifest
+
+
+def test_bundle_refuses_symlink_payload(tmp_path) -> None:
+    """A staged link must not inherit content clearance from its apparent path."""
+    source = tmp_path / "source"
+    source.mkdir()
+    subprocess.run(["git", "init", "-q", str(source)], check=True)
+    script = source / "tools/pkg/build-distrib.sh"
+    script.parent.mkdir(parents=True)
+    shutil.copyfile(REPO / "tools/pkg/build-distrib.sh", script)
+    (source / "pyproject.toml").write_text('version = "0.1.0a5"\n')
+    private = tmp_path / "excluded.txt"
+    private.write_text("excluded fixture\n")
+    (source / "botainer").mkdir()
+    (source / "botainer/link.txt").symlink_to(private)
+    output = tmp_path / "output"
+    result = subprocess.run(
+        ["bash", str(script), "--out", str(output)], cwd=source,
+        capture_output=True, text=True,
+    )
+    assert result.returncode != 0
+    assert "non-regular file" in result.stderr
+    assert not (output / "BUILD_INFO.txt").exists()

@@ -102,8 +102,19 @@ def test_check_env_one_leak_refuses() -> None:
         )
 
 
-def test_check_env_refusal_mentions_proxy_plugin() -> None:
-    """Refusal message points the user at the right remediation."""
+def test_check_env_refusal_names_a_remediation_that_WORKS() -> None:
+    """Refusal message points the user at the right remediation.
+
+    INVERTED 2026-09-10, not weakened — the docstring above was always right
+    and the assertion under it was wrong. It pinned `agent-claude-proxy`, and
+    `botainer auth use proxy` says proxy makes "every session REFUSE TO START"
+    because THIS GUARD rejects the ANTHROPIC_API_KEY the proxy mints. The leak
+    check was recommending the one mode the leak check breaks, and this test
+    held it in place.
+
+    Now it asserts broker — where the real token never enters the container —
+    and asserts proxy is NOT named, so the circle cannot be re-drawn.
+    """
     try:
         clc.check_env_for_leaks(
             {"ANTHROPIC_API_KEY": "sk-..."},
@@ -112,7 +123,9 @@ def test_check_env_refusal_mentions_proxy_plugin() -> None:
         raise AssertionError("expected Refused")
     except Refused as exc:
         msg = str(exc)
-        assert "agent-claude-proxy" in msg
+        assert "broker" in msg.lower(), msg
+        assert "agent-claude-proxy" not in msg, (
+            f"recommends the mode this guard breaks:\n{msg}")
         assert "login" in msg
 
 

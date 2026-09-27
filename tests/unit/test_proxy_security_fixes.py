@@ -51,20 +51,210 @@ def test_proxy_refuses_arbitrary_upstream_host() -> None:
     assert "attacker.example.com" in result.stderr
 
 
-def test_proxy_refuses_metadata_service_upstream() -> None:
-    """AWS instance metadata service URL is refused."""
-    result = _spawn_proxy({
-        "BOTAINER_PROXY_UPSTREAM": "http://169.254.169.254/latest/meta-data/",
-    })
-    assert result.returncode != 0
+def _refusal(upstream: str) -> subprocess.CompletedProcess[str]:
+    """Spawn the proxy and insist it REFUSED, rather than merely exited.
+
+    `_spawn_proxy` has a 5s timeout. If the proxy ACCEPTS an upstream it binds
+    its socket and serves forever, so the timeout expires and the caller gets a
+    `TimeoutExpired` traceback that says nothing about what went wrong. Turn
+    that into the sentence a reader needs: the proxy started, and it started
+    pointed at this host.
+    """
+    try:
+        result = _spawn_proxy({"BOTAINER_PROXY_UPSTREAM": upstream})
+    except subprocess.TimeoutExpired as exc:  # pragma: no cover - regression
+        # DO NOT read every timeout as acceptance. Refusal takes ~60-90 ms
+        # against a 5 s budget, so a timeout is almost always a real accept —
+        # but "the proxy forwards your credential to attackers" is far too
+        # alarming a sentence to print at someone because a loaded machine
+        # descheduled a subprocess. The proxy announces itself when it binds;
+        # require that announcement before making the claim.
+        err = exc.stderr or b""
+        if isinstance(err, str):
+            err = err.encode()
+        if b"listening on" in err:
+            raise AssertionError(
+                f"the proxy ACCEPTED upstream {upstream!r} — it bound its "
+                f"socket and began serving instead of refusing. A running "
+                f"proxy forwards the real credential to whatever upstream it "
+                f"was given."
+            ) from None
+        raise AssertionError(
+            f"the proxy neither refused nor announced itself within the "
+            f"timeout for upstream {upstream!r}. This is NOT evidence that it "
+            f"accepted — it never got far enough to say. stderr: {err!r}"
+        ) from None
+    assert result.returncode != 0, (
+        f"the proxy exited 0 for upstream {upstream!r}")
+    return result
+
+
+# WHY THESE TWO ASSERT THE MESSAGE AND USE `https://`, measured not assumed.
+#
+# They used to be `http://…` plus a bare `assert result.returncode != 0`, and
+# neither half tested what the names claim. Deleting the allowlist membership
+# check entirely (`if host not in self._ALLOWED_UPSTREAM_HOSTS:` → `if False:`)
+# and re-running the ORIGINAL fixtures:
+#
+#   http://169.254.169.254/…   still exits 1 — the *scheme* check takes over,
+#                              "http:// is only allowed for loopback testing"
+#   http://internal.corp/admin same
+#   https://169.254.169.254/…  "[proxy] listening on … upstream https://169.…"
+#   https://internal.corp/admin same
+#
+# Note the ordering, because I asserted it backwards first and this file's own
+# test caught me. There are TWO scheme-related checks and the allowlist sits
+# between them: a scheme WHITELIST first (`file:///etc/passwd` → "must be http
+# or https", never reaching the allowlist), then the allowlist, then the
+# http-only-for-loopback guard. So for `http://` the allowlist does answer
+# first — but "the allowlist is checked before the scheme" flatly is wrong, and
+# a reviewer caught me writing it that way. The masking is only visible under
+# mutation — remove the allowlist and the scheme guard silently takes the http
+# cases, so an `http://` fixture passes either way and can never show that the
+# allowlist is load-bearing. The `https://` form has no second guard behind it:
+# if the allowlist goes, the proxy starts up pointed at the metadata service.
+#
+# A non-zero exit cannot tell a refusal from a crash either — an AttributeError
+# from a deleted constant also exits non-zero. Assert the refusal the proxy
+# actually makes, and name the host, so the test fails when the guard it is
+# named after is the one that was removed.
+#
+# `test_proxy_refuses_arbitrary_upstream_host` above already did both. These
+# two were its drifted siblings.
+
+
+@pytest.mark.parametrize("upstream,host", [
+    ("https://169.254.169.254/latest/meta-data/", "169.254.169.254"),
+    ("https://[fd00:ec2::254]/latest/meta-data/", "fd00:ec2::254"),
+    # KEEP THE http:// ROW. Moving these fixtures to https:// silently DROPPED
+    # a property the weak originals did have: that an http non-allowlisted
+    # upstream is refused. Measured — scope the allowlist to https and delete
+    # the loopback guard (the shape an "allow an insecure mirror" escape hatch
+    # would take) and without this row the whole file goes green on a proxy
+    # that accepts http://169.254.169.254/latest/meta-data/. Costs nothing: the
+    # unmutated proxy refuses it with the same "not in allowlist".
+    ("http://169.254.169.254/latest/meta-data/", "169.254.169.254"),
+])
+def test_proxy_refuses_metadata_service_upstream(upstream: str, host: str) -> None:
+    """The cloud instance-metadata service is refused BY THE ALLOWLIST.
+
+    This is the classic SSRF target: reaching it from inside a network yields
+    instance credentials. The proxy holds a real API key, so an upstream it
+    will forward to is a credential-exfiltration channel.
+    """
+    result = _refusal(upstream)
+
+    assert "not in allowlist" in result.stderr, (
+        f"refused, but not by the upstream allowlist this test is named for:\n"
+        f"{result.stderr}")
+    assert host in result.stderr, (
+        f"the refusal does not name the host it rejected: {result.stderr}")
 
 
 def test_proxy_refuses_internal_network() -> None:
-    """RFC1918 / internal hosts refused."""
-    result = _spawn_proxy({
-        "BOTAINER_PROXY_UPSTREAM": "http://internal.corp/admin",
-    })
-    assert result.returncode != 0
+    """An internal/RFC1918-style host is refused BY THE ALLOWLIST."""
+    result = _refusal("https://internal.corp/admin")
+
+    assert "not in allowlist" in result.stderr, result.stderr
+    assert "internal.corp" in result.stderr, result.stderr
+
+
+def _allowed_hosts() -> frozenset[str]:
+    """The shipped allowlist, read from the shipped file.
+
+    Imported rather than re-typed: a copy in the test would drift, and a test
+    that pins its own copy pins nothing. Importing is safe — `main()` is behind
+    an `if __name__ == "__main__"` guard.
+    """
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("_proxy_under_test", PROXY_SCRIPT)
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.ProxyConfig._ALLOWED_UPSTREAM_HOSTS
+
+
+def test_the_allowlist_CONTENTS_are_pinned() -> None:
+    """Three hostile literals do not pin a list that anyone can extend.
+
+    A reviewer asked for a mutation that re-opens SSRF in a different spelling
+    and found this one: adding `evil.example.net` to the frozenset left every
+    test in this file green, because each one names a host it expects to be
+    REFUSED and none says what may be ALLOWED. Widening an allowlist is the
+    likeliest way this guard actually dies — a plausible-looking one-line diff
+    in a hurry — and it was the one case nothing watched.
+
+    Changing this set is a security decision. Changing it here too is the
+    point: it should not be possible to do quietly.
+    """
+    assert _allowed_hosts() == frozenset({
+        "api.anthropic.com",
+        "127.0.0.1",
+        "localhost",
+        "::1",
+    }), (
+        "the upstream allowlist changed. Every host here is somewhere the "
+        "proxy will forward a real API credential. If the change is "
+        "deliberate, say so in the commit message and update this test in the "
+        "same commit."
+    )
+
+
+@pytest.mark.parametrize("variant", [
+    "{h}.attacker.test",   # suffix confusion: defeats `startswith`
+    "attacker-{h}",        # prefix confusion: defeats `endswith`
+    "x.{h}.attacker.test",  # both at once: defeats a naive `in`
+])
+def test_a_host_that_merely_CONTAINS_an_allowed_name_is_refused(variant: str) -> None:
+    """Pins the MATCHING RULE, not just the membership list.
+
+    The same reviewer found two more mutations that passed every test here:
+
+        if not any(a in host for a in ALLOWED):          # substring
+        if not any(host.startswith(a) for a in ALLOWED)  # prefix
+
+    Either one accepts `https://api.anthropic.com.attacker.test/` and
+    `https://localhost.attacker.test/` — domains an attacker simply registers.
+    The shipped code does exact membership (`host not in ALLOWED`), which is
+    correct; nothing asserted that it stays correct.
+
+    Derived FROM the allowlist rather than hardcoded, so a host added there is
+    automatically probed for the same confusions instead of being exempt from
+    them by omission.
+    """
+    for allowed in sorted(_allowed_hosts()):
+        if ":" in allowed:      # IPv6 literal — bracket rules differ, skip
+            continue
+        hostile = variant.format(h=allowed)
+        result = _refusal(f"https://{hostile}/v1/messages")
+        assert "not in allowlist" in result.stderr, (
+            f"{hostile!r} was not refused by the allowlist. A host that merely "
+            f"contains {allowed!r} is a DIFFERENT host, owned by whoever "
+            f"registered it — matching must be exact.\n{result.stderr}")
+
+
+def test_the_https_fixture_is_refused_BY_NAME_not_by_scheme() -> None:
+    """What this measures, stated honestly, because its first name oversold it.
+
+    It was called `..._rests_on_the_ALLOWLIST_ALONE`, and it CANNOT establish
+    that. A reviewer inserted a second guard right behind the allowlist and the
+    whole file stayed green: "alone" is a counterfactual about REMOVING the
+    allowlist, and only a mutation can observe a counterfactual. A test that
+    reads the unmutated proxy's output can never see it.
+
+    What it does establish, which is still worth pinning: the https fixtures
+    above are refused by the HOST ALLOWLIST and not by the http-loopback guard.
+    That is what makes them meaningful as SSRF tests rather than as accidental
+    scheme tests. The claim that the allowlist is the only guard behind them is
+    carried by the mutation recorded in the comment block above, and by nothing
+    in this function.
+    """
+    result = _refusal("https://169.254.169.254/latest/meta-data/")
+
+    assert "not in allowlist" in result.stderr, result.stderr
+    assert "loopback" not in result.stderr, (
+        f"the http-loopback guard answered instead of the allowlist, so this "
+        f"fixture is testing the scheme rule and not SSRF:\n{result.stderr}")
 
 
 def test_proxy_refuses_plain_http_to_anthropic() -> None:
@@ -256,6 +446,69 @@ def test_start_proxy_refuses_creds_override_without_testing_flag(
     assert "credentials file not found" in result.stderr
 
 
+def _commands_named_but_absent(text: str) -> list[str]:
+    """Every backticked remedy in `text` that a user cannot actually run.
+
+    Two ways to fail, and the FIRST one is the one that shipped:
+
+    1. A BARE FLAG. The refusal said "Use `--mode=shared` … or
+       `--mode=isolated`" with no command attached. `--mode` does exist — on
+       `auth login` and `hpc submit` — so "is this flag real?" answers yes and
+       misses it entirely; what the reader does is put it on the command that
+       just failed, and `botainer start --mode=shared` answers "Error: No such
+       option". A remedy has to name the command, which is this project's own
+       rule about never handing someone a command without saying where it runs.
+    2. A `botainer …` command or flag the live click tree does not have,
+       resolved against the tree rather than a fixture, so a rename shows up
+       here without anyone remembering to update a list.
+
+    The first version of this helper only did (2), and only for strings
+    starting with "botainer" — so it was proven against a form the hook never
+    had and was blind to the one it did. The loop tzar caught that at
+    checkpoint 10 by restoring the real pre-fix string and watching the suite
+    stay green.
+    """
+    import re
+
+    import click
+
+    from botainer.cli.main import cli
+
+    missing: list[str] = []
+    for quoted in re.findall(r"`([^`]+)`", text):
+        tokens = quoted.split()
+        if not tokens:
+            continue
+        if tokens[0].startswith("-"):
+            missing.append(
+                f"{quoted!r}: a bare flag is not something a user can run — "
+                f"name the command it belongs to")
+            continue
+        if tokens[0] != "botainer":
+            continue
+        cmd = cli
+        rest = tokens[1:]
+        while rest and isinstance(cmd, click.Group):
+            sub = cmd.get_command(None, rest[0])  # type: ignore[arg-type]
+            if sub is None:
+                break
+            cmd, rest = sub, rest[1:]
+        if cmd is cli:
+            missing.append(f"{quoted!r}: names no botainer command")
+            continue
+        # `secondary_opts` too: click stores the second half of a
+        # `--shared/--isolated` pair there, so reading `opts` alone
+        # REFUSED a correct remedy naming `auth login --isolated`.
+        opts = {o for p in cmd.params
+                for o in getattr(p, "opts", []) + getattr(p, "secondary_opts", [])}
+        for tok in rest:
+            if tok.startswith("-") and tok.split("=")[0] not in opts:
+                missing.append(
+                    f"{quoted!r}: {tok.split('=')[0]} is not an option of "
+                    f"`{cmd.name}`")
+    return missing
+
+
 def test_start_proxy_refuses_as_not_functional_by_default(tmp_path: Path) -> None:
     """T0-3 / #59: without an escape hatch, the proxy hook fails fast with an
     explicit 'NOT FUNCTIONAL at v0.1.0' refusal BEFORE spawning anything.
@@ -301,6 +554,14 @@ def test_start_proxy_refuses_as_not_functional_by_default(tmp_path: Path) -> Non
     # Fails fast BEFORE emitting any contribution (no proxy spawned, so no
     # proxy_pid to leak or clean up).
     assert result.stdout.strip() == ""
+    # ...and the way OUT that it names must exist. This refusal is the ONLY
+    # thing a proxy-configured user sees — the same remedy in the consent
+    # summary never renders, because this hook refuses first. It spent months
+    # naming `--mode=shared`, which is not an option of any command: the user
+    # was told to run something that answers "Error: No such option".
+    assert not _commands_named_but_absent(result.stderr), (
+        f"the refusal names a command or flag the CLI does not have: "
+        f"{_commands_named_but_absent(result.stderr)}")
 
 
 # ────────── CREDENTIAL-PROXY-INVESTIGATION findings ──────────
@@ -430,3 +691,78 @@ def test_audit_log_verify_empty_log_ok(tmp_path: Path) -> None:
     audit = tmp_path / "audit.jsonl"
     ok, detail = proxy_mod.verify_audit_chain(audit)
     assert ok
+
+
+def test_the_proxy_actually_DIES_on_SIGTERM(tmp_path):
+    """It ignored SIGTERM entirely, and that was OBSERVED before it was explained.
+
+    A `timeout 5 python3 proxy.py` from an unrelated measurement was still alive
+    **3h29m** later, parked in `futex_wait_queue`, socket not unlinked, no
+    `proxy_stopped` audit record. `timeout` had sent SIGTERM at five seconds.
+
+    THE CAUSE. `socketserver.shutdown()` sets a flag and then BLOCKS until
+    `serve_forever()` acknowledges it. A signal handler runs ON the thread inside
+    `serve_forever`, so the thing it waits for cannot happen — the documented
+    CPython deadlock. The #108 watchdog in the same file gets this right (it
+    calls `shutdown()` from a thread) and `plugins/wolfram-sidecar/proxy.py` has
+    always got it right, so the correct shape was in the repo twice while the
+    signal path had it wrong.
+
+    WHY A TEST AND NOT A COMMENT: this is only visible by running the process and
+    signalling it. Every static lens in this repo reads text, and a handler that
+    deadlocks looks perfectly reasonable in source — `server.shutdown()` is the
+    documented way to stop a socketserver, just not from there.
+
+    Bounded in production today by `stop_proxy.py` escalating to SIGKILL after
+    3s, and by whole-proxy auth mode being refused at v0.1.0. Neither is a reason
+    to keep a handler that cannot run, and neither will still be true when the
+    mode is un-refused.
+    """
+    import signal
+    import time
+
+    sock = tmp_path / "p.sock"
+    env = {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "BOTAINER_PROXY_SOCKET_PATH": str(sock),
+        "BOTAINER_PROXY_EPHEMERAL_TOKEN": "eph",
+        "BOTAINER_PROXY_REAL_CREDS_PATH": str(tmp_path / "creds.json"),
+        "BOTAINER_PROXY_AUDIT_LOG": str(tmp_path / "audit.jsonl"),
+        "BOTAINER_PROXY_UPSTREAM": "https://api.anthropic.com",
+    }
+    proc = subprocess.Popen(
+        [sys.executable, str(PROXY_SCRIPT)], env=env,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        for _ in range(100):                      # up to 10s to bind
+            time.sleep(0.1)
+            if sock.exists():
+                break
+        else:
+            proc.kill()
+            raise AssertionError("the proxy never bound its socket")
+
+        proc.send_signal(signal.SIGTERM)
+        for _ in range(50):                       # 5s to die
+            time.sleep(0.1)
+            if proc.poll() is not None:
+                break
+        else:
+            raise AssertionError(
+                "the proxy is STILL RUNNING 5s after SIGTERM. `shutdown()` is "
+                "being called on the serving thread and has deadlocked — run it "
+                "on a throwaway thread, as the #108 watchdog does.")
+
+        assert proc.returncode == 0, (
+            f"died, but not cleanly: rc={proc.returncode}")
+        assert not sock.exists(), (
+            "exited without unlinking its socket; the next launch fails with "
+            "`address in use` on the same path")
+        audit = tmp_path / "audit.jsonl"
+        assert audit.exists() and "proxy_stopped" in audit.read_text(), (
+            "no `proxy_stopped` audit record — the shutdown path did not run "
+            "its cleanup, so a stop is indistinguishable from a crash")
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5)

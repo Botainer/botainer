@@ -12,6 +12,12 @@ botainer config check       # validate the project's config.yaml
 
 If those don't reveal the issue, the table below covers the common ones.
 
+If what you hit is not a fault but a limitation botainer already knows about,
+it is likely in [`docs/ROUGH-EDGES.md`](docs/ROUGH-EDGES.md) — case-insensitive
+filenames on macOS, codex's databases on some network filesystems, what a
+badly-killed session leaves behind. That file says plainly where there is no fix
+yet.
+
 ## Install / setup
 
 | Symptom | Likely cause | Fix |
@@ -31,24 +37,24 @@ If those don't reveal the issue, the table below covers the common ones.
 | Agent in container can't `pip install` / `npm install` / `curl` | The project's `.botainer/config.yaml` has `network.mode: none` (note: `botainer init` writes `internet` by DEFAULT, so a freshly-init'd project doesn't block this) — OR the cluster blocks outbound egress from compute nodes | Edit `.botainer/config.yaml`: `network.mode: internet`. On HPC, outbound may still be firewalled (apptainer shares the host network and can't change that); pre-install packages on the host with `pip install --target ~/.botainer/state/<uuid>/packages/pip <pkg>`. |
 | `botainer status` shows nothing while a session is clearly running | Session was started without `--detach`; status only sees recorded runtime handles | For background-able sessions use `botainer start --detach`. |
 | `botainer nudge "..."` says no session found | nudge plugin not enabled OR no `--detach` session running | Check `.botainer/config.yaml` enables `nudge`; run `botainer start --detach`. |
-| Container exits immediately, no clear error | `screen` missing on the host (nudge enabled) | Install `screen` on the host (`apt install screen` / `brew install screen`) or remove `nudge` from `plugins_enabled`. §A19: the screen wrap runs OUTSIDE the container; nothing needs to be in the agent image. |
+| Container exits immediately, no clear error | `screen` missing on the host (nudge enabled) | Install `screen` on the host (`apt install screen` / `brew install screen`) or remove `nudge` from `plugins_enabled`. The screen wrap runs OUTSIDE the container; nothing needs to be in the agent image. |
 
 ## Auth / credentials
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | `botainer config check` flags credential-shaped env var | Your `.botainer/config.yaml` `env:` has e.g. `ANTHROPIC_API_KEY` | Remove it. Use `botainer plugin agent-claude login` for per-project credentials. |
-| Agent in container can read my real API key | You're in `MOUNT` mode (default) | Enable the `agent-claude-broker` plugin — broker mode keeps the real key on the host and hands the container only a sentinel. (The old `proxy` plugin is retired; use the broker.) MOUNT mode is fine when you trust the workspace. |
+| Agent in container can read my real API key | You're in a mount-based auth mode — `isolated` (the default) or `shared`. Both put the credential FILE inside the cage, so anything the agent runs can read it. `botainer auth status` prints which mode this project uses. | Enable the `agent-claude-broker` plugin — broker mode keeps the real key on the host and hands the container only a sentinel. (The old `proxy` plugin is retired; use the broker.) See `docs/CAPABILITY-SURFACE.md` for what each mode does and does not keep out of the container. |
 | `botainer doctor --auth-only` flags shell-env credentials | Your shell has `ANTHROPIC_API_KEY` exported | If intentional, fine — they won't enter the container unless you explicitly add them to `.botainer/config.yaml`. |
 | Broker session fails with `invalid_grant` / "Refresh token not found or invalid" (worked yesterday, dead today) | You ran a **`broker` session and a `shared` session on the same account at the same time**. OAuth refresh tokens rotate on use. Botainer serializes its *own* refreshes with a lock, but in `shared` mode the refresher is Claude Code **inside the container**, which rotates the token without taking that lock — stranding the other session. (Separately: `shared` and `isolated` keep genuinely different credential files, so one account used in both modes can't re-converge.) | Don't run `broker` and `shared` on one account concurrently — pick **one auth mode per account**, or use a **separate account/profile per concurrent project** (`botainer auth login --profile <name>`). Re-auth the stranded one with `botainer auth login`. |
-| Agent inside the cage reports "can't connect to api" mid-session (started fine) | The host-side broker daemon likely **died after launch** — often the same token-rotation cause as the row above, hitting a periodic refresh. Start-time failures are caught and refused up front; a *mid-session* death is not yet surfaced in-cage. | Check `~/.botainer/.../sessions/<id>/broker-daemon.err` for the reason, then `botainer auth login` and restart the session. (Surfacing this failure live is a tracked follow-up.) |
+| Agent inside the cage reports "can't connect to api" mid-session (started fine) | The host-side broker daemon likely **died after launch** — often the same token-rotation cause as the row above, hitting a periodic refresh. Start-time failures are caught and refused up front; a *mid-session* death is not yet surfaced in-cage. | Check `~/.botainer/.../sessions/<id>/agent-<agent>-broker-daemon.err` for the reason (the filename names the broker that failed; `botainer status` prints the exact path), then `botainer auth login` and restart the session. (Surfacing this failure live is a tracked follow-up.) |
 
 ## HPC (Slurm + Apptainer)
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | `module load` env not visible in container | hpc-modules plugin not enabled | Enable it in `.botainer/config.yaml`: `plugins_enabled: [..., hpc-modules]` and list modules in `plugins.hpc-modules.modules`. |
-| module tools present but NOT found by name (binaries exist at `/apps/...` but `python`/etc. don't resolve) | The #160 software-root binds are OFF: the **admin** hasn't set `mounts.cluster_software_roots` in the root-owned `/etc/botainer/policy.yaml`. botainer warns at launch when this happens. | Ask the cluster admin to add the software root(s) — see [`docs/SITE-ADMIN.md`](docs/SITE-ADMIN.md). A user's own policy is ignored for this field. Meanwhile, invoke tools by absolute path (`/apps/python/3.11/bin/python`). |
+| module tools present but NOT found by name (binaries exist at `/apps/...` but `python`/etc. don't resolve) | The software-root binds are OFF: the **admin** hasn't set `mounts.cluster_software_roots` in the root-owned `/etc/botainer/policy.yaml`. botainer warns at launch when this happens. | Ask the cluster admin to add the software root(s) — see [`docs/SITE-ADMIN.md`](docs/SITE-ADMIN.md). A user's own policy is ignored for this field. Meanwhile, invoke tools by absolute path (`/apps/python/3.11/bin/python`). |
 | `module: command not found` INSIDE the container (you wanted to `module load` yourself / in a batch job) | The in-container `module load` feature (`caps.modules_inner_load`) is OFF: the **admin** hasn't set `mounts.cluster_lmod_root` + `cluster_modulepath_roots` in the root-owned `/etc/botainer/policy.yaml`. | Check status with `botainer hpc setup --probe` or `botainer doctor`. Ask the admin to enable it — see [`docs/SITE-ADMIN.md`](docs/SITE-ADMIN.md) §4k. This is a distinct switch from `cluster_software_roots` above. |
 | `botainer nudge` from login node fails with `socket not found` | nudge uses **screen** (not tmux); the screen socket is node-local (under the compute node's `$XDG_RUNTIME_DIR`/`$SLURM_TMPDIR`) and isn't visible from the login node | Run nudge from the same node, or use `srun --overlap --jobid=<jid>` first. (The launcher does this automatically when it can detect the jobid.) |
 | `--detach` says not supported on Apptainer | Apptainer doesn't have docker -d equivalent | Use `sbatch` directly for batched submission; the `hpc-launcher` plugin handles this in the foreground path. |

@@ -84,7 +84,7 @@ config_schema:
       # (HPC-IMPL #7, enforced by submit.py::_refuse_if_concurrency_cap_exceeded).
       # It's a real consumed key AND suggested by the `botainer init` config
       # template — it was missing here, so `additionalProperties: false` rejected
-      # a config that followed the template (Grace host-test 2026-07-02).
+      # a config that followed the template.
       type: integer
       minimum: 1
   additionalProperties: false

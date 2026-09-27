@@ -1,10 +1,8 @@
 """`auth status` must report token HEALTH, not merely that a file exists.
 
-From a real Grace session: two projects, both in shared mode, one
-working and one reporting "login expired" inside the container. `auth status`
-showed a green tick for both, because its only test was `path.exists()`. A dead
-token and a live one are indistinguishable to a stat(), so the command could not
-answer the single question being asked of it.
+A credential file can exist while its token is expired. Reporting success
+from `path.exists()` alone hides that distinction; status needs to inspect
+expiry when the credential format supports it.
 
 Why it went unnoticed: only the BROKER path ever parsed `expiresAt`
 (botainer/broker/credential_source.py). In shared/isolated MOUNT modes the file

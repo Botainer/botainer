@@ -48,8 +48,10 @@ def maybe_start(spec: SessionSpec, *, interval: int = 10) -> int | None:
         # submit` still records a pending request (correct — it can't run here).
         return None
     try:
+        # The dispatcher runs on the host from a project cwd. Select installed
+        # modules without consulting that cwd or inherited PYTHONPATH.
         proc = subprocess.Popen(
-            [sys.executable, "-m", "botainer.cli.main", "hpc", "dispatcher",
+            [sys.executable, "-I", "-B", "-m", "botainer.cli.main", "hpc", "dispatcher",
              "start", "--project", spec.project_root, "--interval", str(interval)],
             env={**os.environ, "BOTAINER_LAUNCHER_PID": str(os.getpid())},
             stdin=subprocess.DEVNULL,

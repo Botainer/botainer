@@ -29,6 +29,7 @@ mechanism. Both can run on the same host.
 from __future__ import annotations
 
 import contextlib
+import errno
 import json
 import os
 import re
@@ -77,7 +78,7 @@ class StatePaths:
 
         The .sif-naming follow-up (DN-036): `hpc build` used to write the unprefixed
         `<plugin>.sif`, which drifted from `image build`'s prefixed form
-        and the resolver's expectation — a 15-min wasted rebuild on Grace.
+        and the resolver's expectation, causing unnecessary rebuilds.
         Routing every botainer-side site through this method means they
         can't drift again. (The hpc-launcher host_helper is deliberately
         standalone and keeps its own copy of the convention;
@@ -85,6 +86,130 @@ class StatePaths:
         agree.)
         """
         return self.images_dir / f"botainer-{plugin_name}.sif"
+
+    def find_apptainer_sif(self, plugin_name: str,
+                           plugin_dir: Path | None = None) -> Path | None:
+        """The .sif that is ACTUALLY on disk for this plugin, or None.
+
+        `apptainer_sif_path` above says where a build SHOULD write. This says
+        where one may be FOUND, which is a different question while DN-036's
+        naming drift exists: `botainer image build` writes the prefixed form and
+        `botainer hpc build` once wrote the unprefixed one, and both spellings
+        exist in real state roots today.
+
+        ONE OWNER, because two surfaces disagreed about whether a file exists.
+        `doctor --strict` had this four-candidate walk inline; `botainer image
+        list` looked only at the canonical path. On one state root at one
+        moment, with `images/agent-claude.sif` present and the recorded path
+        gone, they said:
+
+            image list --verify   ✗ no botainer-agent-claude.sif …   exit 0
+            doctor --strict       ✗ the image recorded at build time was
+                                    …/botainer-agent-claude.sif, which no
+                                    longer exists (…/agent-claude.sif is there
+                                    instead)                          exit 1
+
+        "not built" was false about a file the user could `ls`. Sharing the
+        COMPARISON without sharing the RESOLVER left them able to disagree on
+        the prior question, which is the fourth instance of this class in this
+        subsystem.
+
+        THE RECORDED PATH IS THE LAST RESORT, NOT THE FIRST CANDIDATE, and that
+        ordering was decided by a refuting review that measured what the other way
+        round costs. `botainer image build` records the path it wrote into
+        installed.lock's `apptainer:sha256:<hex>:<path>` marker, and the
+        hpc-launcher has always preferred that path over any conventional name;
+        nothing else looked at it at all, so a .sif present ONLY there was found
+        by `hpc submit`, called "not built" by `start`, and refused for a
+        dispatched job. Consulting it last fixes that without the cost below.
+
+        WHY NOT FIRST. Put it first and it SHADOWS the active state root.
+        Measured, with no hand-edited anything: copy a state root (`cp -a`, or
+        the documented "build elsewhere and scp the .sif into
+        $MY_BOTAINER/images/"), and the copy's lock still names the ORIGINAL
+        root's file. With the recorded path first, a session under the new root
+        silently execs the OLD root's image, ignores the one the user just placed,
+        and `doctor --strict` flips from ✗ "does NOT match the digest recorded at
+        build time" to ✓ "sha256 matches what was recorded".
+
+        And the structural reason, which matters more than the case: the
+        provenance check is only independent because the PATH comes from
+        convention and the HEX comes from the lock. Take both from the lock and
+        one line selects the file AND vouches for it — which makes
+        `composition`'s "this is NOT the file the digest was recorded against"
+        branch unreachable. Three surfaces agreeing on an answer that cannot be
+        contradicted is not agreement.
+
+        A PREMISE I HAD WRITTEN HERE WAS FALSE, and the same review measured that
+        too: there is no `--output` on either builder, so NO botainer command can
+        record a .sif outside `<state_root>/images/`, and `docs/STORAGE.md` §5
+        says plainly that `.sif` files "stay wherever the state root is".
+        Building to /scratch is not a supported placement today, so the only
+        reachable ways to have a recorded path elsewhere are a hand-edited lock or
+        a moved/copied state root — and the second is exactly the regression
+        above. When `images/` becomes relocatable, this precedence should be
+        revisited deliberately rather than inherited.
+
+        Ordered: the canonical name, the legacy spelling, the plugin dir, and the
+        recorded path only if none of those exists.
+        """
+        candidates = [
+            self.images_dir / f"botainer-{plugin_name}.sif",
+            self.images_dir / f"{plugin_name}.sif",
+        ]
+        if plugin_dir is not None:
+            candidates += [
+                plugin_dir / f"botainer-{plugin_name}.sif",
+                plugin_dir / f"{plugin_name}.sif",
+            ]
+        recorded = self._recorded_apptainer_sif(plugin_name)
+        if recorded is not None:
+            candidates.append(recorded)
+        for c in candidates:
+            try:
+                # is_file()/is_dir(), NOT exists(). A .sif is a regular file and a
+                # sandbox is a directory; `exists()` also says yes to a FIFO, and
+                # a FIFO here HANGS FOR EVER — measured: `inspect` and
+                # `hpc dispatcher once` both sat at the 20 s and 15 s timeouts
+                # with zero output, because the later sha256 read blocks with no
+                # writer. The `cfg.image` branches already require file-or-dir for
+                # exactly this reason ("a char/block device, FIFO, or socket is
+                # not handed to `apptainer exec`"); this one did not, and a hang
+                # is not an exception — it defeats the dispatcher's own
+                # image-fault guard, in a process whose output goes to /dev/null.
+                if c.is_file() or c.is_dir():
+                    return c
+            except OSError:
+                continue
+        return None
+
+    def _recorded_apptainer_sif(self, plugin_name: str) -> Path | None:
+        """The path recorded in installed.lock's apptainer marker, if any.
+
+        Deliberately tolerant: a missing lock, an unreadable one, a malformed
+        line or a marker without a path half all mean "no recorded path", never
+        an exception. This runs on the resolution path of every launch, and a
+        broken lock file must not be the reason a session cannot start — the
+        conventional names are still tried after it.
+
+        The marker's HEX half is not read here; `composition` owns the comparison
+        and this owns the search, which is the split that let the two disagree
+        about whether a file exists in the first place.
+        """
+        try:
+            from botainer.plugins.provenance import (
+                apptainer_marker_path, is_apptainer_marker, read_lock)
+            for entry in read_lock(self.installed_lock_path):
+                if entry.name != plugin_name:
+                    continue
+                if not is_apptainer_marker(entry.image_digest):
+                    continue
+                recorded = apptainer_marker_path(entry.image_digest)
+                if recorded:
+                    return Path(recorded)
+        except Exception:
+            return None
+        return None
 
     def hpc_job_output_dir(self, uuid: str) -> Path:
         """Host-only dir for SLURM `--output`/`--error` (security-audit
@@ -151,13 +276,9 @@ class StatePaths:
         is how the two-tier storage layout stayed unimplemented while `hpc setup`
         advertised it (DN-008).
 
-        ONE resolver for all three components, not three copies. `scratch` was
-        the only one until, when the maintainer's cluster hit a
-        500,000-INODE cap on $HOME — a different axis from bytes, and one the
-        movable component did not address at all: `packages/` (conda/pip, ~8.6 GB
-        but hundreds of thousands of tiny files) is what exhausted it, and
-        `packages_dir` was hardcoded. Adding a second and third near-identical
-        resolver is the shape the simplicity tzar exists to refuse.
+        Use one resolver for scratch, packages and home. Package caches can
+        exhaust an inode quota even when their byte count is modest; allowing
+        only scratch relocation would not address that condition.
 
         Returns None — the historical behaviour, the component under the state
         root — when no profile is active, no template is set, or the template
@@ -283,14 +404,9 @@ class ProjectPaths:
     #: Where THIS project's `/packages` and `/home/user` live, when they must
     #: not live under `base`. Same mechanism and same reason as `scratch_root`.
     #:
-    #: ADDED because the lifetimes table above was right and only
-    #: one third of it was implemented. The maintainer's cluster has a hard
-    #: 500,000-INODE cap on $HOME — a different axis from bytes — and
-    #: `packages/` exhausted it: conda/pip trees are only ~8.6 GB but are
-    #: hundreds of thousands of tiny files. Every session then died writing
-    #: `.meta.json.tmp` with `[Errno 122] Disk quota exceeded`. Moving
-    #: `/scratch`, the one relocatable component, did not help at all, because
-    #: scratch is the byte-heavy one and this was an inode failure.
+    #: Package caches can exhaust a filesystem's inode quota independently of
+    #: its byte quota. Relocating only scratch cannot remedy package-cache
+    #: pressure, so home and packages use the same relocation mechanism.
     #:
     #: The alternative on the table was letting `MY_BOTAINER` itself point off
     #: $HOME. That was rejected: it relocates `shared-auth/` — the OAuth
@@ -389,7 +505,11 @@ class ProjectListEntry:
     path_exists: bool
     paths: tuple[str, ...]
     display_name: str = ""
-    last_session_at: str = ""        # ISO8601 or empty
+    last_session_at: str = ""        # ISO8601 start of the newest STARTED session, or empty
+    # ISO8601 end of that same session, or EMPTY MEANING UNKNOWN. Empty does
+    # NOT mean running — a crash, kill, scancel or shutdown records no end, and
+    # nothing is later obliged to. Ask `status` for liveness.
+    last_session_ended_at: str = ""
     last_session_runtime: str = ""   # "docker" / "apptainer" / "mock" / ""
     sessions_dir_count: int = 0      # number of session-record dirs (rough activity proxy)
 
@@ -500,18 +620,144 @@ def _is_within(path: Path, root: Path) -> bool:
         return False
 
 
+_MKDIR_CAUSE = {
+    errno.EACCES: "your account does not have permission to create it",
+    errno.EPERM: "your account does not have permission to create it",
+    errno.EROFS: "that filesystem is mounted READ-ONLY",
+    errno.ENOSPC: "that filesystem is FULL",
+    errno.EDQUOT: "you are over QUOTA on that filesystem",
+    errno.ENOTDIR: "one of the parent path components is a FILE, not a directory",
+    errno.ENAMETOOLONG: "the path is too long for that filesystem",
+    errno.ELOOP: "the path contains a symlink loop",
+}
+
+
+def _state_root_source() -> str:
+    """Say WHICH knob chose the state root, so the remedy is actionable.
+
+    A user told only "cannot create /x/y" has to work out why botainer is
+    looking there at all; the refusal needs to name the variable they can
+    actually change.
+
+    ONLY `MY_BOTAINER`, deliberately. The first draft of this also offered
+    `BOTAINER_STATE_ROOT`, and a test caught that it is not an input at all:
+    `_resolve_state_root` reads `MY_BOTAINER` and nothing else, and
+    `subprocess_state_env`'s docstring says BOTAINER_STATE_ROOT is what the
+    launcher EXPORTS to plugin subprocesses ("they do NOT read MY_BOTAINER
+    directly"). Telling someone to export it would have sent them to set a
+    variable the launcher ignores — the same "names something that does not
+    work" defect class the project has already had to fix elsewhere.
+    """
+    return "MY_BOTAINER" if os.environ.get("MY_BOTAINER") else ""
+
+
+def _mkdir_0700(path: Path, what: str) -> None:
+    """Create a botainer state directory, or refuse with an actionable message.
+
+    THE SINGLE CHOKEPOINT for directory creation in this module (queue rows
+    71+72). Every one of these used to be a bare
+    `mkdir(parents=True, exist_ok=True, mode=0o700)`, so an unwritable state
+    root — a cluster profile whose scratch template resolves somewhere the
+    account cannot write, a full or over-quota filesystem, a read-only mount —
+    surfaced as a multi-frame Python traceback ending in `PermissionError:
+    [Errno 13]`. Reproduced on the real CLI before this existed.
+
+    A traceback is not a bug report the user can act on; it reads as "botainer
+    is broken" when the true answer is "this path is not writable, and here is
+    how to point it somewhere else". The standing rule for this project is that
+    a common failure must GUIDE the user to the fix rather than emit a raw
+    error they have to decode.
+
+    STRUCTURAL, deliberately. Wrapping each of the 12 call sites in its own
+    try/except is a rule every future caller must remember; routing them
+    through one function that cannot fail silently is a property. The mode and
+    the `parents=`/`exist_ok=` flags live here once as well, so they cannot
+    drift between call sites either.
+
+    `what` is a short human phrase for the directory's ROLE ("the state root",
+    "this project's scratch directory"), not its path — the path is printed
+    separately and a role tells the user which knob controls it.
+    """
+    # Local import, matching the existing local import of these names further
+    # up this module. (There is no cycle — `core.refusal` imports only `enum`,
+    # checked — but a module-level import here would be the ONLY one of its
+    # kind in this file, and consistency is cheaper than a second convention.)
+    from botainer.core.refusal import RefusalCategory, Refused
+
+    try:
+        path.mkdir(parents=True, exist_ok=True, mode=0o700)
+        return
+    except OSError as exc:
+        cause = _MKDIR_CAUSE.get(
+            exc.errno, f"the filesystem refused it ({exc.strerror or exc})")
+        lines = [
+            f"cannot create {what}:",
+            f"  {path}",
+            f"  {cause}.",
+        ]
+        src = _state_root_source()
+        if src:
+            lines += [
+                "",
+                f"That path comes from ${src}. To put botainer's state"
+                " somewhere writable:",
+                f"  export {src}=<a directory you can write to>",
+                "  botainer setup",
+            ]
+        else:
+            lines += [
+                "",
+                "botainer is using the default state root (~/.botainer). To"
+                " move it:",
+                "  export MY_BOTAINER=<a directory you can write to>",
+                "  botainer setup",
+            ]
+        if exc.errno in (errno.ENOSPC, errno.EDQUOT):
+            lines += [
+                "",
+                "On a cluster this is usually a HOME quota rather than a real"
+                " disk-full: point MY_BOTAINER at your project or scratch"
+                " space, which normally has a larger allowance.",
+            ]
+        lines += ["", "`botainer where` shows the current root and its size."]
+        raise Refused(
+            RefusalCategory.STATE_WRITE_FAILED, "\n".join(lines)) from exc
+
+
 def ensure_user_state_dir(create_if_missing: bool = True) -> StatePaths:
     root = _resolve_state_root()
     paths = StatePaths(root=root)
     if create_if_missing:
-        root.mkdir(parents=True, exist_ok=True, mode=0o700)
-        paths.state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-        paths.plugins_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-        paths.logs_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        # Captured BEFORE the mkdir, because after it the answer is always
+        # "yes" and nothing downstream can recover it. This one boolean is what
+        # lets root_version.record() state authorship as a fact instead of
+        # inferring it from the shape of state/ (#202) — an inference that was
+        # wrong whenever a pre-#202 build had created the root but never run a
+        # session in it.
+        root_existed = root.exists()
+        _mkdir_0700(root, "the botainer state root")
+        _mkdir_0700(paths.state_dir, "the per-project state directory")
+        _mkdir_0700(paths.plugins_dir, "the plugins directory")
+        _mkdir_0700(paths.logs_dir, "the logs directory")
         # Tighten any modes that may have been created with a wider umask earlier.
         for p in (root, paths.state_dir, paths.plugins_dir, paths.logs_dir):
             with contextlib.suppress(OSError):
                 os.chmod(p, 0o700)
+        # Stamp which botainer is using this root (#202). Only on the creating
+        # path: a read-only caller passing create_if_missing=False is inspecting
+        # a root, and inspection must not write to it.
+        #
+        # Write-on-change, so the steady state is zero writes — this function
+        # runs on essentially every command, and a measured production cluster has a
+        # hard inode cap on $HOME that has already killed sessions mid-write.
+        # Deliberately never raises: an unrecordable version costs a future
+        # migration, while raising here would take out every command including
+        # the ones you would run to find out why.
+        with contextlib.suppress(Exception):
+            from botainer import __version__
+            from botainer.state import root_version
+
+            root_version.record(root, __version__, created_now=not root_existed)
     return paths
 
 
@@ -570,12 +816,12 @@ def ensure_project_dirs(
             or refreshed.
     """
     proj = paths.for_project(uuid)
-    proj.base.mkdir(parents=True, exist_ok=True, mode=0o700)
-    proj.data_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-    proj.sessions_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-    proj.locks_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-    proj.packages_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-    proj.scratch_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    _mkdir_0700(proj.base, "this project's state directory")
+    _mkdir_0700(proj.data_dir, "this project's data directory")
+    _mkdir_0700(proj.sessions_dir, "this project's sessions directory")
+    _mkdir_0700(proj.locks_dir, "this project's locks directory")
+    _mkdir_0700(proj.packages_dir, "this project's packages directory")
+    _mkdir_0700(proj.scratch_dir, "this project's scratch directory")
     for p in (
         proj.base,
         proj.data_dir,
@@ -591,7 +837,8 @@ def ensure_project_dirs(
         "pip", "node_modules", "conda_envs", "julia_depot",
         "R_libs", "cargo", "go",
     ):
-        (proj.packages_dir / lang_subdir).mkdir(parents=True, exist_ok=True, mode=0o700)
+        _mkdir_0700(proj.packages_dir / lang_subdir,
+                    f"the {lang_subdir} package directory")
     if project_name:
         _refresh_by_name_symlink(paths, uuid, project_name)
     return proj
@@ -619,6 +866,9 @@ def _refresh_by_name_symlink(
     try:
         safe_name = _sanitize_for_dirname(project_name)
         link_dir = paths.state_dir / "by-name"
+        # NOT _mkdir_0700: the by-name symlink is best-effort
+        # discoverability, and this function already swallows failure by
+        # design. A hard refusal here would break launches that work today.
         link_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         link_path = _unique_link_path(link_dir, safe_name, uuid)
         if link_path is None:
@@ -881,9 +1131,24 @@ def write_default_policy(root: Path, *, allow_tiers: list[str], force: bool = Fa
         "naming": {
             "host_managed_folder": ".botainer",
         },
-        # AUTH-PRODUCT-PLAN §9 / user direction:
-        # default is shared with init-time + session-launch warning.
-        "default_auth_mode": "shared",
+        # ISOLATED, and this line is why the change is real. The pydantic
+        # default in SitePolicy applies only when policy.yaml OMITS the key —
+        # and this template WRITES it, so for anyone who has run `setup` the
+        # template value is the one that decides. Changing the class default
+        # alone left the directive undelivered (#210): every existing and new
+        # root still said `shared`.
+        #
+        # The generated policy and SitePolicy default both start with isolated
+        # authentication. Existing explicit selections are preserved.
+        #
+        # EXISTING ROOTS KEEP `shared`. The merge path below only ADDS keys the
+        # on-disk file lacks, so a policy.yaml that already says `shared` is
+        # untouched — silently relocating where a live user's credentials come
+        # from is the #122/#149 class of surprise.
+        #
+        # tests/unit/test_auth_mode_default.py pins this against
+        # SitePolicy.default_auth_mode so the two cannot drift apart again.
+        "default_auth_mode": "isolated",
     }
     if policy_path.exists() and not force:
         # Merge mode: add fields the on-disk file is missing.
@@ -952,25 +1217,67 @@ def list_projects() -> list[ProjectListEntry]:
         display_name = str(data.get("display_name") or "")
         if not display_name and path_hist:
             display_name = Path(path_hist[-1]).name
-        # Surface last session's metadata if we have any session records.
+        # Session records use started_at. Directory timestamps alone do not
+        # establish that a project has run.
+        #
+        #  1. IT ASKED FOR A KEY NOTHING WRITES. This read
+        #     `spec_data.get("composed_at")`. The in-memory SessionSpec really
+        #     does carry `composed_at`, but the `spec.json` on disk is the
+        #     SESSION RECORD, whose keys are `started_at` / `ended_at`. The
+        #     sibling `last_session_runtime` worked and hid it, because
+        #     `runtime` is a key both sides happen to agree on.
+        #
+        #  2. A SESSION DIRECTORY IS NOT A SESSION. It took the newest
+        #     directory by mtime. `botainer inspect` launches nothing and still
+        #     leaves a session directory with `started_at: null`, so the answer
+        #     could be a time for something that never ran — and an
+        #     inspect-only directory written later would mask the real session
+        #     before it. `cli/_common.py` already states this rule ("the
+        #     discriminator is a RECORD WITH A START TIME, not a directory
+        #     entry"), put there by a refuting review that caught the same
+        #     error elsewhere.
+        #
+        # WHY `started_at` AND NOT `ended_at`: `ended_at` is not reliably
+        # available even for a session that is long over. A clean `botainer
+        # stop` writes a true one; `cli/status.py` reconciles a dead record
+        # lazily but ONLY in non-JSON mode, and writes the time it NOTICED
+        # rather than the time it ended; and a crash, `kill -9`, `scancel` or a
+        # laptop shutting down writes nothing at all. So a caller polling
+        # `status --json` can watch `ended_at` stay null forever on a session
+        # that ended days ago. `started_at` is written once, when the session
+        # actually launches, and needs nobody's later cooperation.
+        #
+        # `last_session_ended_at` is emitted anyway, and EMPTY MEANS UNKNOWN —
+        # not "still running". Liveness is a different question with a
+        # different answer (`status`'s `alive`, via liveness.is_session_alive).
+        # Emitted rather than omitted so a consumer has somewhere to read the
+        # distinction instead of inferring it from a missing key.
         sessions_dir = child / "sessions"
         last_session_at = ""
+        last_session_ended_at = ""
         last_session_runtime = ""
         sessions_count = 0
         if sessions_dir.exists() and sessions_dir.is_dir():
             session_subdirs = [d for d in sessions_dir.iterdir() if d.is_dir()]
             sessions_count = len(session_subdirs)
-            if session_subdirs:
-                # Pick the most-recently-modified session record dir.
+            started: list[tuple[str, dict]] = []
+            for d in session_subdirs:
+                spec_path = d / "spec.json"
+                if not spec_path.exists():
+                    continue
                 try:
-                    newest = max(session_subdirs, key=lambda d: d.stat().st_mtime)
-                    spec_path = newest / "spec.json"
-                    if spec_path.exists():
-                        spec_data = json.loads(spec_path.read_text())
-                        last_session_at = str(spec_data.get("composed_at") or "")
-                        last_session_runtime = str(spec_data.get("runtime") or "")
+                    rec = json.loads(spec_path.read_text())
                 except (OSError, json.JSONDecodeError):
-                    pass
+                    continue
+                started_at = rec.get("started_at")
+                if isinstance(started_at, str) and started_at:
+                    started.append((started_at, rec))
+            if started:
+                # ISO-8601 UTC sorts lexically, so max() is the latest start.
+                started_at, rec = max(started, key=lambda pair: pair[0])
+                last_session_at = started_at
+                last_session_ended_at = str(rec.get("ended_at") or "")
+                last_session_runtime = str(rec.get("runtime") or "")
         out.append(
             ProjectListEntry(
                 uuid=child.name,
@@ -979,6 +1286,7 @@ def list_projects() -> list[ProjectListEntry]:
                 paths=tuple(path_hist),
                 display_name=display_name,
                 last_session_at=last_session_at,
+                last_session_ended_at=last_session_ended_at,
                 last_session_runtime=last_session_runtime,
                 sessions_dir_count=sessions_count,
             )

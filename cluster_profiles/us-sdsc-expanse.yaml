@@ -34,6 +34,7 @@ slurm:
   default_time_minutes: 240
   partitions:
     compute:
+      exclusive: true
       max_time_minutes: 2880        # 48 h — EXCLUSIVE, charges the full node
       max_cpus: 128
       max_memory_gb: 256
@@ -42,6 +43,7 @@ slurm:
       max_cpus: 128
       max_memory_gb: 256
     gpu:
+      exclusive: true
       max_time_minutes: 2880        # exclusive: all 4 GPUs
       max_cpus: 40
       max_memory_gb: 384

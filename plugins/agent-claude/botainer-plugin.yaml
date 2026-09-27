@@ -1,7 +1,7 @@
 # First-party plugin: agent-claude
-# Provides the Claude Code agent inside the container. Per user decision
-# (2026-05-15), credentials are per-project at v0.1.0 (master at
-# ~/.botainer/state/<uuid>/data/agent-claude/profiles/<profile>/.credentials.json).
+# Provides Claude Code inside the container with per-project credentials
+# stored at
+# ~/.botainer/state/<uuid>/data/agent-claude/profiles/<profile>/.credentials.json.
 apiVersion: botainer-plugin-v1
 name: agent-claude
 version: 0.1.0
@@ -16,7 +16,7 @@ runtimes:
   - docker
   - apptainer
 
-# AUTH-PRODUCT-PLAN.md §1: this plugin is Mode A (isolated) of the
+# internal design note DN-040 §1: this plugin is Mode A (isolated) of the
 # anthropic family. Mutually exclusive with the shared + proxy variants.
 auth_family: anthropic
 auth_mode: isolated

@@ -129,7 +129,8 @@ If you have been using botainer already, your scratch data is on the old path.
 To move it:
 
 ```sh
-# --component is scratch | packages | home. Dry run first, always.
+# relocate-storage.sh --component is scratch | packages | home.
+# Dry run first, always.
 tools/pkg/relocate-storage.sh --component packages --dest /project/$USER/bpkgs
 tools/pkg/relocate-storage.sh --component packages --dest /project/$USER/bpkgs --apply
 ```
@@ -183,6 +184,7 @@ replace it with the literal value in your `cluster.yaml`.
 $MY_BOTAINER/                          default ~/.botainer
 ├── cluster.yaml                       your cluster profile (incl. scratch.template)
 ├── policy.yaml                        host-wide policy
+├── root.json                          which botainer version last used this root
 ├── plugins/                           installed plugins
 ├── images/                            built .sif images (HPC)
 ├── shared-auth/agent-<name>/          host-wide credential, shared auth mode
@@ -203,6 +205,13 @@ project's identity (`meta.json`) and credentials (`data/`) — never move. The
 big, rebuildable things can. That is deliberate: relocating the whole root
 would put your credentials on whatever volume you picked, which on a cluster is
 usually group-visible project space.
+
+`root.json` records the on-disk layout version and which botainer created and
+last used this root, so a later version can tell whether it is looking at a root
+an older build wrote — and `botainer doctor` can warn you if a NEWER botainer has
+used it, which is the direction that silently loses session history. It is
+rewritten only when the value changes, and deleting it is safe: botainer records
+again, losing only the note of which version created the root.
 
 `images/` is the exception that is NOT yet fixable: `.sif` files are 2-6 GB each
 and stay wherever the state root is. If your quota problem is BYTES rather than

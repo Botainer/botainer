@@ -265,7 +265,9 @@ def test_status_warns_when_broker_died_midsession(tmp_path: Path, monkeypatch) -
     result = CliRunner().invoke(status_mod.status, [], catch_exceptions=False)
     assert result.exit_code == 0
     assert "credential broker for this session is NOT running" in result.output
-    assert "broker-daemon.err" in result.output        # points at the reason
+    # The diagnostic names the broker that failed using its plugin-specific
+    # log filename.
+    assert "-daemon.err" in result.output              # points at the reason
     assert "botainer auth login" in result.output      # points at the fix
 
 

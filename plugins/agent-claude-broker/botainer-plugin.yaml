@@ -41,7 +41,7 @@ apiVersion: botainer-plugin-v1
 name: agent-claude-broker
 version: 0.1.0
 
-# AUTH-PRODUCT-PLAN.md §1: Mode D (broker) of the anthropic family. Mutually
+# internal design note DN-040 §1: Mode D (broker) of the anthropic family. Mutually
 # exclusive with the isolated (agent-claude), shared, and dead-proxy variants.
 auth_family: anthropic
 auth_mode: broker

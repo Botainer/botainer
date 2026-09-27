@@ -1,14 +1,8 @@
-"""A schema error must tell you what to DO, not just that you were wrong.
+"""Configuration errors identify the offending field and explain corrections.
 
-User report: they wrote `job-profiles:` instead of `job_profiles:`
-and could not work out what was wrong. pydantic's `extra="forbid"` KNEW the key
-was unknown and held the complete list of valid names, and surfaced neither —
-just "Extra inputs are not permitted".
-
-The failure is that the error had every fact needed to solve itself and
-volunteered none of them. These tests pin the three things it must now
-volunteer: the near-miss, the nesting footgun, and where to read more.
-"""
+Tests cover near-miss field names, incorrect nesting, and documentation hints.
+For example, job-profiles is a misspelling of job_profiles; reporting only an
+extra-field error would omit information needed to correct the configuration."""
 from __future__ import annotations
 
 import uuid

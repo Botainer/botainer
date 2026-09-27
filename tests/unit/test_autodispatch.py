@@ -73,7 +73,9 @@ def test_maybe_start_spawns_dispatcher_with_watchdog(monkeypatch) -> None:
     pid = autodispatch.maybe_start(_spec(with_jobs=True), interval=7)
     assert pid == 4242
     argv = captured["argv"]
-    assert argv[1:5] == ["-m", "botainer.cli.main", "hpc", "dispatcher"]
+    # Keep the watchdog/arguments, but exclude project cwd and PYTHONPATH from
+    # the host child's module imports.
+    assert argv[1:7] == ["-I", "-B", "-m", "botainer.cli.main", "hpc", "dispatcher"]
     assert "start" in argv and "--interval" in argv and "7" in argv
     assert "--project" in argv and "/h/p" in argv
     # The watchdog: the dispatcher self-exits if this launcher dies.

@@ -7,16 +7,18 @@ hostile — but **botainer is not a complete security product**.
 
 **Two first-class targets:** laptop (Docker on Mac/Linux) and HPC
 (Apptainer + Slurm + Lmod). The same launcher, the same plugin model,
-the same UX in both worlds. Routes below.
+with platform-specific capabilities and limitations. Routes below.
 
-**Status:** `0.1.0a4` — the first public release, and an alpha. Parts are
+**Status:** `0.1.0a5` — an unreleased alpha candidate. Parts are
 stubbed, parts are documented as not working.
 [`CHANGELOG.md`](CHANGELOG.md) lists what works and what does not;
+[`docs/ROUGH-EDGES.md`](docs/ROUGH-EDGES.md) is the standing list of known
+limitations — what happens, whether botainer tells you, and what you can do
+about it today;
 [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) and
 [`docs/CAPABILITY-SURFACE.md`](docs/CAPABILITY-SURFACE.md) go into detail.
 
-Design documentation lives in botainer's development repository and is not
-part of a release yet. What ships:
+Documentation included in this checkout:
 [`docs/CAPABILITY-SURFACE.md`](docs/CAPABILITY-SURFACE.md)
 for the security contract, [`docs/USER-WORKFLOWS.md`](docs/USER-WORKFLOWS.md)
 for common patterns, [`docs/STORAGE.md`](docs/STORAGE.md) for where botainer
@@ -109,10 +111,10 @@ the agent can read it. Three of them:
 | mode | credential lives | can the agent read it? |
 |---|---|---|
 | `shared` | one host-wide file, shared by all your projects | **yes** |
-| `isolated` | a copy per project | **yes** |
+| `isolated` | a separate login per project | **yes** |
 | `broker` | host-side only; the container gets a fake stand-in | **no** |
 
-`shared` is the default. `shared` and `isolated` both put the real file
+`isolated` is the default. `shared` and `isolated` both put the real file
 *inside* the container — that is what "mount" means when you see it in older
 notes. `broker` does not, which is why it is the one to pick if this matters
 to you.
@@ -123,15 +125,16 @@ Credentials.
 
 **Cluster profile** — unrelated to the above, unfortunately: a YAML file
 describing one HPC site (partitions, accounts, scratch path). ~50 ship.
-`botainer hpc setup` picks one. The flag for both is `--profile`, which is a
-naming mistake we intend to fix.
+`botainer hpc setup --profile` selects one for setup. Launch commands use
+`--cluster` for the cluster selection and `--auth-profile` for the login slot.
 
 **Plugin** — how botainer's own features are built: agent wiring, the HPC
 launcher, the git guard, the browser. **All first-party for now** — there is no
 third-party plugin install — and each can be switched on or off per project via
 `plugins_enabled` in `.botainer/config.yaml`. They run as your user, with your
-privileges, like the launcher itself. botainer does not verify plugin file
-integrity at v0.1.0; signed installs are v0.2 work.
+privileges, like the launcher itself. bundled plugin source is checked against a shipped hash allowlist. This does
+not verify that a built container image matches that source; installs are not
+cryptographically signed.
 
 **State root** — `~/.botainer` by default (`$MY_BOTAINER` overrides), holding
 per-project state, credentials and images.
@@ -153,8 +156,8 @@ limits stated:
   so at launch.
 - **Network** — `network.mode` is an explicit grant, but note `botainer init`
   writes **`internet`**, which means *unrestricted IP egress* — including your
-  LAN and any service on the host or cluster network. `none` is available and
-  is the tighter setting.
+  LAN and any service on the host or cluster network. `none` is available on Docker; Apptainer currently refuses that setting
+  because this launcher cannot enforce it there.
 - **Scheduler (HPC)** — dispatched jobs are caged and bounded by
   `max_concurrent`, and a site policy can cap partition / account / GPUs. There
   is **no** rate limit, total-job budget, or spend cap at v0.1: an agent can
@@ -182,15 +185,15 @@ read it:
 
 - **`broker`** — the real token never enters the container. Pick this if you
   care.
-- **`shared`** (default) — one login, reused by every project. The credential
-  file is mounted into the container, so the agent can read **and overwrite**
-  it. **Run one shared-mode session at a time.** The token rotates when it
-  refreshes, and a second live session invalidates the first one's copy, so you
-  end up logged out somewhere. botainer detects a second concurrent session and
-  refuses rather than letting it happen.
-- **`isolated`** — a separate login per project. Same mount, same agent access,
-  but nothing is shared between projects, so concurrent sessions are fine. The
-  cost is logging in once per project.
+- **`isolated`** (default) — a separate login per project. The credential file
+  is mounted into the container, so the agent can read **and overwrite** it,
+  and separate projects have separate stores. Sessions within the same project
+  and profile still share that store. The cost is logging in once per project.
+- **`shared`** — one host-wide login reused across projects, with per-project
+  working copies reconciled around sessions. Concurrent holders are detected and
+  warned about; the launch is not categorically refused. Claude token refreshes
+  can invalidate another holder's login. Codex shared sessions can overlap, but
+  long-running token-renewal concurrency has not been established.
 
 The capability summary says which mode is in force at every launch.
 
@@ -214,23 +217,23 @@ For what is actually enforced, rather than asserted, read
 
 "the tests pass" is easy to misread. Three layers, in very different states:
 
-1. **Automated suite (~2,400, green).** Verifies what botainer *decides* — binds,
-   env, argv, refusals, plus a hostile suite. Computed without launching a
-   container, so it runs anywhere; only **three** tests touch a real
-   Docker/Apptainer/Slurm. It does not test what a container then *does*.
-2. **A host-side script suite** in the development repository (it needs a real
+1. **Automated suite.** Verifies what botainer *decides* — binds,
+   env, argv, refusals, plus a hostile suite. Most tests compute plans or use
+   fixtures without launching a container. Passing those tests does not
+   establish what a real container or scheduler then does.
+2. **Older host-side test scripts** (they need a real
    Docker/Slurm host). **It predates the broker, the job dispatcher and the
    relocatable storage roots.** Treat it as stale.
-3. **Actual use.** One maintainer, daily on a Mac, repeatedly on one Slurm
-   cluster. Sample of one.
+3. **Runtime evidence.** macOS Docker and a single Slurm cluster. This is
+   limited platform coverage, not a representative deployment matrix.
 
 | | evidence |
 |---|---|
-| Laptop / Docker / Claude Code, `shared` + `broker` | layer 3, daily |
+| Laptop / Docker / Claude Code, `shared` + `broker` | observed use on macOS |
 | HPC: Apptainer + Slurm submit | layer 3, one cluster |
 | HPC job dispatcher, warm pool, MPI | layer 3, lightly |
-| Codex, `shared` | layers 1-2 |
-| Codex, `broker` | **never successfully run, anywhere** |
+| Codex, `shared` | short overlapping Docker sessions; renewal not exercised |
+| Codex, `broker` | short Docker account-login checks on an installed broker; exact-candidate runtime qualification and renewal remain incomplete |
 | Browser viewer | laptop only; carries a trust inversion (see its docs) |
 | **Site-admin path** (`/etc/botainer/policy.yaml`) | **layer 1 only — never run on a real multi-user machine.** A sysadmin deploying this is the first. |
 | Native-Linux Docker (vs Mac) | thin |
@@ -240,8 +243,8 @@ For what is actually enforced, rather than asserted, read
 
 | Agent | `shared` / `isolated` | `broker` |
 |---|---|---|
-| Anthropic Claude Code | works | **works** — this is the one that is used daily |
-| OpenAI Codex CLI | works | implemented, but **has never successfully run**, on any platform |
+| Anthropic Claude Code | works | observed use on macOS and HPC |
+| OpenAI Codex CLI | works | implemented; exact-candidate runtime qualification remains incomplete |
 
 Those are the only two. There is no plugin for any other agent — not written,
 not stubbed. Adding one is not structurally hard, and Google's Gemini CLI is
@@ -260,9 +263,9 @@ Pick with `botainer auth use <mode>`; you enable exactly one of each family.
 | `agent-claude-shared` | Claude Code — **shared** mode: one host-side login reused across projects |
 | `agent-claude-broker` | Claude Code — **broker** mode: real credential stays on the host, agent gets a fake sentinel. The strongest of the three; see `botainer auth use broker` |
 | `agent-claude-proxy` | Claude Code — **proxy** mode. **Not functional at v0.1.0** (see the warning above); kept so the refusal is explicit rather than a missing plugin |
-| `agent-codex` | OpenAI Codex CLI — isolated mode (per-project API key) |
+| `agent-codex` | OpenAI Codex CLI — isolated mode (per-project account login) |
 | `agent-codex-shared` | Codex CLI — shared mode |
-| `agent-codex-broker` | Codex CLI — broker mode. **Not working at v0.1.0**: its hooks shipped non-executable, so it has never run on any platform; the first real attempt still failed. Use `agent-codex-shared` (verified on macOS and HPC) |
+| `agent-codex-broker` | Codex CLI — account-login broker mode. Real credentials stay host-side; request checks are bounded by the testing limits above |
 | `browser` | Chromium in the container for agentic browsing, plus an opt-in watchable viewer. **Read `docs/BROWSER.md` before enabling** — connecting a viewer to a server the container controls is a trust inversion |
 | `git` | Protected git mode (filtered config, disposable .git/config) |
 | `nudge` | Inject text into the agent's prompt from another shell (opt-in; uses host-side screen) |
@@ -307,10 +310,8 @@ tests/            test suite (unit + integration + hostile)
 tools/pkg/        install + distribution scripts
 ```
 
-The development repository additionally carries design notes, prior planning
-notes and the dev-tooling gates. Those are working material, not product, and
-are excluded from every release path — so a release contains exactly the tree
-above.
+The release includes product source, user documentation and tests. Local
+development notes and working artifacts are excluded.
 
 ## Status & roadmap
 

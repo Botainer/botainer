@@ -20,12 +20,11 @@ image: /home/USER/.botainer/images/botainer-agent-claude.sif
 network:
   mode: internet                       # most clusters allow outbound egress
 
-# Top-level `resources` map to BOTH runtimes (docker --cpus / --memory,
-# apptainer → sbatch directives). For HPC-specific request fields
-# (partition, account, GPUs, walltime), use plugins.hpc-launcher below.
-resources:
-  cpu: 8
-  memory_mb: 32768
+# Top-level `resources.cpu` / `.memory_mb` are DOCKER-ONLY and are deliberately
+# NOT set here: this example is `runtime: apptainer`, and setting either would
+# REFUSE the launch (apptainer has no exec-time cgroup support). Everything this
+# job asks Slurm for — cpus, memory, walltime, partition, GPUs — lives under
+# plugins.hpc-launcher below, which is what the sbatch request is built from.
 
 caps:
   kernel:
@@ -51,8 +50,8 @@ plugins:
     purge_first: true
     fail_on_missing: true
   hpc-launcher:
-    # Slurm submission fields. The launcher reads THESE; top-level
-    # `resources` covers per-container cpu/mem but Slurm needs its own
+    # Slurm submission fields. The launcher reads THESE, and only these —
+    # top-level `resources` is not consulted on the HPC path at all
     # request fields below.
     partition: gpu                     # cluster-specific; `sinfo` to list
     account: YOUR_GROUP                # required on most clusters

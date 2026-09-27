@@ -73,8 +73,8 @@ def test_write_initial_config_does_not_overwrite_without_force(tmp_path: Path) -
 def test_write_initial_config_hpc_runtime_preenables_hpc_plugins(tmp_path: Path) -> None:
     """HPC init pre-enables the plugin that NEEDS enabling, and only that one.
 
-    #127 originally pre-enabled hpc-launcher AND hpc-modules. NARROWED
-    after a user report: hpc-launcher declares no hooks and no
+    #127 originally pre-enabled hpc-launcher AND hpc-modules. The narrower
+    selection follows their manifests: hpc-launcher declares no hooks and no
     container contributions (see PluginManifest.enabling_is_inert), so listing
     it changed nothing — while `plugin list` and this template together told
     users it was a switch they had to flip. hpc-modules has a host_pre_launch

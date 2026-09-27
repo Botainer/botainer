@@ -450,8 +450,8 @@ def assert_caged_child_job(argv: list[str], image: str) -> None:
 # ONE caged `apptainer exec` per rank under `srun` — so the ranks must complete
 # the PMIx handshake ACROSS the §4 cage. `--cleanenv` strips the PMIX_*/PMI_*/
 # SLURM_* env slurmstepd sets per rank, and `--containall` hides the per-step PMIx
-# rendezvous socket, so without help every rank boots as an isolated rank-0 (the
-# user's "PMIx namespace" symptom). Both the env AND the socket path are known only
+# rendezvous socket, so without help every rank boots as an isolated rank-0
+# instead of joining the same namespace. Both the env AND socket path are known only
 # PER-TASK (post-fork), so they cannot be static `--env`/`--bind` at compose time.
 
 _MPI_FLAVORS: tuple[str, ...] = ("pmix", "pmi2")

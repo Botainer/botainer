@@ -907,6 +907,109 @@ def test_daemon_main_refuses_to_start_without_valid_credential(
     assert not sock.exists()
 
 
+def _daemon_main(args: list[str], creds: Path, sock: Path,
+                 extra_env: dict | None = None) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, "-m", "botainer.broker.daemon_main",
+         "--socket", str(sock), "--credential-file", str(creds), *args],
+        env={
+            **{k: v for k, v in os.environ.items() if k in ("PATH", "HOME", "LANG")},
+            "PYTHONPATH": str(REPO_ROOT),
+            **(extra_env or {}),
+        },
+        capture_output=True, cwd=str(REPO_ROOT), timeout=30,
+    )
+
+
+def test_upstream_may_not_redirect_the_credential_without_the_testing_gate(
+    short_tmp: Path, tmp_path: Path
+) -> None:
+    """#216. The upstream is the DESTINATION OF THE REAL CREDENTIAL, so the pin
+    is the entire point of it. `--upstream` had been documented as "an override
+    for tests only" since it was written and nothing enforced that — while its
+    neighbour `--allow-insecure-upstream` WAS gated, and only decides http vs
+    https. The more dangerous of the two was the ungated one.
+
+    Both spellings are checked: the flag and the env var the hooks use, because
+    gating one and not the other leaves the hole open through the other."""
+    creds = tmp_path / ".credentials.json"
+    write_creds(creds)
+    sock = short_tmp / "s"
+    for label, args, env in [
+        ("flag", ["--upstream", "https://evil.example"], None),
+        ("env", [], {"BOTAINER_BROKER_UPSTREAM": "https://evil.example"}),
+    ]:
+        proc = _daemon_main(args, creds, sock, env)
+        assert proc.returncode == 1, f"{label}: daemon started anyway"
+        assert b"pinned" in proc.stderr, f"{label}: {proc.stderr!r}"
+        assert b"evil.example" in proc.stderr, (
+            f"{label}: the refusal does not say what was rejected")
+        assert not sock.exists(), f"{label}: it bound a socket before refusing"
+
+
+def test_restating_the_pinned_upstream_is_allowed(
+    short_tmp: Path, tmp_path: Path
+) -> None:
+    """The gate NARROWS, it does not block: both broker hooks compute the
+    upstream from their own trusted constants and pass it explicitly, so
+    refusing an --upstream equal to the pin would break every production
+    launch. This is the test that would have caught that.
+
+    Asserted by watching the daemon COME UP — it prints its readiness marker
+    after binding — rather than by the absence of a string in stderr. A refusal
+    would exit before the marker, so "no error text" and "actually started" are
+    not the same claim, and only the second one is worth making.
+    """
+    from botainer.broker.daemon_main import _PROVIDER_UPSTREAM
+    from botainer.broker.readiness import wait_for_ready
+    creds = tmp_path / ".credentials.json"
+    write_creds(creds)
+    pinned = _PROVIDER_UPSTREAM["anthropic"]
+    # Trailing slash included: the same destination written differently is not
+    # a redirect, and treating it as one would refuse a correct launch.
+    for label, value in (("exact", pinned), ("trailing-slash", pinned + "/")):
+        sock = short_tmp / f"ok-{label}"
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "botainer.broker.daemon_main",
+             "--socket", str(sock), "--credential-file", str(creds),
+             "--upstream", value],
+            env={
+                **{k: v for k, v in os.environ.items()
+                   if k in ("PATH", "HOME", "LANG")},
+                "PYTHONPATH": str(REPO_ROOT),
+            },
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            cwd=str(REPO_ROOT),
+        )
+        try:
+            ready, detail = wait_for_ready(proc, f"socket={sock}", timeout=30)
+            assert ready, f"{label}: restating the pin was refused ({detail})"
+        finally:
+            proc.terminate()
+            proc.wait(timeout=10)
+
+
+def test_the_hooks_pass_exactly_the_upstream_the_daemon_pins(tmp_path: Path) -> None:
+    """The gate above is only safe because these two agree. If a hook's
+    constant ever drifts from the daemon's pin, every broker launch refuses —
+    so assert the agreement HERE, where the failure names the cause, instead of
+    discovering it as a mysterious refusal on someone's laptop."""
+    import re
+    from botainer.broker.daemon_main import _PROVIDER_UPSTREAM
+    for family, consts in (("claude", {"anthropic": "_DEFAULT_UPSTREAM"}),
+                           ("codex", {"openai": "_DEFAULT_UPSTREAM",
+                                      "openai-chatgpt": "_CHATGPT_UPSTREAM"})):
+        src = (REPO_ROOT / "plugins" / f"agent-{family}-broker" / "hooks"
+               / "start_broker.py").read_text(encoding="utf-8")
+        for provider, const in consts.items():
+            m = re.search(rf'^{const} = "([^"]+)"', src, re.M)
+            assert m, f"agent-{family}-broker no longer defines {const}"
+            assert m.group(1) == _PROVIDER_UPSTREAM[provider], (
+                f"agent-{family}-broker {const}={m.group(1)!r} but the daemon "
+                f"pins {provider} to {_PROVIDER_UPSTREAM[provider]!r}; every "
+                f"launch in this mode would now be refused")
+
+
 def test_daemon_main_insecure_upstream_needs_testing_gate(
     short_tmp: Path, tmp_path: Path
 ) -> None:

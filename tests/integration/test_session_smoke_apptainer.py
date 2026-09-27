@@ -68,9 +68,13 @@ def test_real_apptainer_foreground_start_attach() -> None:
 )
 def test_real_hpc_submit_screen_nudge_stop_round_trip() -> None:
     """The §A19 HPC nudge round-trip: `botainer hpc submit` → sbatch
-    → `screen -dmS botainer-${SLURM_JOB_ID}` → `botainer nudge` via
-    `srun --overlap` → `botainer hpc stop`. See module docstring +
-    docs/HPC-WORKFLOW.md §8."""
+    → `exec screen -D -m -S botainer-${SLURM_JOB_ID}` → `botainer nudge`
+    via `srun --overlap` → `botainer hpc stop`. See module docstring +
+    docs/HPC-WORKFLOW.md §8.
+
+    The wrap form changed 2026-09-21 (was `screen -dmS` plus a poll loop,
+    which could end the job while the agent was still running); the session
+    NAME is unchanged, so this round-trip is unaffected."""
     pytest.skip(
         "implementation pending real-cluster validation — see module "
         "docstring for the test plan",

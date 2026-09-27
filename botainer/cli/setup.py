@@ -97,25 +97,30 @@ def setup(
     runtime, disk space, registry reach, host agent CLI). Errors abort;
     warnings allow setup to continue.
     """
-    # Phase 1 preflight: run doctor in setup mode and abort on errors.
-    click.secho("Running preflight checks...", fg="cyan")
-    findings = doctor_mod.collect_findings(for_setup=True)
-    doctor_mod.render_findings(findings)
-    if any(f.is_actionable() for f in findings):
-        click.secho(
-            "\nSetup aborted: one or more preflight checks need your attention.",
-            fg="red",
-            err=True,
-        )
-        sys.exit(2)
-    click.echo("")
-
+    # ── YOUR ARGUMENTS ARE CHECKED BEFORE YOUR MACHINE IS ─────────────────
+    #
     # REFUSE BEFORE WRITING, not after. The bricking bug (audit sweep C) was an
     # ORDERING bug as much as a value bug: setup wrote allowed_tiers into
     # policy.yaml and only then discovered that intersecting with the site
     # default produced the empty set. The bad value was already persisted, so
     # every later plain `botainer setup` crashed the same way and only --force
     # escaped. Validate first and nothing is written, so nothing is stuck.
+    #
+    # AND BEFORE THE PREFLIGHT, which is the same ordering mistake one level
+    # out. This check used to sit AFTER `doctor` ran, so on any host where
+    # doctor has something to say — no container runtime, no disk, no registry
+    # reach; i.e. every machine that has not been set up yet, which is the only
+    # kind of machine that runs `setup` — an invalid flag was reported as
+    #     Setup aborted: one or more preflight checks need your attention.
+    # sending the user to fix their Docker install for a typo in their own
+    # command line. Exactly the "blame the wrong thing" shape the message below
+    # was written to avoid, reintroduced by the order the two blocks run in.
+    #
+    # An argument is well-formed or not regardless of what is installed, so it
+    # is checkable first, so it is checked first. (It also made
+    # test_the_refusal_explains_the_consequence_and_the_way_out fail on any dev
+    # box without a Docker daemon — a HARD-gated test, so this had been
+    # blocking every commit on the branch.)
     #
     # --allow-tier is hidden (see the note above the command), but hidden is not
     # removed: anyone reading the source, or an old script, can still pass it.
@@ -133,6 +138,19 @@ def setup(
             fg="red", err=True,
         )
         sys.exit(2)
+
+    # Phase 1 preflight: run doctor in setup mode and abort on errors.
+    click.secho("Running preflight checks...", fg="cyan")
+    findings = doctor_mod.collect_findings(for_setup=True)
+    doctor_mod.render_findings(findings)
+    if any(f.is_actionable() for f in findings):
+        click.secho(
+            "\nSetup aborted: one or more preflight checks need your attention.",
+            fg="red",
+            err=True,
+        )
+        sys.exit(2)
+    click.echo("")
 
     paths = state_dir.ensure_user_state_dir()
     click.echo(f"State dir: {paths.root}")
@@ -165,11 +183,10 @@ def setup(
     #
     # Note: `agent-claude-shared` / `agent-codex-shared` are NOT in
     # DEFAULT_ENABLED — `botainer init` picks between -shared and
-    # -isolated based on `policy.default_auth_mode`, whose default is
-    # `shared` (SitePolicy.default_auth_mode defaults to "shared" — see
-    # policy.py; an empty/unset value resolves to that class default, NOT
-    # `isolated`). User can `botainer policy set default_auth_mode isolated`
-    # to flip it. The shared variants ARE marked [opt-in] so the
+    # -isolated based on `policy.default_auth_mode`, whose default is now
+    # `isolated` (#210, 2026-09-02) — one credential per project. User can
+    # `botainer policy set default_auth_mode shared` to restore the old
+    # host-wide behaviour. The shared variants ARE marked [opt-in] so the
     # setup output doesn't show `[?]`. Same story for the wolfram and
     # other host_helper plugins.
     DEFAULT_ENABLED = {"agent-claude", "git"}
@@ -262,10 +279,11 @@ def setup(
             # Without this, agent-claude shows [default] even when
             # policy.default_auth_mode=shared (i.e., -shared would
             # actually be enabled). Misleading.
-            # Tasks #69 / #167 / #281: SitePolicy.default_auth_mode default
-            # is 'shared' (see botainer/core/policy.py:103). Previously this
-            # code fell back to 'isolated' which contradicted the actual
-            # compose-time behavior. Use the SitePolicy class default as the
+            # Tasks #69 / #167 / #281, updated by #210: read the SitePolicy
+            # CLASS DEFAULT rather than naming a mode here. Two copies of the
+            # answer is how the 2026-09-01 directive came to be reported as
+            # delivered while the template still said otherwise. Use the
+            # SitePolicy class default as the
             # single source of truth.
             try:
                 from botainer.core import policy as _policy_module
@@ -337,12 +355,26 @@ def setup(
     # Show the effective settings so the user knows what they got
     # without having to `botainer policy show` separately.
     try:
+        from botainer import auth_modes as _auth_modes
         from botainer.core import policy as _policy_module
         eff = _policy_module.load_user_policy()
         click.secho("Current settings (in policy.yaml):", bold=True)
+        # Name the CLASS DEFAULT, never a literal. This line said
+        # "(empty → shared)" and was still saying it after the default became
+        # isolated (#210) — a display string is as capable of being a stale
+        # second copy as a code path is.
+        _fallback = _policy_module.SitePolicy().default_auth_mode
+        # The hint lists the modes that can start, so a user whose CURRENT
+        # value is an experimental one would see their own setting missing
+        # from the line that claims to say how to set it, with nothing saying
+        # why. Say why.
+        _shown = eff.default_auth_mode or f"(empty → {_fallback})"
+        if eff.default_auth_mode in _auth_modes.EXPERIMENTAL_AUTH_MODES:
+            _shown += " [experimental — not in the list below; sessions refuse]"
         click.echo(
-            f"  default_auth_mode:  {eff.default_auth_mode or '(empty → shared)'}"
-            f"     # set via `botainer policy set default_auth_mode <isolated|shared|proxy>`"
+            f"  default_auth_mode:  {_shown}"
+            f"     # set via `botainer policy set default_auth_mode "
+            f"<{_auth_modes.mode_list_hint()}>`"
         )
         click.echo(
             f"  network.default:    {eff.network.default_mode}"

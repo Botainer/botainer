@@ -99,13 +99,13 @@ def test_hosts_incompatible_short_common_prefix() -> None:
 
 def test_self_invocation_text() -> None:
     """2026-07-10: re-invoke via the RUNNING interpreter + module (`sys.executable
-    -m botainer.cli.main`), NOT a bare "botainer" — a detached `sh -c` can't see
-    the user's aliases/wrappers, and this pins the scheduled send to the SAME
-    botainer version that scheduled it."""
+    -I -B -m botainer.cli.main`), NOT a bare "botainer". A detached `sh -c`
+    cannot see aliases; isolated imports also exclude project code. The chosen
+    interpreter must have the intended Botainer installed."""
     import sys
     argv = nudge_cli._self_invocation_argv("continue", None, "abc123", False)
     assert argv == [
-        sys.executable, "-m", "botainer.cli.main",
+        sys.executable, "-I", "-B", "-m", "botainer.cli.main",
         "nudge", "--session", "abc123", "--quiet", "continue",
     ]
     assert argv[0] != "botainer"          # never a bare alias-dependent name
@@ -115,7 +115,7 @@ def test_self_invocation_keys() -> None:
     import sys
     argv = nudge_cli._self_invocation_argv(None, "C-c", "abc123", False)
     assert argv == [
-        sys.executable, "-m", "botainer.cli.main",
+        sys.executable, "-I", "-B", "-m", "botainer.cli.main",
         "nudge", "--session", "abc123", "--quiet", "--keys", "C-c",
     ]
 
@@ -306,7 +306,7 @@ def test_dry_run_does_not_invoke_subprocess(tmp_path: Path, monkeypatch) -> None
     assert "continue" in result.output
 
 
-# ────────── the live-Grace/local nudge failures ──────────
+# ────────── scheduling and delivery regression tests ──────────
 
 def _running_session(tmp_path, monkeypatch):
     """Set up a project + a docker session record + alive/host stubs, and chdir

@@ -8,7 +8,7 @@ a PluginContribution JSON (parsed; envelope-checked elsewhere).
 #215: pre_request / post_request hooks were declared as
 valid `when:` values in the manifest schema but had no dispatcher in
 composition. They depend on the credential-proxy infrastructure that
-§B1 of FEATURE-PARTITION-LOCKED.md defers to v0.2. Removed; will be
+§B1 of internal design note DN-041 defers to v0.2. Removed; will be
 re-added with a real dispatcher when proxy lands.
 """
 
@@ -22,6 +22,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from botainer.core import exec_bit
 from botainer.core.refusal import RefusalCategory, Refused
 
 # Allowlist of host env vars the hook may see (task #284 / codex P0-1).
@@ -179,8 +180,7 @@ def _hook_stderr_excerpt(stderr: str, *, limit: int = 1200) -> str:
         exited 2: (Or switch this project back to isolated mode: …)
 
     while "no shared credential at …" and "Run: botainer auth login …" sat
-    below a separator. That is the maintainer's most-repeated complaint class
-    verbatim — a message that is true and useless.
+    below a separator. Preserve the primary diagnosis in the headline.
 
     Only a TRACEBACK buries its error at the end, so only a traceback gets the
     last-line treatment. Everything else leads with its first line, which is
@@ -245,6 +245,31 @@ def surface_hook_stderr(result, plugin_name: str, hook_when: str) -> None:
             sys.stderr.write(f"[{plugin_name} {hook_when}] {line}\n")
 
 
+def _runs_under_our_interpreter(script_path) -> bool:
+    """Will this hook be handed to `sys.executable` rather than exec'd?
+
+    ONE PREDICATE, ASKED TWICE, AND IT USED TO BE TWO COPIES. The executability
+    exemption and the interpreter choice are the same question — a script we run
+    as `[sys.executable, path]` is never exec'd, so its mode is irrelevant — and
+    both sites spelled it `str(path).endswith(".py")` independently. A refuting
+    review pointed out that the test meant to pin the pairing did not: swapping
+    ONE of them to `Path(path).suffix == ".py"` left all 14 tests green, because
+    the two spellings agree on every filename the tests used.
+
+    They do not agree on every filename. `Path(".py").suffix` is `""` — a
+    leading dot makes it a hidden file with no suffix — while `".py".endswith(
+    ".py")` is True. With the two copies, that file would have been exempted from
+    the bit check and then exec'd, or refused and then handed to python,
+    depending on which copy drifted. One function makes the pair impossible to
+    break rather than merely tested.
+
+    `endswith` is the kept spelling because it is what `cli/auth.py` and
+    `plugins/manifest.py` use for the same dispatch; changing three sites to
+    match a fourth is not a bug fix.
+    """
+    return str(script_path).endswith(".py")
+
+
 def run_hook(
     *,
     plugin_name: str,
@@ -272,10 +297,24 @@ def run_hook(
             RefusalCategory.PLUGIN_HOOK_FAILED,
             f"hook script not found: {script_path}",
         )
-    if not os.access(script_path, os.X_OK):
+    # ONLY FOR NON-.py HOOKS, and that exemption is load-bearing: a few lines
+    # below, a `.py` hook is run as `[sys.executable, script]` — through
+    # botainer's own interpreter, never through its shebang — so it does NOT
+    # need the execute bit and a 0o644 `.py` hook works fine. Requiring it here
+    # REFUSED a shape that previously ran; caught by the loop tzar after I
+    # shipped it. `cli/auth.py` already carried this exemption (`if not is_py
+    # and not ...`) and `plugins/manifest.py` dispatches the same way; this is
+    # the sibling that had drifted.
+    #
+    # is_executable, NOT os.access, for the hooks that DO need it: os.access
+    # returns True for a 0o644 file on a filesystem that does not enforce the
+    # bit, so this refusal never fired for the case it exists to catch — a hook
+    # committed without +x (task #118). See botainer/core/exec_bit.py.
+    if not _runs_under_our_interpreter(script_path) and not exec_bit.is_executable(script_path):
         raise Refused(
             RefusalCategory.PLUGIN_HOOK_FAILED,
-            f"hook script not executable: {script_path}",
+            f"hook script not executable: {script_path} — "
+            f"{exec_bit.why_not_executable(script_path)}",
         )
     full_env = {
         **_scrubbed_host_env(),  # was **os.environ — task #284 / codex P0-1
@@ -287,11 +326,11 @@ def run_hook(
     # their `#!/usr/bin/env python3` shebang. On HPC login nodes the system
     # `python3` is a different interpreter that lacks botainer's deps — the
     # bundled hooks `import yaml` (pyyaml is a botainer dependency), so the
-    # shebang path died with ModuleNotFoundError: No module named 'yaml' (Grace
-    # host-test). sys.executable is the venv/interpreter running
+    # shebang path can fail with ModuleNotFoundError. sys.executable is the
+    # venv/interpreter running
     # botainer, which has every dep botainer ships. Non-.py hooks (none bundled
     # today) still run via their own shebang.
-    if str(script_path).endswith(".py"):
+    if _runs_under_our_interpreter(script_path):
         _cmd = [sys.executable, str(script_path)]
     else:
         _cmd = [str(script_path)]

@@ -1,21 +1,11 @@
 """`botainer doctor` must say WHICH botainer is running.
 
-Built after an hour was lost to exactly this. A dev container had an
-editable install (a .pth pointing at the checkout) AND a plain copied install in
-site-packages. The copy shadows the .pth, so `import botainer` returned code
-SEVEN WEEKS OLD — while `pip list`, `pip show` and the version string all
-reported the editable install and looked entirely correct.
+A copied package in site-packages can shadow an editable checkout while
+package metadata still identifies the editable install. Tests run from the
+checkout can then pass while the CLI executes a stale copy.
 
-The failure mode is the nastiest kind: a fix is written, committed, and passes
-its tests (which run from the checkout), then "doesn't work" — because the thing
-being RUN is not the thing being EDITED. Every other doctor finding describes
-the behaviour of whatever code got imported, so this check runs FIRST: if a
-stale copy is live, the rest of the report is about the wrong program.
-
-The user's question was "what's the install issue? why aren't we fixing?" — and
-the answer was that nothing in botainer could answer "which install is
-live?", so it took hand-inspection of site-packages. A question the user has to
-ask is usually a missing capability (CLAUDE.md), and this is the capability.
+Doctor must compare the loaded code location with the intended install
+before interpreting the rest of its findings.
 
 Tests drive the PURE decision function with explicit facts, so the shadowed
 state can be tested without constructing a shadowed install.
@@ -58,12 +48,8 @@ def test_a_copy_shadowing_an_editable_checkout_is_an_ERROR() -> None:
 def test_a_healthy_editable_install_says_NOTHING() -> None:
     """Silence on the happy path.
 
-    doctor ALREADY reports the live path (`install.code_loaded_from`) and the
-    clone (`install.editable_clone`) — checks that existed before this one, and
-    which I failed to read before adding a third line saying the same thing.
-    The user's own doctor output showed all three stacked up. Every line has to
-    earn its place or the whole report becomes scenery people scroll past,
-    which is how the next real finding gets missed.
+    The loaded path and editable clone already have dedicated findings.
+    A matching installation needs no duplicate warning.
     """
     findings = install_findings(
         live_module_dir=Path("/workspace/botainer"),

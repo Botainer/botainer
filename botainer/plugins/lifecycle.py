@@ -12,9 +12,8 @@ from the wheel's resources into that tree.
 For developers running `pip install -e <clone>`, the plugin tree is
 ALSO at `<state_root>/plugins/<name>/` — but the CLONE has the canonical
 source at `<clone>/plugins/<name>/`. The two trees can drift if a dev
-edits source without re-running `botainer setup`. That drift was the
-source of multiple "my fix isn't running" debugging episodes during
-v0.1.0 development.
+edits source without re-running `botainer setup`, leaving the installed
+plugin copy behind the source changes.
 
 Resolution: in editable-install mode, source overrides installed for
 plugins that exist in both trees. Third-party plugins (in installed
@@ -179,10 +178,46 @@ def enable(project_root: Path, plugin_name: str) -> None:
     _write_plugins_enabled(config_path, enabled)
 
 
-def disable(project_root: Path, plugin_name: str) -> None:
+def enabled_names(project_root: Path) -> list[str]:
+    """The project's `plugins_enabled`, in file order.
+
+    Added because three callers wanted this and each was reading the YAML
+    itself — `disable` inline (below), and `botainer plugin` twice, one of
+    which read `Path.cwd()/.botainer/config.yaml` and so returned an empty
+    list from any subdirectory. One reader, one answer.
+    """
     config_path = _require_config(project_root)
     data = yaml.safe_load(config_path.read_text()) or {}
-    enabled = [p for p in (data.get("plugins_enabled") or []) if p != plugin_name]
+    return list(data.get("plugins_enabled") or [])
+
+
+def disable(project_root: Path, plugin_name: str) -> None:
+    config_path = _require_config(project_root)
+    enabled = [p for p in enabled_names(project_root) if p != plugin_name]
+    _write_plugins_enabled(config_path, enabled)
+
+
+def swap(project_root: Path, *, remove: "set[str] | list[str]",
+         add: "set[str] | list[str]") -> None:
+    """Apply a whole set change in ONE write.
+
+    `auth use <mode>` is a SWAP — one agent plugin out, its sibling in — and it
+    used to run `disable()` then `enable()`, two writes with a state between
+    them in which the project has no agent plugin at all. That intermediate is
+    not hypothetical: it is what wrote our own `[]` marker, and if anything
+    stops the second write (a refusal, a full disk, a signal) the project is
+    left in a mode the user never chose, with `auth use` having reported
+    nothing. One write has no in-between to be interrupted in.
+
+    Order is preserved for names that stay, so comments on their lines survive;
+    additions append in the order given.
+    """
+    config_path = _require_config(project_root)
+    remove_set, add_list = set(remove), list(add)
+    enabled = [p for p in enabled_names(project_root) if p not in remove_set]
+    for name in add_list:
+        if name not in enabled:
+            enabled.append(name)
     _write_plugins_enabled(config_path, enabled)
 
 
@@ -196,31 +231,104 @@ def _require_config(project_root: Path) -> Path:
     return config_path
 
 
+def _item_name(line: str) -> str | None:
+    """The plugin name on a `  - name  # comment` line, or None if not an item.
+
+    Only the name is parsed; everything after it is opaque and is carried
+    through untouched, which is the whole point.
+    """
+    stripped = line.strip()
+    if not stripped.startswith("- "):
+        return None
+    rest = stripped[2:].strip()
+    if not rest or rest.startswith("#"):
+        return None
+    return rest.split("#", 1)[0].strip() or None
+
+
+def _rebuild_block(body: "list[str]", enabled: "list[str]") -> str:
+    """Rebuild `plugins_enabled:` from the EXISTING lines, not from the names.
+
+    Building it from `enabled` alone is what destroyed every inline comment;
+    the names are all that survived that round-trip. Here the original line is
+    the unit that moves, so anything the user wrote on it moves with it.
+    """
+    keep = set(enabled)
+    out: "list[str]" = ["plugins_enabled:\n"]
+    seen: set[str] = set()
+    dropping = False          # inside a removed item's trailing comment block
+
+    for raw in body:
+        if raw.strip() == "[]":
+            # OUR OWN empty marker from a previous write, not user content.
+            # Keeping it produced `plugins_enabled:` / `  []` / `  - name` —
+            # invalid YAML that `auth use <mode>` wrote while exiting 0,
+            # leaving the project unloadable. Reachable whenever the list is
+            # emptied and refilled, which is exactly what a mode switch does
+            # when the agent plugin is the only entry.
+            continue
+        name = _item_name(raw)
+        if name is not None:
+            dropping = name not in keep
+            if not dropping:
+                out.append(raw if raw.endswith("\n") else raw + "\n")
+                seen.add(name)
+            continue
+        if raw.strip().startswith("#"):
+            # A comment line: belongs to the item above it if there was one.
+            if not dropping:
+                out.append(raw if raw.endswith("\n") else raw + "\n")
+            continue
+        if not raw.strip():
+            dropping = False   # a blank line ends an item's comment block
+            out.append(raw if raw.endswith("\n") else raw + "\n")
+            continue
+        # Anything else inside the block (unlikely): keep it rather than guess.
+        dropping = False
+        out.append(raw if raw.endswith("\n") else raw + "\n")
+
+    # Newly enabled names, in the order the caller gave them.
+    for name in enabled:
+        if name not in seen:
+            out.append(f"  - {name}\n")
+
+    if len(out) == 1:                       # nothing enabled at all
+        out.append("  []\n")
+    return "".join(out)
+
+
 def _write_plugins_enabled(config_path: Path, enabled: list[str]) -> None:
     """Update the `plugins_enabled:` list in place, preserving comments.
 
-    Implementation-review HIGH 6: previous logic round-tripped the
-    whole file through yaml.safe_load → yaml.safe_dump, which strips
-    comments. Users routinely document why a plugin is enabled
-    inline (`- nudge  # see GETTING_STARTED nudge tradeoff`); losing
-    those comments on `botainer plugin enable/disable` is a real
-    data-loss bug.
+    Implementation-review HIGH 6: previous logic round-tripped the whole file
+    through yaml.safe_load → yaml.safe_dump, which strips comments. Users
+    routinely document why a plugin is enabled inline (`- nudge  # see
+    GETTING_STARTED nudge tradeoff`); losing those comments on `botainer plugin
+    enable/disable` is a real data-loss bug.
 
-    Strategy: surgically replace just the `plugins_enabled:` block.
-    Find the block start, find its end (next top-level key or EOF),
-    rewrite the list, leave everything else alone.
+    THAT FIX WAS ONLY HALF APPLIED, and this docstring asserted the whole thing
+    for months. Replacing the block instead of the file did save comments
+    ELSEWHERE in config.yaml — but the replacement block was rebuilt from
+    scratch as bare `  - name` lines, so every comment INSIDE the block still
+    died, including the example above. Observed by running `botainer plugin
+    enable` on a default `botainer init` project: the note explaining that the
+    project PINNED its auth mode at init (the only place a user is told that)
+    and the entire commented opt-in plugin menu were both gone, with no warning.
 
-    If we can't locate a `plugins_enabled:` line (i.e., the user
-    hand-wrote a config without it), append a new block at EOF.
+    Strategy: surgically replace just the `plugins_enabled:` block, and build
+    the replacement FROM THE EXISTING LINES rather than from the names —
+
+      * a name that is staying keeps its original line, byte for byte, so
+        whatever the user wrote after it survives;
+      * a standalone comment line inside the block is kept in place;
+      * a name that is going takes its own trailing comment with it, which is
+        right: that comment was about that plugin;
+      * a genuinely new name is appended as a plain `  - name`.
+
+    If we can't locate a `plugins_enabled:` line (i.e., the user hand-wrote a
+    config without it), append a new block at EOF.
     """
     source = config_path.read_text()
-    new_block_lines = ["plugins_enabled:"]
-    if enabled:
-        for name in enabled:
-            new_block_lines.append(f"  - {name}")
-    else:
-        new_block_lines.append("  []")
-    new_block = "\n".join(new_block_lines) + "\n"
 
     lines = source.splitlines(keepends=True)
     block_start = None
@@ -253,11 +361,66 @@ def _write_plugins_enabled(config_path: Path, enabled: list[str]) -> None:
                 break
             break
 
+    new_block = _rebuild_block(
+        lines[block_start + 1:block_end] if block_start is not None else [],
+        enabled)
+
     if block_start is None:
         # No existing block — append.
         suffix = "" if source.endswith("\n") else "\n"
-        config_path.write_text(source + suffix + new_block, encoding="utf-8")
+        _write_verified(config_path, source + suffix + new_block, enabled)
         return
 
     new_source = "".join(lines[:block_start]) + new_block + "".join(lines[block_end:])
+    _write_verified(config_path, new_source, enabled)
+
+
+def _write_verified(config_path: Path, new_source: str, enabled: list[str]) -> None:
+    """Parse what we are about to write, and refuse rather than write it broken.
+
+    This is a TEXT editor for a YAML file — it splices a block rather than
+    round-tripping through a parser, deliberately, because a parser eats the
+    user's comments. The cost of that choice is that no parser ever sees the
+    result, so a splicing bug becomes a config nobody can load, written by a
+    command that exited 0. That happened: `auth use <mode>` on a project whose
+    only enabled plugin was the agent left `[]` and a block item in the same
+    list, and `config check` could no longer read the project at all.
+
+    So the writer now reads its own output BEFORE the file changes. Nothing
+    partial reaches disk: on a parse failure the original file is untouched and
+    the caller gets a refusal naming the file, which is recoverable — the
+    broken-file version was not.
+    """
+    import yaml
+
+    try:
+        parsed = yaml.safe_load(new_source)
+    except yaml.YAMLError as exc:
+        raise Refused(
+            RefusalCategory.CONFIG_INVALID,
+            f"refusing to write {config_path}: the edit would not parse as "
+            f"YAML ({exc.__class__.__name__}). The file is UNCHANGED. This is "
+            f"a botainer bug, not something you did — please report it with "
+            f"the plugin list you were setting.",
+        ) from exc
+    got = (parsed or {}).get("plugins_enabled")
+    # SETS, not sorted lists, and the honest reason: `plugins_enabled` IS a set
+    # of names — the model accepts a repeat and every reader dedupes — so a
+    # multiset comparison would refuse a caller that passed `{...}` or a deduped
+    # list against a file that happens to list a name twice.
+    #
+    # NOT a live regression, and I checked rather than claiming: all three
+    # callers build their list FROM the file (`enable`, `disable`, `swap`), so
+    # duplicates survive on both sides and the multiset form passed too. It is
+    # unreachable today and a set is still the right comparison, because the
+    # next caller doing the natural thing must not be refused. What the check is
+    # FOR is a rebuild that drops or invents a name, and a set catches that.
+    if set(got or []) != set(enabled):
+        raise Refused(
+            RefusalCategory.CONFIG_INVALID,
+            f"refusing to write {config_path}: after the edit the file would "
+            f"say plugins_enabled={sorted(set(got or []))}, not "
+            f"{sorted(set(enabled))}. The file is UNCHANGED. This is a "
+            f"botainer bug, not something you did — please report it.",
+        )
     config_path.write_text(new_source, encoding="utf-8")

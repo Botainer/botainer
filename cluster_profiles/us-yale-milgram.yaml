@@ -49,11 +49,31 @@ lmod:
   bootstrap: /vast/palmer/apps/avx2/lmod/lmod/init/bash
 
 slurm:
-  default_partition: scavenge
+  # NOT `scavenge`, and this profile said `scavenge` until 2026-09-02.
+  #
+  # `default_partition` chooses the partition for an INTERACTIVE AGENT SESSION.
+  # `scavenge` is preemptible: the job is killed without warning when a paying
+  # job wants the node. For a batch job that is a trade — free, restartable.
+  # For a long-running stateful agent it is not a trade, it is the session
+  # dying mid-task with no checkpoint and nothing on screen to explain it.
+  #
+  # The old value was justified as "YCRC convention; mirrors Grace". It was
+  # neither. A live `sinfo -e` on Grace (2026-07-29) found the CLUSTER's own
+  # default is `day`, and that defaulting to `scavenge` was botainer's
+  # invention, not the site's; the Grace profile was corrected then and these
+  # three were not. Sibling drift.
+  #
+  # HONESTY ABOUT THIS VALUE: `day` is chosen because this profile documents it
+  # and it is not preemptible. It is NOT a verified claim about what this
+  # cluster's scheduler prints as its own default — nobody has run `sinfo` here.
+  # `scavenge` remains available: `--partition scavenge`, or
+  # `plugins.hpc-launcher.partition` in .botainer/config.yaml.
+  default_partition: day
   default_account: ""
   default_time_minutes: 240
   partitions:
     scavenge:
+      preemptible: true
       max_time_minutes: 1440        # 1d, preemptible, no charge
     day:
       max_time_minutes: 1440        # 1d, charged

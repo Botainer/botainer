@@ -149,6 +149,12 @@ From: node:24-bookworm-slim
 
 %environment
     export PATH=/opt/conda/bin:$PATH
+    # npm GLOBAL installs land in /packages and are on PATH (#230).
+    # NODE_PATH fixes require() for LIBRARIES only; `npm install -g`
+    # writes BINARIES to the global prefix, which defaulted to a
+    # root-owned path the unprivileged container cannot write.
+    export NPM_CONFIG_PREFIX=/packages/npm-global
+    export PATH=/packages/npm-global/bin:$PATH
     export PIP_TARGET=/packages/pip
     export PYTHONPATH=/packages/pip
     export NODE_PATH=/packages/node_modules

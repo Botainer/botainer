@@ -905,9 +905,22 @@ def test_managed_routes_pinned_to_hook() -> None:
     it). The launcher set must BACKSTOP everything the hook strips."""
     from botainer.core.composition import _BOTAINER_MANAGED_ROUTES
     hook = _load_hook_module()
-    assert hook._BOTAINER_MANAGED <= _BOTAINER_MANAGED_ROUTES, (
-        "hook _BOTAINER_MANAGED has routes the launcher chokepoint does not "
-        f"backstop: {sorted(hook._BOTAINER_MANAGED - _BOTAINER_MANAGED_ROUTES)}"
+    # SYMMETRIC, and it was not. `hook <= routes` only asks whether the
+    # launcher backstops what the hook strips. The direction that mattered is
+    # the other one: a var in ROUTES and missing from the hook's strip set ends
+    # up IN the env-file, and the launcher then refuses the session. HOME was
+    # exactly that from 2026-07-13 to 2026-09-03 — in routes, not in the hook —
+    # and this assertion could not see it by construction.
+    assert set(hook._BOTAINER_MANAGED) == set(_BOTAINER_MANAGED_ROUTES), (
+        "the hook's strip set and the launcher's route set have drifted.\n"
+        f"  in the hook but not backstopped: "
+        f"{sorted(set(hook._BOTAINER_MANAGED) - set(_BOTAINER_MANAGED_ROUTES))}\n"
+        f"  in ROUTES but NOT STRIPPED by the hook: "
+        f"{sorted(set(_BOTAINER_MANAGED_ROUTES) - set(hook._BOTAINER_MANAGED))}\n"
+        "  The second list is the fatal one: those vars survive into the "
+        "env-file,\n  and _validate_host_env_file refuses any env-file that "
+        "sets a route var,\n  so the hook succeeds and every session is "
+        "refused."
     )
 
 
@@ -938,3 +951,80 @@ def test_env_file_refuses_policy_denylisted_ca_bundle() -> None:
     _validate_host_env_text(
         "PATH=/apps/bin\nLD_LIBRARY_PATH=/apps/lib\n", plugin="x", denylist=dl
     )
+
+
+def test_the_hooks_real_env_file_passes_the_real_validator(tmp_path) -> None:
+    """THE COMPOSITION NOBODY RAN, and the reason a broken plugin shipped.
+
+    Two tests already existed and both were green: one asserts this hook writes
+    an env-file, another asserts `_validate_host_env_file` refuses an env-file
+    that sets HOME. Neither ran the FIRST's output through the SECOND. Between
+    them sat a live defect — every env-file this hook produced carried HOME, so
+    the hook succeeded and the launcher then refused the session, on every host,
+    from 5cc06e8 (2026-07-13) until 2026-09-03.
+
+    Measured A/B on the fix:
+        without: keys [CUDA_HOME, HOME, LD_LIBRARY_PATH, PATH, PWD, USER]
+                 -> [env-var-denied] ... sets botainer-managed ... 'HOME'
+        with:    keys [CUDA_HOME, LD_LIBRARY_PATH, PATH, PWD, USER]
+                 -> accepted
+    """
+    import subprocess
+    import sys
+
+    from botainer.core import composition as _c
+
+    bootstrap = tmp_path / "fake-lmod.sh"
+    bootstrap.write_text(
+        '#!/bin/bash\n'
+        'module() { case "$1" in\n'
+        '    purge) ;;\n'
+        '    load) shift; for m in "$@"; do case "$m" in\n'
+        '        cuda/12.3) export CUDA_HOME=/fake/cuda;'
+        ' export LD_LIBRARY_PATH=/fake/cuda/lib;; esac; done ;;\n'
+        '    --terse) shift; [ "$1" = list ] && echo "cuda/12.3" >&2 ;; esac; }\n'
+        'export -f module\n',
+        encoding="utf-8",
+    )
+    proj = tmp_path / "proj"
+    (proj / ".botainer").mkdir(parents=True)
+    (proj / ".botainer" / "config.yaml").write_text(
+        "version: botainer-project-v1\n"
+        "plugins:\n  hpc-modules:\n    modules: [cuda/12.3]\n",
+        encoding="utf-8",
+    )
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+
+    proc = subprocess.run(
+        [sys.executable, str(HOOK_PATH)],
+        env={
+            "PATH": os.environ["PATH"],
+            "HOME": str(tmp_path),
+            "BOTAINER_PROJECT_ROOT": str(proj),
+            "BOTAINER_SESSION_SCRATCH": str(scratch),
+            "BOTAINER_LMOD_BOOTSTRAP": str(bootstrap),
+        },
+        capture_output=True, text=True,
+    )
+    assert proc.returncode == 0, f"hook failed: {proc.stderr}"
+
+    env_file = scratch / "module-env.env"
+    assert env_file.is_file(), (
+        f"the hook wrote no env-file; scratch holds "
+        f"{sorted(p.name for p in scratch.iterdir())}"
+    )
+    keys = [ln.split("=", 1)[0] for ln in
+            env_file.read_text(encoding="utf-8").splitlines() if "=" in ln]
+    assert "CUDA_HOME" in keys, (
+        f"guard: the fixture's module did not take effect, so this test is not "
+        f"exercising a real env diff (keys: {keys})"
+    )
+    assert "HOME" not in keys, (
+        f"the env-file carries HOME (keys: {keys}). The launcher refuses any "
+        f"env-file that sets a botainer-managed route var, so hpc-modules "
+        f"would succeed and every session would then be refused."
+    )
+
+    # And the real validator, called the way composition.py calls it.
+    _c._validate_host_env_file(env_file, plugin="hpc-modules")

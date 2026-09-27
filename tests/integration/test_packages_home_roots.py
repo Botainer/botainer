@@ -6,7 +6,7 @@ WHY, and why it is NOT just "more of the scratch change".
 belong on a big, purged filesystem rather than a quota-limited $HOME.
 
 It did nothing for the INODE axis, which is a different failure with a
-different culprit. On the maintainer's cluster hit a hard
+different culprit. On a production cluster hit a hard
 **500,000-file cap** on $HOME. The component that exhausted it was
 `state/<uuid>/packages/` — conda/pip trees, only ~8.6 GB but hundreds of
 thousands of tiny files. Every session then died writing `.meta.json.tmp`:

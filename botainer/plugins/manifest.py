@@ -20,6 +20,7 @@ from typing import Any
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from botainer.core import exec_bit
 from botainer.core.refusal import RefusalCategory, Refused
 
 # Module-top so Field() in PluginManifest below can reference it.
@@ -314,9 +315,8 @@ class ContributesDecl(BaseModel):
             # The RULE above, actually enforced. It was prose in this comment and
             # in tips.py's docstring, and checked by nothing — so a plugin tip
             # reading "The viewer is SAFER and PROTECTS your clipboard" was
-            # accepted unmodified. BOTH of the maintainer's hand-caught verdicts
-            # were in a plugin manifest, not in BASE_TIPS, so this
-            # is the surface where it actually happened.
+            # accepted unmodified. Plugin manifests need the same validation
+            # as core tips; checking only BASE_TIPS leaves this surface uncovered.
             #
             # A FILTER backing up a structural gap, not a guarantee: a tip is a
             # `str`, so a verdict stays as representable as a fact and no word
@@ -391,13 +391,10 @@ class PluginManifest(BaseModel):
         applies binds/env/sidecars. A plugin declaring none of those is
         therefore unaffected by being enabled.
 
-        `hpc-launcher` is the case (user report): they ran cluster
-        jobs successfully without it in `plugins_enabled` and could not tell
-        whether that was a mistake. It is not — jobs key off `job_profiles`,
-        and the in-container `botainer-job` is bind-sourced from the INSTALLED
-        plugin. But `botainer plugin list` said "installed, not enabled", which
-        reads as a switch left off, and `botainer init` generated a template
-        telling users to enable it.
+        For example, jobs use `job_profiles`, and the in-container
+        `botainer-job` helper comes from the installed hpc-launcher plugin.
+        If it contributes nothing at compose time, labeling it "not enabled"
+        suggests a missing switch that would have no effect.
 
         Derived from what the plugin DECLARES, not from its name or `kind`, so
         a future plugin that grows a hook stops being inert automatically.
@@ -425,7 +422,7 @@ class PluginManifest(BaseModel):
     config_schema: dict[str, Any] = Field(default_factory=dict)
     depends_on: list[str] = Field(default_factory=list)
 
-    # Auth-family / auth-mode (AUTH-PRODUCT-PLAN.md §1, §8).
+    # Auth-family / auth-mode (internal design note DN-040 §1, §8).
     # When set, this plugin is part of an auth family with three modes:
     #   isolated:  per-project credential file (today's default)
     #   shared:    host-wide credential dir, mounted into container
@@ -496,7 +493,7 @@ assert DEFAULT_PLUGIN_MANIFEST_API in PLUGIN_MANIFEST_API_SUPPORTED
 # drops the prerelease suffix so both read as (0, 1, 0). Inert until the day
 # someone bumps the minor in one file only. tests/unit/test_version_is_single_sourced.py
 # now pins them together, so the comment is enforced rather than hoped for.
-BOTAINER_LAUNCHER_VERSION = "0.1.0a4"
+BOTAINER_LAUNCHER_VERSION = "0.1.0a5"
 
 
 def _parse_semver_tuple(v: str) -> tuple[int, int, int]:
@@ -679,16 +676,12 @@ def declared_commands(installed_plugin: object) -> dict[str, Any]:
                 if _script.suffix == ".py":
                     # Always use the SAME Python interpreter as botainer
                     # itself, regardless of the script's executable bit.
-                    # The shebang's `/usr/bin/env python3` resolves to the
-                    # system interpreter on HPC clusters like Yale Grace
-                    # — which typically does NOT have botainer's
-                    # dependencies (pyyaml, pydantic, click) installed.
-                    # Real-host failure: `botainer hpc submit`
-                    # died with `ModuleNotFoundError: No module named
-                    # 'yaml'` because the plugin's submit.py ran under
-                    # /usr/bin/python3 instead of botainer's venv python.
+                    # A shebang resolved through the host PATH can choose a
+                    # system Python without Botainer's dependencies. Use the
+                    # launcher's interpreter for Python plugin commands.
                     argv = [sys.executable, str(_script), *extra_args]
-                elif not os.access(_script, os.X_OK):
+                # is_executable, NOT os.access — see core/exec_bit.py.
+                elif not exec_bit.is_executable(_script):
                     _click.secho(
                         f"refused: plugin {_plugin}: command script "
                         f"{_script} not executable",

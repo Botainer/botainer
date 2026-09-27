@@ -12,9 +12,8 @@
 #   dist/explicit-name/                 (--out overrides versioning entirely)
 #
 # A BUILD_INFO.txt is dropped in the output dir with version, git SHA,
-# dirty-flag, build timestamp, and the source clone path. So on the
-# HPC side you can `cat BUILD_INFO.txt` and know EXACTLY which
-# snapshot you're running.
+# dirty flag, build timestamp and content-manifest digest. Host paths,
+# free-form labels and Git tag names stay in the local terminal output.
 #
 # Usage:
 #   tools/pkg/build-distrib.sh                            # dist/<version>/
@@ -123,9 +122,13 @@ fi
 touch "$OUTPUT_DIR/.botainer-build-staging"
 
 # Git provenance for the BUILD_INFO stamp.
-GIT_SHA="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
+GIT_SHA="$(git -C "$REPO_ROOT" rev-parse --verify HEAD 2>/dev/null || echo unknown)"
 GIT_DESCRIBE="$(git -C "$REPO_ROOT" describe --always --dirty --tags 2>/dev/null || echo unknown)"
-GIT_DIRTY="$(git -C "$REPO_ROOT" status --porcelain 2>/dev/null | head -1 | grep -q . && echo yes || echo no)"
+# NOT `git status | head -1 | grep -q .`: head exits after one line, git dies of
+# SIGPIPE, and under pipefail that reported a DIRTY tree as CLEAN — a false
+# all-clear stamped into a release artefact (row 177, the worst direction of it).
+_GIT_PORCELAIN="$(git -C "$REPO_ROOT" status --porcelain 2>/dev/null || true)"
+if [[ -n "$_GIT_PORCELAIN" ]]; then GIT_DIRTY=yes; else GIT_DIRTY=no; fi
 BUILD_TIMESTAMP="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
 
 echo "── building distribution staging ───────────────────────────────"
@@ -203,6 +206,10 @@ TOP_FILES=(
   "README.md"
   "LICENSE"
   "NOTICE"
+  "SECURITY.md"
+  "CHANGELOG.md"
+  "CONTRIBUTING.md"
+  "CLA.md"
   "THIRD-PARTY-LICENSES.md"
   "DEPLOY.md"
   "GETTING_STARTED.md"
@@ -219,34 +226,53 @@ for f in "${TOP_FILES[@]}"; do
   fi
 done
 
-# ── BUILD_INFO.txt — provenance stamp ──────────────────────────────
+# Remove generated Python caches before measuring the distributed bytes.
+find "$OUTPUT_DIR" -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true
+find "$OUTPUT_DIR" -name '*.pyc' -delete 2>/dev/null || true
+find "$OUTPUT_DIR" -name '.pytest_cache' -type d -exec rm -rf {} + 2>/dev/null || true
+
+# Bind provenance to the actual staged files, including uncommitted content.
+# Only relative paths and content metadata enter the public manifest.
+MANIFEST_SHA="$(python3 - "$OUTPUT_DIR" <<'PYMANIFEST'
+import hashlib
+import json
+from pathlib import Path
+import stat
+import sys
+
+root = Path(sys.argv[1])
+manifest = {}
+for path in sorted(root.rglob("*")):
+    mode = path.lstat().st_mode
+    if stat.S_ISDIR(mode):
+        continue
+    if not stat.S_ISREG(mode):
+        raise SystemExit("REFUSED: distribution contains a non-regular file")
+    rel = path.relative_to(root).as_posix()
+    if rel in {"BUILD_INFO.txt", "BUILD_MANIFEST.json", ".botainer-build-staging"}:
+        continue
+    blob = path.read_bytes()
+    manifest[rel] = {"sha256": hashlib.sha256(blob).hexdigest(),
+                     "bytes": len(blob), "executable": bool(mode & 0o111)}
+blob = (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode("utf-8")
+(root / "BUILD_MANIFEST.json").write_bytes(blob)
+print(hashlib.sha256(blob).hexdigest())
+PYMANIFEST
+)"
 cat > "$OUTPUT_DIR/BUILD_INFO.txt" <<EOF
 botainer distribution staging
 version          = $VERSION
 git_sha          = $GIT_SHA
-git_describe     = $GIT_DESCRIBE
 git_dirty        = $GIT_DIRTY
 built_at         = $BUILD_TIMESTAMP
-built_from       = $REPO_ROOT
-label            = ${LABEL:-(none)}
-output_dir       = $OUTPUT_DIR
+manifest_sha256  = $MANIFEST_SHA
 
-To verify on the deployment side:
-  cat BUILD_INFO.txt
-  # Compare git_sha to the source clone's HEAD.
-
-If git_dirty=yes the source had uncommitted changes at build time; the
-exact tree synced is not recoverable from git alone. Re-run after
-committing for reproducibility.
+BUILD_MANIFEST.json records relative paths, hashes, sizes and executable flags
+for the staged payload. Compare those records with the deployed files.
+The manifest excludes itself, this stamp and the staging marker.
+If git_dirty=yes, the source commit alone does not identify the staged bytes.
 EOF
-echo "  ✓ BUILD_INFO.txt"
-
-# ── Clean up Python build droppings ────────────────────────────────
-echo ""
-echo "── cleaning __pycache__/ and *.pyc ─────────────────────────────"
-find "$OUTPUT_DIR" -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true
-find "$OUTPUT_DIR" -name '*.pyc' -delete 2>/dev/null || true
-find "$OUTPUT_DIR" -name '.pytest_cache' -type d -exec rm -rf {} + 2>/dev/null || true
+echo "  ✓ BUILD_INFO.txt and BUILD_MANIFEST.json"
 
 # ── Sanity: nothing personal made it through ───────────────────────
 echo ""

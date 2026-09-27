@@ -1,18 +1,9 @@
-"""Some plugins are unaffected by `plugins_enabled`; say so instead of lying.
+"""Plugin listings distinguish installation from compose-time enablement.
 
-User report: they ran cluster jobs successfully WITHOUT hpc-launcher
-in `plugins_enabled`, never realised it was supposedly needed, and could not
-tell whether something was wrong. It wasn't — `plugins_enabled` selects which
-plugins COMPOSE (composition.py:368 intersects it with the installed set, then
-runs hooks and applies binds/env/sidecars). hpc-launcher declares none of those,
-so enabling it does nothing. Meanwhile `botainer plugin list` said "installed,
-not enabled" — which reads as a switch left off — and `botainer init` generated
-a template telling users to enable it.
-
-The predicate is DERIVED from what a plugin declares, not from its name or its
-`kind:` string, so a plugin that later grows a hook stops being inert on its own
-rather than needing this list updated.
-"""
+The hpc-launcher plugin provides a helper without compose-time contributions,
+so toggling plugins_enabled does not affect it. Inertness is derived from the
+manifest's contributions and hooks; adding a hook changes that classification.
+The listing and generated configuration must explain this distinction."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -29,7 +20,7 @@ def _man(name: str):
 
 
 def test_hpc_launcher_is_inert_when_enabled() -> None:
-    """The reported case: no hooks, no contributions, so enabling is a no-op."""
+    """No hooks or contributions means enabling has no compose-time effect."""
     man = _man("hpc-launcher")
     assert man.enabling_is_inert(), (
         "hpc-launcher declares something that composes — if that is now true, "
@@ -65,18 +56,42 @@ def test_a_mount_envelope_alone_does_not_count_as_contributing() -> None:
     assert man.enabling_is_inert()
 
 
-def test_generated_hpc_template_does_not_tell_users_to_enable_it() -> None:
-    """The template is where the confusion started."""
-    import inspect
+def test_generated_hpc_template_does_not_tell_users_to_enable_it(tmp_path) -> None:
+    """The template is where the confusion started.
 
-    from botainer.core import config as config_mod
-    src = inspect.getsource(config_mod)
-    block = src[src.index("hpc_plugins_enabled = ("):]
-    block = block[:block.index(")")]
-    assert "hpc-modules" in block, "hpc-modules DOES need enabling"
-    assert "hpc-launcher" not in block, (
-        "the generated config still tells users to enable hpc-launcher, which "
-        "does nothing")
+    WRITES A REAL CONFIG AND READS IT, rather than grepping the generator's
+    source. The old version pulled the `hpc_plugins_enabled = (` block out of
+    `inspect.getsource(config_mod)` and searched the text — so a comment
+    mentioning hpc-launcher anywhere in that block would have failed it, and a
+    generator that built the same string a different way would have passed
+    while emitting the wrong thing. What matters is the FILE a user opens.
+    """
+    from botainer.core.config import write_initial_config
+
+    write_initial_config(tmp_path, agent="agent-claude", force=True,
+                         runtime="apptainer")
+    generated = (tmp_path / ".botainer" / "config.yaml").read_text(encoding="utf-8")
+
+    enabled = []
+    in_block = False
+    for line in generated.splitlines():
+        if line.startswith("plugins_enabled:"):
+            in_block = True
+            continue
+        if in_block:
+            if line.startswith("  - "):
+                enabled.append(line[4:].split("#")[0].strip())
+                continue
+            if line.strip() and not line.startswith(" "):
+                break
+
+    assert "hpc-modules" in enabled, (
+        f"hpc-modules DOES need enabling and the generated config omits it; "
+        f"plugins_enabled = {enabled}")
+    assert "hpc-launcher" not in enabled, (
+        f"the generated config still tells users to enable hpc-launcher, which "
+        f"contributes nothing to the container and does not need it; "
+        f"plugins_enabled = {enabled}")
 
 
 @pytest.mark.parametrize("field,value", [

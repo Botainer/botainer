@@ -1,6 +1,6 @@
 """`auth login` must follow the project you are standing in, and say so.
 
-User report (Grace). Mode resolution was:
+The previous mode-resolution order was:
     explicit flag  >  policy default_auth_mode
 with the project's OWN configured mode never consulted. Two consequences, both
 silent:

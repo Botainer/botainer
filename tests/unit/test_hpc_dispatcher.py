@@ -355,7 +355,9 @@ def test_hpc_jobs_status_shows_queue_from_host(tmp_path, monkeypatch) -> None:
          "submitted_at": "2026-07-09T00:00:00Z"}))
     res = CliRunner().invoke(hpc, ["jobs-status", "--project", str(proj)])
     assert res.exit_code == 0
-    assert "job-1" in res.output and "pending" in res.output
+    # The filename owns the mailbox identity, even if the body disagrees.
+    assert "j1" in res.output and "pending" in res.output
+    assert "job-1" not in res.output
     assert "gpu" in res.output and "Resources" in res.output
 
 
@@ -770,9 +772,8 @@ def test_max_concurrent_is_enforced_with_defer(mb) -> None:
 def test_constraint_renders_and_is_not_agent_requestable(mb) -> None:
     """`constraint` pins node features (e.g. CPU generation) for reproducible runs.
 
-    Grace's partitions mix hardware, so back-to-back benchmark runs land on
-    different silicon and the numbers aren't comparable. `--constraint` fixes
-    that.
+    Partitions can mix processor generations. A Slurm constraint narrows
+    the hardware features requested for comparable runs.
 
     The trust shape is the point: this value goes into an `#SBATCH` directive, so
     it must never be agent-influenced. The protection is STRUCTURAL — there is no

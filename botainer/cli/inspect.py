@@ -7,6 +7,8 @@ from pathlib import Path
 
 import click
 
+from botainer.auth_modes import AUTH_MODES, ONE_SHOT_AXIS_HELP
+
 from botainer.cli._refusal_handler import handle_refusals
 from botainer.core import composition
 from botainer.inspect import json_out, protection, tree
@@ -20,12 +22,65 @@ from botainer.inspect import json_out, protection, tree
     is_flag=True,
     help="Show per-piece protection mode/visibility/protection.",
 )
+@click.option(
+    "--agent",
+    "agent_override",
+    default=None,
+    help=(
+        "Preview the plan for a DIFFERENT agent (e.g. `codex`) without "
+        "editing .botainer/config.yaml. Same one-shot, in-memory swap "
+        "`botainer start --agent` performs, and it keeps your current auth "
+        "mode across the swap."
+    ),
+)
+@click.option(
+    "--runtime",
+    type=click.Choice(["docker", "apptainer", "auto"]),
+    default="auto",
+    help=(
+        "Inspect the plan for a specific runtime. docker and apptainer render "
+        "COMPLETELY different binds and argv, so an inspection that cannot be "
+        "told which one you mean is an inspection of something else."
+    ),
+)
+@click.option(
+    "--auth-mode",
+    type=click.Choice(AUTH_MODES),
+    default=None,
+    help=(
+        "Inspect a different auth mode. This decides WHICH CREDENTIAL is "
+        "bound, so it is the option whose absence mattered most here."
+    ),
+)
+@click.option(
+    "--auth-profile",
+    default=None,
+    help="Inspect a different auth profile. " + ONE_SHOT_AXIS_HELP,
+)
 @handle_refusals
-def inspect(as_json: bool, show_protection: bool) -> None:
+def inspect(as_json: bool, show_protection: bool,
+            agent_override: str | None, runtime: str,
+            auth_mode: str | None, auth_profile: str | None) -> None:
     """Render the SessionSpec that `botainer start` would build."""
     from botainer.cli import _common
     project_root = _common.find_project_root() or Path.cwd()
-    spec = composition.compose_session(project_root, runtime_choice="auto", identity_accept=False)
+    # `start` has had --agent since #112; inspect and dry-run did not, so the
+    # two commands whose whole job is "show me what will happen" could not show
+    # what `start --agent codex` would do. Reported as codex being "messed up":
+    # a project inited for claude has no way to PREVIEW the other agent, and
+    # the only alternative is to launch it and find out. The swap is in-memory
+    # in composition, so nothing here writes to disk — same contract as start.
+    # #204: see the note in dry_run.py — `start` forwards six things to the
+    # composer and this forwarded one, hardcoding the runtime and the auth
+    # mode that decide the argv and the credential bind respectively.
+    spec = composition.compose_session(
+        project_root,
+        runtime_choice=runtime,
+        identity_accept=False,
+        agent_override=agent_override,
+        auth_mode_override=auth_mode,
+        auth_profile_override=auth_profile,
+    )
     # AUDIT (MEDIUM): inspect calls compose_session ONLY — it does
     # NOT run pre_session hooks, so the rendered mount plan / env OMITS their
     # contributions (the agent credential bind, the proxy socket, the git

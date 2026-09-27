@@ -1,19 +1,19 @@
 {
   "entries": {
-    "agent-claude": "sha256:95780e7d805114d4e286022599ec53f771bb1adff9e51e884079797a875dd1f2",
-    "agent-claude-broker": "sha256:59103ddbedd85f3b4227283a56a17d8eb88069a49ea5cc8f059e9b291a5e6bd2",
-    "agent-claude-proxy": "sha256:8ce45bc69a39760159ec5bb8857b05455c98f385f9b3dcea747a6e38fb5ebb20",
-    "agent-claude-shared": "sha256:b75835fb0350d8070f9d8d137ce90c8f4178a477cfe0dbf7f089a08229d178f9",
-    "agent-codex": "sha256:2083091151853dbec774175a555fbd74101fe8ddee65b5b40380712a544709dc",
-    "agent-codex-broker": "sha256:c03eaae8291202cd013093c9cc750f70c882351673d03323b7f1f2f528425a92",
-    "agent-codex-shared": "sha256:b2a2a2b674481c2bb888409feece3dd55510765e7aa81ff357cd0e778fefdd72",
-    "browser": "sha256:3014528606e20bb87d38ef9a662b58a726f3405f153da77491ea7c61c004652e",
-    "git": "sha256:01811d811f2c7f55a09e83136e2aabe82cd749e7082aa0083a97b9acb8c90e6e",
-    "hpc-launcher": "sha256:4aaebcc3e1b1681a5cf120f8eb5b1d29e0d01a65ffc8c34d2766e3fb3621ff93",
-    "hpc-modules": "sha256:d45bd7489515e87812624cb4d6a0ab3e94c844758c0c645302dcd3b4e2fc9336",
-    "nudge": "sha256:906098f17704fc5b61266af146ee458caf4287c9e8e3e8b3f9dabc23218fc3bd",
+    "agent-claude": "sha256:7540f5fe8c58ee1ad1e4dc610873679f1263cb6c46b77495313d35e5f9520158",
+    "agent-claude-broker": "sha256:47cface1ea813f571d0e27c090d43412de4560be41c4781f8b4da3157cdc3af6",
+    "agent-claude-proxy": "sha256:2256fa8c8226e98da61a407c488ce2e329d0381d910b9d641c955bc182595eaf",
+    "agent-claude-shared": "sha256:33b5b4f15c452ff1887c3c3c7ecaecc66f7c43b0658916e8b9030e8bb3979fa4",
+    "agent-codex": "sha256:1ee4e8d28a21c3dd2eb56b0b337401c505deb672e7d11475bbea46e76eefc8ef",
+    "agent-codex-broker": "sha256:c3609a2be08271b49622ba0f1346edbdeccac385343cb0f823fa07bec6c8c839",
+    "agent-codex-shared": "sha256:c05b7b9ee37f428a266dc02fd0d6c6b8efa4684ca4d87ba7d97e3ed12bdfa699",
+    "browser": "sha256:9d89233566180247f50bb9c5c688f1f374387f2077ecb930e0fb51fc5eff0ca9",
+    "git": "sha256:efece73b1ed7f77ac855d061faa179d07ac755b049b59996d384d0ef816390c1",
+    "hpc-launcher": "sha256:49211af017b2587a3272713e797a3e6a3d05b806d9985694af5c3449afe888a3",
+    "hpc-modules": "sha256:0ff6b4d2171e7cfcb1f0f40d29c42cc0e75a96136d85fe8f78d398ce95296e17",
+    "nudge": "sha256:e42f7a1db843c32b65e1204cfc45e17ed4db852877f2bd8f29ce963e27ccce03",
     "web-ports": "sha256:f9eda4de5244dab9567dd9b962d1b116590b1d3fc5fc3e442d899565a37d84f5",
-    "wolfram-sidecar": "sha256:3ce9f33b8da594194688b17c44b7955d6fa58ae214347a3528606684d7df91f7"
+    "wolfram-sidecar": "sha256:ba3e5372f0f5ee121810c9cba4429e72277bd37d225d0dfffb0ecd3698b66ea3"
   },
   "version": "trusted-plugins-v1"
 }

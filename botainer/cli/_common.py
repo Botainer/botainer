@@ -17,53 +17,200 @@ from typing import NoReturn
 
 import click
 
-from botainer.core.refusal import Refused, RefusalCategory
 from botainer.state import session_record
+
+
+def _outer_has_ever_run_a_session(outer: Path) -> bool | None:
+    """Has a session ever LAUNCHED for the project at `outer`? None = cannot tell.
+
+    This is the ONE fact that decides whether a nested inner project could have
+    been agent-authored: an agent can only plant a `.botainer/` in a tree that
+    was bound as its workspace, and that only happens when a session runs.
+
+    A SESSION DIRECTORY IS NOT A SESSION. Measured on a fresh install: `init`
+    leaves `sessions/` empty, and `botainer inspect` — which launches nothing —
+    creates a directory there with a `spec.json` whose `started_at` is null. So
+    the discriminator is a RECORD WITH A START TIME, not a directory entry. A
+    refuting review caught the directory version asserting that an agent had
+    held the tree read-write after nothing but an `inspect`.
+
+    THREE WAYS TO ANSWER "CANNOT TELL", and each one is a case where a `False`
+    would be a lie:
+      * the state root is not there at all — `ensure_user_state_dir(
+        create_if_missing=False)` still hands back paths for a root that does
+        not exist;
+      * the root is there but holds NO state for this project — the project may
+        well have run under a DIFFERENT `MY_BOTAINER`, which this root cannot
+        see, and hand-deleting a state directory is currently the only way to
+        remove a project at all, so the documented remedy manufactures exactly
+        this state;
+      * a record exists but cannot be read, and none of the readable ones
+        started — an unreadable record is not an absent launch.
+    """
+    try:
+        import json
+
+        from botainer.state import dir as state_dir
+        from botainer.state import session_record
+
+        uuid = (outer / ".botainer" / "project-id").read_text(
+            encoding="utf-8").strip()
+        if not uuid:
+            return None
+        paths = state_dir.ensure_user_state_dir(create_if_missing=False)
+        # ONE CHECK COVERS BOTH "no state root" and "no state for this project":
+        # if the root is absent then this path is absent too. An explicit
+        # root-exists check sat here until a mutation showed it could be deleted
+        # with no test noticing — which is the demonstration this project
+        # requires before removing a redundant guard, rather than a reason to
+        # add a test for a branch that cannot be distinguished.
+        project_state = paths.state_dir / uuid
+        if not project_state.is_dir():
+            return None
+        sessions = project_state / "sessions"
+        if not sessions.is_dir():
+            return False
+        unreadable = False
+        for entry in sessions.iterdir():
+            record = entry / session_record.RECORD_FILENAME
+            try:
+                data = json.loads(record.read_text(encoding="utf-8"))
+            except FileNotFoundError:
+                continue                      # composed, never recorded
+            except Exception:
+                unreadable = True             # do NOT let this read as "never"
+                continue
+            if data.get("started_at"):
+                return True
+        return None if unreadable else False
+    except Exception:
+        return None
+
+
+#: Roots already warned about in this process. `hpc submit` resolves the project
+#: THREE times, so without this a nested project printed the same four lines
+#: three times over. A set beats a `warn=False` parameter: a parameter is an
+#: off-switch for the only control left here, and a caller who wants quiet is
+#: indistinguishable from a caller who wants the hazard hidden.
+_WARNED_NESTED: set[Path] = set()
+
+
+def _warn_nested_project(inner: Path, outers: list[Path]) -> None:
+    """Say what is true about this shape, name every root, and point.
+
+    Not a refusal, and not a safety verdict either — per the short-surface
+    rule, this states FACTS and POINTS. "No session has run" is a measurement;
+    it is deliberately NOT phrased as "so this is safe", because a session is
+    only the route this code can see.
+
+    EVERY ENCLOSING PROJECT IS CONSULTED, not just the nearest. A refuting
+    review built `work/foo/bar` where `work` had run a session and `work/foo`
+    had not, and the nearest-only version printed "No session has ever run" —
+    a false all-clear, produced by the cheapest action the threat model already
+    grants the agent (one `mkdir`), about a tree that HAD been bound. The
+    precedence is therefore worst-known-wins: HAS RUN beats CANNOT TELL beats
+    NEVER RAN, and the root named is the outermost one in that state.
+    """
+    if inner in _WARNED_NESTED:
+        return
+    _WARNED_NESTED.add(inner)
+
+    measured = [(o, _outer_has_ever_run_a_session(o)) for o in outers]
+    ran = [o for o, v in measured if v is True]
+    unknown = [o for o, v in measured if v is None]
+    # NO INDEX. Picking one root out of several is a choice, and the first
+    # version picked the nearest — which a refuting review defeated with one
+    # `mkdir`. Naming every root in the reported state removes the choice
+    # instead of getting it right: there is no `[0]` left to be wrong.
+    if ran:
+        subjects, state = ran, True
+    elif unknown:
+        subjects, state = unknown, None
+    else:
+        subjects, state = outers, False
+    named = ", ".join(str(o) for o in subjects)
+
+    click.secho(
+        f"botainer: NESTED PROJECT. Using {inner}, which is inside "
+        + (f"another botainer project at {outers[0]}."
+           if len(outers) == 1 else
+           f"{len(outers)} other botainer projects: "
+           + ", ".join(str(o) for o in outers) + "."),
+        fg="yellow", err=True)
+    if state is True:
+        click.secho(
+            f"  A session HAS run for {named}, so an agent has had that whole "
+            f"tree bound read-write as its workspace — and an agent can create "
+            f"a `.botainer/` anywhere under it. A project's config controls "
+            f"plugins, mounts, network and agent permissions, so check that "
+            f"{inner}/.botainer/config.yaml is the one you wrote.",
+            fg="yellow", err=True)
+    elif state is False:
+        click.secho(
+            f"  No session has ever run for {named}, so nothing has had this "
+            f"tree bound as a workspace by that route.",
+            fg="yellow", err=True)
+    else:
+        click.secho(
+            f"  Could not tell whether a session has run for {named} — so "
+            f"this is NOT a statement that none has.",
+            fg="yellow", err=True)
+    click.secho(
+        f"  If an enclosing project was a mistake — "
+        + ", ".join(str(o) for o in outers)
+        + " — stop its sessions, then remove that project's `.botainer/` (see "
+          "`botainer where` for the state it also holds). Background: "
+          "docs/CAPABILITY-SURFACE.md.",
+        fg="yellow", err=True)
 
 
 def find_project_root(start: Path | None = None) -> Path | None:
     """Walk up from `start` (default cwd) looking for .botainer/project-id.
 
-    Returns the project root path or None if not in a botainer project.
+    Returns the NEAREST project root, or None if not in a botainer project.
+
+    Project discovery returns the nearest project and warns about enclosing
+    projects. Refusing during discovery would strand commands that have no
+    explicit project-path option. The warning must still explain the risk of
+    agent-writable nested project configuration.
+
+    The hazard this guard was written for (threat-model audit, BS-5) is real and
+    unchanged: `/workspace` is rw, and the null-bind mask that makes the project
+    config trusted input covers exactly ONE path (`_MASK_REQUIRED_UNDER_RW` =
+    {"/workspace": ("/workspace/.botainer",)}). Nothing masks
+    `/workspace/anysubdir/.botainer/`, so a caged agent can write a project-id +
+    config.yaml there, and a user who later runs a botainer command from that
+    subdirectory ON THE HOST would get an AGENT-AUTHORED config driving
+    plugins_enabled, mounts.extra, network.mode, agent_permissions and image.
+
+    What was wrong was treating two shapes as one. The commands that reach here
+    resolve a project by WALKING UP and take no project path of their own, so a
+    refusal left a user with a stray enclosing project no way to work at all —
+    and the old message's remedy, "run the command with an explicit project
+    path", named something those commands do not have. (Nine `botainer hpc`
+    subcommands DO take `--project`; they pass a path directly and never reach
+    this function, so they were never affected either way. An earlier version of
+    this comment said no command took one, which was false.)
+
+    So: return the nearest, which is what a user standing in their own project
+    means, and warn — consulting EVERY enclosing project, because the nearest
+    one alone can be an agent's own `mkdir`.
     """
     p = Path(start or Path.cwd()).resolve()
     found: Path | None = None
+    outers: list[Path] = []
     while True:
         if (p / ".botainer" / "project-id").exists():
             if found is None:
                 found = p                      # nearest — the normal answer
             else:
-                # SECURITY (threat-model audit, BS-5): a botainer
-                # project NESTED inside another botainer project is the exact
-                # shape a caged agent can manufacture. `/workspace` is rw, and
-                # the null-bind mask that makes the project config trusted input
-                # covers exactly ONE path (`_MASK_REQUIRED_UNDER_RW` =
-                # {"/workspace": ("/workspace/.botainer",)}). Nothing masks
-                # `/workspace/anysubdir/.botainer/`, so the agent can write a
-                # project-id + config.yaml there; a user who later runs any
-                # botainer command from that subdirectory ON THE HOST would get
-                # an AGENT-AUTHORED config driving plugins_enabled, mounts.extra,
-                # network.mode, agent_permissions and image.
-                #
-                # The mask is structural over a domain strictly smaller than its
-                # consumer's — so close the gap on the consumer side: refuse the
-                # ambiguous shape rather than silently preferring the inner one.
-                # Legitimate nesting is rare; pass an explicit project path.
-                raise Refused(
-                    RefusalCategory.IDENTITY_AMBIGUOUS,
-                    f"refusing to use the botainer project at {found} because it "
-                    f"is NESTED inside another botainer project at {p}.\n"
-                    f"  A caged agent has read-write access to its workspace and "
-                    f"can create a `.botainer/` directory there, so a nested "
-                    f"project may be agent-authored — and its config controls "
-                    f"plugins, mounts, network and permissions.\n"
-                    f"  If {found} is genuinely yours, run the command from that "
-                    f"directory with an explicit project path, or remove the "
-                    f"outer/inner `.botainer/` you did not intend.",
-                )
+                outers.append(p)
         if p.parent == p:
-            return found
+            break
         p = p.parent
+    if found is not None and outers:
+        _warn_nested_project(found, outers)
+    return found
 
 
 def refuse(
@@ -148,7 +295,8 @@ def apptainer_missing_advice(*, build_cmd: str = "") -> str:
     )
 
 
-def confirm_no_other_shared_session(project_root, *, as_json: bool = False,
+def confirm_no_other_shared_session(project_root, *, agent_family: str,
+                                    as_json: bool = False,
                                     assume_yes: bool = False) -> None:
     """Stop before a second concurrent shared-auth session kills the first.
 
@@ -181,16 +329,19 @@ def confirm_no_other_shared_session(project_root, *, as_json: bool = False,
     try:
         uid = _identity.read_project_id(project_root) or ""
         paths = _sd.ensure_user_state_dir(create_if_missing=True)
-        holders = _ce.live_shared_holders(paths, exclude_uuid=uid)
+        holders = _ce.live_shared_holders(paths, exclude_uuid=uid,
+                                          agent_family=agent_family)
     except Exception:                                           # noqa: BLE001
         return
     if not holders:
         return
 
     lines = [
-        "⛔ Another session is already using the shared credential.",
+        f"⛔ Another {agent_family} session is already using the shared "
+        f"{agent_family} credential.",
         "",
-        "   Shared mode holds ONE login. Starting here will log that session",
+        "   Shared mode holds ONE login PER AGENT. Starting here will log that",
+        "   session",
         "   out — refreshing revokes the other token, and it will fail with",
         '   an "expired" error that looks like a server problem.',
         "",

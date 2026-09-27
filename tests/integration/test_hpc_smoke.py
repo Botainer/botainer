@@ -340,7 +340,7 @@ def test_resolve_build_runtime_picks_apptainer_when_docker_absent(
 ) -> None:
     """Auto-runtime must pick apptainer on a host where docker isn't
     installed but apptainer is (HPC login nodes). Without this, every
-    `bot1 image build` on Grace would refuse."""
+    `botainer image build` on such a host would refuse."""
     import botainer.cli.image as image_mod
 
     def fake_which(name: str):

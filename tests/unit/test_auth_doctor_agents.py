@@ -1,14 +1,7 @@
 """`auth doctor --agent codex` must not say "nothing is logged in" when it is.
 
-Reported by the user with two real codex credentials on disk:
-
-    $ bot1 auth doctor --agent codex
-    No codex credentials found anywhere under this root.
-      Nothing is logged in. `botainer auth login` to start.
-
-A confident false negative, in the one command whose own docstring says it
-exists to "report the OBSERVED state instead of another theory". Two bugs
-stacked:
+Credential discovery must select the filename, token schema and directory
+for the requested family. Two hardcoded assumptions caused false negatives:
 
   * the credential FILENAME and the OAuth block key were hardcoded to Claude's
     (`.credentials.json` / `claudeAiOauth`); codex uses auth.json with a
@@ -17,9 +10,8 @@ stacked:
     `--agent codex` could not match either — both spellings failed, for
     different reasons.
 
-`auth status`, in the SAME command group and on the same disk, found both files
-— it resolves the filename per family. That was the model to copy, and copying
-it is what this fixes.
+`auth status` resolves the filename per family; `auth doctor` must apply
+the same family selection.
 """
 from __future__ import annotations
 
@@ -91,11 +83,28 @@ def test_the_settled_rotation_question_is_not_reopened(tmp_path) -> None:
     distribution does not contain. It WAS settled  (rotation AND
     invalidation, HTTP 400). Asking the user to measure a measured thing trains
     them to ignore the command's guidance."""
-    root = tmp_path / "r"
+    # A legitimate state path can contain this name (including on macOS).
+    root = tmp_path / "private" / "state-root"
     shared = root / "shared-auth" / "agent-claude"
     shared.mkdir(parents=True)
     (shared / ".credentials.json").write_text(json.dumps(_CLAUDE))
+    project = (root / "state" / str(uuid.uuid4()) / "data" / "agent-claude"
+               / "profiles" / "default")
+    project.mkdir(parents=True)
+    divergent = {"claudeAiOauth": {
+        **_CLAUDE["claudeAiOauth"], "refreshToken": "s" * 64,
+    }}
+    (project / ".credentials.json").write_text(json.dumps(divergent))
+
     out = _run(root, "auth", "doctor")
-    assert "private/" not in out.stdout, (
+    assert out.returncode == 0, out.stderr
+    assert "Credential holders (2)" in out.stdout
+    assert "2 DIFFERENT refresh tokens" in out.stdout
+    assert "Rotation itself is settled" in out.stdout
+    # Ignore only this fixture root, not arbitrary paths or diagnostic text.
+    guidance = out.stdout
+    for spelling in sorted({str(root), str(root.resolve())}, key=len, reverse=True):
+        guidance = guidance.replace(spelling, "<state-root>")
+    assert "private/" not in guidance, (
         "points at a path the distribution excludes")
-    assert "R1 experiment" not in out.stdout
+    assert "R1 experiment" not in guidance

@@ -1,31 +1,12 @@
-"""Can concurrent sessions share one login? A model, before any code changes.
+"""Model alternative refresh-token semantics before integrating a design.
 
-This file proves NOTHING about Anthropic's servers. It is a model of the OAuth
-semantics we have measured plus the ones we have not, run against three
-candidate designs, so that we can see which designs survive concurrency and —
-the useful part — WHICH UNMEASURED FACT each design depends on.
+These tests do not establish provider behavior. A changed refresh token and an
+invalidated old token are different outcomes. A server can issue a new token
+while leaving the old one usable, allowing recovery after an interrupted refresh.
 
-WHY MODEL IT AT ALL, instead of building and finding out: the user asked for
-tests that show whether an idea works "without breaking our entire project".
-Wiring a host-side refresher into the launch path to discover it cannot work
-would be an expensive way to learn something a 200-line model answers in
-milliseconds. It also names the one experiment worth running against the real
-server, which is otherwise a guess.
-
-WHAT WE HAVE MEASURED (`botainer auth rotation-test` on a Mac):
-    a refresh returns a NEW refresh token.        before 1e9a70d9cfcb
-                                                  after  5910087eb362
-
-WHAT WE HAVE NOT MEASURED, and it is decisive:
-    does the OLD refresh token STOP WORKING?
-
-Rotation and invalidation are different claims. A server may hand out a new
-refresh token while leaving the old one usable — plenty do, precisely so that a
-client that crashes mid-refresh is not locked out. If old tokens stay valid,
-multi-holder shared mode is FINE and there is no problem to solve. Everything
-below is written so that this single unknown is the axis, rather than being
-quietly assumed one way — which is what I did the first time, in the wrong
-direction.
+Each test states whether older tokens remain valid. Comparing the same designs
+under both assumptions exposes their concurrency requirements without touching
+live credentials.
 """
 from __future__ import annotations
 
@@ -35,11 +16,10 @@ import pytest
 
 
 class FakeAuthServer:
-    """Minimal OAuth refresh semantics, parameterised on the open question.
+    """Minimal OAuth server model with explicit old-token invalidation.
 
-    `invalidate_old` is the unmeasured behaviour. Every test states which value
-    it assumes rather than inheriting a default, because assuming this is the
-    mistake that produced two wrong conclusions already.
+    Every test chooses the behavior rather than inheriting an assumption about
+    a real provider.
     """
 
     def __init__(self, *, invalidate_old: bool) -> None:
